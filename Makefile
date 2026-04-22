@@ -119,6 +119,23 @@ go-build: ## Build all Go binaries into ./bin
 	@mkdir -p bin
 	@$(GO) build -o bin/ ./...
 
+.PHONY: keep-build
+keep-build: ## Build the Keep service binary into ./bin/keep
+	@mkdir -p bin
+	@$(GO) build -trimpath -o bin/keep ./core/cmd/keep
+
+# Keep service runtime env (see core/internal/keep/config). KEEP_DATABASE_URL
+# is required; other values fall back to documented defaults. Passed via
+# per-target `export` so user-supplied strings reach the shell as env
+# literals, never as Make variable expansions (LESSON M2.6).
+.PHONY: keep-run
+keep-run: export KEEP_DATABASE_URL := $(KEEP_DATABASE_URL)
+keep-run: export KEEP_HTTP_ADDR := $(KEEP_HTTP_ADDR)
+keep-run: export KEEP_SHUTDOWN_TIMEOUT := $(KEEP_SHUTDOWN_TIMEOUT)
+keep-run: keep-build ## Run the Keep service locally (requires KEEP_DATABASE_URL)
+	@: "$${KEEP_DATABASE_URL:?ERROR: KEEP_DATABASE_URL required (e.g. postgres://user:pass@localhost:5432/db?sslmode=disable)}"
+	@./bin/keep
+
 .PHONY: govulncheck
 govulncheck: ## Scan Go dependencies for known vulnerabilities
 	@$(GOVULNCHECK) ./...
