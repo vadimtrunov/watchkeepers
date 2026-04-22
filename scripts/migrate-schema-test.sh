@@ -266,12 +266,18 @@ echo ">> migrate-schema-test: (e) knowledge_chunk HNSW plan"
 "${PSQL[@]}" >/dev/null <<'SQL'
 BEGIN;
 
+-- `ORDER BY dim` pins a deterministic component order within each vector so
+-- the seed is reproducible if we ever want to anchor a test on a specific
+-- row/plan. `(random() + 0.001)::text` keeps every component strictly > 0;
+-- a pure-zero component combined with a zero query vector would leave cosine
+-- distance at 0/0 undefined on some planner paths (vector extension returns
+-- NaN, which the HNSW operator then skips).
 INSERT INTO watchkeeper.knowledge_chunk (scope, content, embedding)
 SELECT
   'org',
   'seed row ' || gs,
   (
-    '[' || string_agg(random()::text, ',') || ']'
+    '[' || string_agg((random() + 0.001)::text, ',' ORDER BY dim) || ']'
   )::vector
 FROM generate_series(1, 100) AS gs,
   LATERAL generate_series(1, 1536) AS dim
