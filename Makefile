@@ -217,7 +217,8 @@ migrate-status: ## Show applied / pending migrations
 .PHONY: migrate-create
 migrate-create: ## Create a new SQL migration: make migrate-create NAME=<slug>
 	@test -n "$(NAME)" || { echo "ERROR: NAME=<slug> required (e.g. make migrate-create NAME=add_users_table)" >&2; exit 2; }
-	@$(GOOSE) -dir $(MIGRATIONS_DIR) create $(NAME) sql
+	@printf '%s' '$(NAME)' | grep -Eq '^[a-z0-9_]+$$' || { echo "ERROR: NAME must match [a-z0-9_]+ (got '$(NAME)')" >&2; exit 2; }
+	@$(GOOSE) -dir $(MIGRATIONS_DIR) create "$(NAME)" sql
 
 .PHONY: migrate-round-trip
 migrate-round-trip: ## Up -> down-to-0 -> up; assert schema dump is identical (AC6)
