@@ -449,4 +449,23 @@ if ! printf '%s' "${outbox_indexdef}" | grep -q 'WHERE (published_at IS NULL)'; 
 fi
 echo "OK: outbox insert accepted and partial-index predicate present"
 
+echo ">> migrate-schema-test: (i-plan) outbox partial-index planner use (soft)"
+# Soft planner-path check: matches the discipline of the HNSW (e) assertion
+# by confirming the partial index is planner-usable. Disabled seqscan hardens
+# against planner cost flips on a near-empty table. Documented as nice-to-have
+# per the TASK test plan §Security — a WARN here is not a failure.
+outbox_plan=$("${PSQL[@]}" -tA <<'SQL'
+BEGIN;
+SET LOCAL enable_seqscan = off;
+EXPLAIN (FORMAT TEXT)
+SELECT id FROM watchkeeper.outbox WHERE published_at IS NULL LIMIT 10;
+ROLLBACK;
+SQL
+)
+if printf '%s' "${outbox_plan}" | grep -q 'outbox_unpublished_idx'; then
+  echo "OK: outbox partial index used by planner (soft check)"
+else
+  echo "WARN: outbox_unpublished_idx not chosen by planner on empty/near-empty table (soft; see TASK test plan §Security)"
+fi
+
 echo "ALL schema assertions passed"
