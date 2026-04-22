@@ -23,6 +23,7 @@ each one directly.
 | yamllint      | v1.35+   | YAML linter                  |
 | shellcheck    | v0.10+   | Shell script linter          |
 | sqlfluff      | v3.x     | SQL linter                   |
+| goose         | v3.27.0  | Postgres migration tool      |
 
 ### macOS quickstart
 
@@ -59,11 +60,71 @@ make ci
 - `go-ci` — `go vet`, `golangci-lint`, `go test -race -cover`, `govulncheck`
 - `ts-ci` — `prettier --check`, `tsc --noEmit`, `eslint`, `vitest --coverage`, `osv-scanner`
 - `sql-ci` — `sqlfluff lint`
+- `migrate-ci` — `goose` up / down / round-trip against Postgres 16 (see
+  **Migrations** below). Not in the `make ci` composite because it needs a
+  reachable database; run it manually with `WATCHKEEPER_DB_URL` set.
 - `docker-ci` — `hadolint`
 - `security-ci` — `gitleaks detect`
 - `meta-ci` — `markdownlint`, `yamllint`, `commitlint`
 
 `make help` lists every target.
+
+## Migrations
+
+Database migrations are driven by [`goose`](https://github.com/pressly/goose),
+pinned via `GOOSE_VERSION` in the `Makefile` (currently `v3.27.0`). The tool
+is invoked through `go run github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)`,
+so no global install is required — the pinned version is the source of truth.
+
+Targets that connect to Postgres (`migrate-up`, `migrate-down`,
+`migrate-status`, and `migrate-round-trip`) read the connection string from a
+single env var, `WATCHKEEPER_DB_URL`, and error out with a helpful message when
+it is unset. `migrate-create` only scaffolds a file and does not require a
+database connection. Never hard-code credentials in the repo; set the URL from
+your shell or a local `.envrc` (git-ignored):
+
+```sh
+export WATCHKEEPER_DB_URL='postgres://watchkeeper:<password>@localhost:5432/watchkeeper?sslmode=disable'
+```
+
+### Make surface
+
+| Target                            | Purpose                                                   |
+| --------------------------------- | --------------------------------------------------------- |
+| `make migrate-up`                 | Apply all pending migrations. Idempotent (no-op when up). |
+| `make migrate-down`               | Roll back the most recent applied migration.              |
+| `make migrate-status`             | Show applied / pending migrations.                        |
+| `make migrate-create NAME=<slug>` | Scaffold a new timestamped SQL migration file.            |
+| `make migrate-round-trip`         | Up -> down-to-0 -> up; assert schema dumps match.         |
+
+### Authoring a migration
+
+1. `make migrate-create NAME=add_keepers_table` — generates
+   `deploy/migrations/<timestamp>_add_keepers_table.sql` with `-- +goose Up`
+   and `-- +goose Down` sections scaffolded.
+2. Fill in both sections. Prefer narrow, reversible changes; irreversible
+   steps (e.g. data backfills) must be called out in the PR description.
+3. Run `sqlfluff lint deploy/migrations` — or `make sql-lint` — locally.
+4. Apply against a disposable Postgres 16, then run
+   `make migrate-round-trip` to exercise both `Up` and `Down`:
+
+   ```sh
+   docker run --rm -d \
+     -e POSTGRES_PASSWORD=postgres \
+     -p 5432:5432 postgres:16-alpine
+   export WATCHKEEPER_DB_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable'
+   make migrate-round-trip
+   ```
+
+5. Commit the migration alongside the code that requires it.
+
+### CI gate
+
+The `Migrate CI` job in `.github/workflows/ci.yml` stands up
+`postgres:16-alpine` as a service container, sets `WATCHKEEPER_DB_URL` to a
+throwaway value, and runs `scripts/test-migrate.sh` (happy path, idempotency,
+round-trip, broken-SQL negative case). This job must be added to the
+required-checks list (see **Branch protection** below).
 
 ## Pre-commit hooks
 
@@ -90,6 +151,7 @@ required):
   - `Go CI`
   - `TypeScript CI`
   - `SQL CI`
+  - `Migrate CI`
   - `Docker CI`
   - `Security CI`
   - `Meta CI`

@@ -1,4 +1,4 @@
-SHELL := /usr/bin/env bash
+SHELL := /bin/bash
 .DEFAULT_GOAL := help
 .ONESHELL:
 .SHELLFLAGS := -eu -o pipefail -c
@@ -20,6 +20,13 @@ YAMLLINT          ?= yamllint
 SHELLCHECK        ?= shellcheck
 SQLFLUFF          ?= sqlfluff
 COMMITLINT        ?= pnpm exec commitlint
+
+# Pinned migration tool — see docs/DEVELOPING.md "Migrations".
+# Invoked via `go run ...@$(GOOSE_VERSION)` so no global install is required
+# and the version stays reproducible without polluting $GOBIN.
+GOOSE_VERSION     ?= v3.27.0
+GOOSE             ?= $(GO) run github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)
+MIGRATIONS_DIR    ?= deploy/migrations
 
 GO_COVERAGE_MIN   ?= 60
 
@@ -178,6 +185,46 @@ yaml-lint: ## Lint YAML
 .PHONY: shell-lint
 shell-lint: ## Lint shell scripts
 	@if compgen -G "scripts/*.sh" >/dev/null; then $(SHELLCHECK) scripts/*.sh; fi
+
+# ---------------------------------------------------------------------------
+# Database migrations (goose; see docs/DEVELOPING.md "Migrations")
+#
+# Targets require WATCHKEEPER_DB_URL to point at a reachable Postgres 16:
+#   export WATCHKEEPER_DB_URL='postgres://user:pass@host:5432/db?sslmode=disable'
+# The connection string is read from the environment only — never hard-coded
+# in the repo or CI logs (AC8). CI uses a throwaway service-container value.
+# ---------------------------------------------------------------------------
+
+define require_db_url
+@test -n "$$WATCHKEEPER_DB_URL" || { echo "ERROR: WATCHKEEPER_DB_URL not set (e.g. postgres://user:pass@host:5432/db?sslmode=disable)" >&2; exit 2; }
+endef
+
+.PHONY: migrate-up
+migrate-up: ## Apply all pending migrations (idempotent: no-op when up to date)
+	$(require_db_url)
+	@$(GOOSE) -dir $(MIGRATIONS_DIR) postgres "$$WATCHKEEPER_DB_URL" up
+
+.PHONY: migrate-down
+migrate-down: ## Roll back the most recent migration
+	$(require_db_url)
+	@$(GOOSE) -dir $(MIGRATIONS_DIR) postgres "$$WATCHKEEPER_DB_URL" down
+
+.PHONY: migrate-status
+migrate-status: ## Show applied / pending migrations
+	$(require_db_url)
+	@$(GOOSE) -dir $(MIGRATIONS_DIR) postgres "$$WATCHKEEPER_DB_URL" status
+
+.PHONY: migrate-create
+migrate-create: export MIGRATION_NAME := $(NAME)
+migrate-create: ## Create a new SQL migration: make migrate-create NAME=<slug>
+	@: "$${MIGRATION_NAME:?ERROR: NAME=<slug> required (e.g. NAME=add_users_table)}"
+	@printf '%s' "$$MIGRATION_NAME" | grep -Eq '^[a-z0-9_]+$$' || { echo "ERROR: NAME must match ^[a-z0-9_]+\$$" >&2; exit 2; }
+	@$(GOOSE) -dir $(MIGRATIONS_DIR) create "$$MIGRATION_NAME" sql
+
+.PHONY: migrate-round-trip
+migrate-round-trip: ## Up -> down-to-0 -> up; assert schema dump is identical (AC6)
+	$(require_db_url)
+	@scripts/migrate-round-trip.sh
 
 # ---------------------------------------------------------------------------
 # Security / commit quality / dependencies
