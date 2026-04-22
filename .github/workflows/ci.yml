@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.26.3"
+  GO_VERSION: "1.26.2"
   NODE_VERSION: "24.15.0"
   PNPM_VERSION: "10.33.0"
 
@@ -101,13 +101,17 @@ jobs:
       - name: Audit (high+)
         run: pnpm audit --audit-level=high
 
-      - name: OSV scanner
-        uses: google/osv-scanner-action/osv-scanner-action@91bf6fcfe6d1e07aefee86a0ea78d79df96bfcff # v2.2.4
-        with:
-          scan-args: |-
-            --recursive
-            --lockfile=pnpm-lock.yaml
-            ./
+      - name: Install osv-scanner
+        run: |
+          set -euo pipefail
+          version=2.2.4
+          curl -sSLf -o /tmp/osv-scanner "https://github.com/google/osv-scanner/releases/download/v${version}/osv-scanner_linux_amd64"
+          chmod +x /tmp/osv-scanner
+          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      - name: osv-scanner scan
+        run: osv-scanner scan --lockfile=pnpm-lock.yaml ./
 
   sql-ci:
     name: SQL CI
@@ -243,13 +247,19 @@ jobs:
 
       - name: Lint PR title (commitlint)
         if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          echo "${{ github.event.pull_request.title }}" \
-            | pnpm exec commitlint
+          printf '%s\n' "$PR_TITLE" | pnpm exec commitlint
 
-      - name: Lint commit messages (commitlint)
+      - name: Lint new commit messages (commitlint)
         if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          pnpm exec commitlint \
-            --from=${{ github.event.pull_request.base.sha }} \
-            --to=${{ github.event.pull_request.head.sha }}
+          set -euo pipefail
+          git fetch --no-tags --depth=50 origin "$BASE_REF"
+          base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          echo "Linting commits $base..$HEAD_SHA"
+          pnpm exec commitlint --from="$base" --to="$HEAD_SHA"

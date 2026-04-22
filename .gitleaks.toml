@@ -10,13 +10,12 @@ useDefault = true
 description = "Project-wide allowlist — paths and patterns that must never trigger a finding."
 paths = [
   '''(?i)\.gitleaks\.toml$''',
-  '''pnpm-lock\.yaml$''',
-  '''go\.sum$''',
 ]
 regexes = [
-  '''EXAMPLE[_-]?(API|ACCESS)[_-]?KEY''',
-  '''dummy[_-]?secret''',
-  '''test[_-]?token''',
+  # Explicit example tokens in docs. Keep narrow — no broad prefixes like "test"
+  # that could mask real leaks.
+  '''EXAMPLE[_-]?(API|ACCESS)[_-]?KEY[_-]?[A-Z0-9]{8,}''',
+  '''dummy[_-]?secret[_-]?[A-Za-z0-9_-]{6,}''',
 ]
 
 # Document-friendly override: release notes and ADRs can quote sample tokens
