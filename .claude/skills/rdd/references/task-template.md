@@ -63,13 +63,13 @@ Examples:
 - `in-progress` — created at Phase 2, active through Phase 6.
 - `blocked` — set by the orchestrator when a phase escalates and the operator
   chooses `continue` to investigate without moving on.
-- `cancelled` — set when the operator chooses `abort` on an escalation or
-  rejects at Gate 3.
 - `merged` — **transient**: set right before deletion at Phase 7 step 6.
   Because the file is then deleted, this status is observable only in the
   Progress log of the deleted file (which lives in git history of the branch
   if commits on the branch touched the file — typically they do not, since
   the file is gitignored).
+- `cancelled` — set when the operator chooses `abort` on an escalation or
+  rejects at Gate 3.
 
 For practical resume purposes, only `in-progress` and `blocked` matter.
 
