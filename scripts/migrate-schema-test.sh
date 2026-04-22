@@ -302,4 +302,90 @@ if ! printf '%s' "${plan_output}" | grep -q 'knowledge_chunk_embedding_hnsw_idx'
 fi
 echo "OK: HNSW index chosen for KNN plan (knowledge_chunk_embedding_hnsw_idx)"
 
+# ---------------------------------------------------------------------------
+# M2.1.d — RLS assertions
+#
+# The `(e)` block above left 100 `scope='org'` rows in `knowledge_chunk`. We
+# add two more rows under distinct `agent:<uuid>` scopes so the visibility
+# tests below have something to discriminate on. Each test opens its own psql
+# transaction because `SET LOCAL` is scoped to a transaction.
+# ---------------------------------------------------------------------------
+"${PSQL[@]}" >/dev/null <<'SQL'
+BEGIN;
+INSERT INTO watchkeeper.knowledge_chunk (scope, content, embedding) VALUES
+  (
+    'agent:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'agent-A row',
+    ('[' || repeat('0,', 1535) || '0]')::vector
+  ),
+  (
+    'agent:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    'agent-B row',
+    ('[' || repeat('0,', 1535) || '0]')::vector
+  );
+COMMIT;
+SQL
+
+echo ">> migrate-schema-test: (f) RLS cross-scope SELECT invisibility"
+rls_select_counts=$("${PSQL[@]}" -tA <<'SQL'
+BEGIN;
+SET ROLE wk_agent_role;
+SET LOCAL watchkeeper.scope = 'agent:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+SELECT
+  (SELECT count(*) FROM watchkeeper.knowledge_chunk) || ',' ||
+  (SELECT count(*) FROM watchkeeper.knowledge_chunk WHERE scope LIKE 'agent:bbbb%');
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+
+# Expect: visible = 100 'org' rows + 1 matching agent:aaaa row = 101; bbbb = 0.
+if [[ "${rls_select_counts}" != "101,0" ]]; then
+  fail "RLS cross-scope SELECT expected '101,0' (visible, bbbb-visible); got '${rls_select_counts}'"
+fi
+echo "OK: RLS hides out-of-scope rows (visible=101, bbbb-visible=0)"
+
+echo ">> migrate-schema-test: (g) RLS WITH CHECK on INSERT"
+rls_insert_output=$("${PSQL[@]}" <<'SQL' 2>&1 || true
+BEGIN;
+SET ROLE wk_agent_role;
+SET LOCAL watchkeeper.scope = 'agent:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+INSERT INTO watchkeeper.knowledge_chunk (scope, content, embedding)
+VALUES (
+  'agent:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+  'cross-scope leak attempt',
+  ('[' || repeat('0,', 1535) || '0]')::vector
+);
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+
+# Test accepts either the stable phrase `row-level security` or the SQLSTATE
+# `42501` (insufficient_privilege) — Postgres raises the former on its own
+# policy-violation path. A CHECK-constraint violation (23514) would also pass
+# since both the policy WITH CHECK and the column CHECK reject the row.
+if ! printf '%s' "${rls_insert_output}" | grep -Eq 'row-level security|42501|23514'; then
+  fail "expected RLS INSERT to be rejected with policy/privilege error; got: ${rls_insert_output}"
+fi
+echo "OK: RLS INSERT rejected by WITH CHECK"
+
+echo ">> migrate-schema-test: (h) RLS empty session setting"
+# No `SET LOCAL watchkeeper.scope` — current_setting(…, true) returns empty
+# string, so `scope = current_setting(…, true)` is false and only the
+# `scope = 'org'` branch of USING holds. Expect 100 rows visible.
+rls_empty_count=$("${PSQL[@]}" -tA <<'SQL'
+BEGIN;
+SET ROLE wk_agent_role;
+SELECT count(*) FROM watchkeeper.knowledge_chunk;
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+
+if [[ "${rls_empty_count}" != "100" ]]; then
+  fail "RLS empty-scope visibility expected 100 (org rows only); got '${rls_empty_count}'"
+fi
+echo "OK: RLS with unset scope sees only scope='org' rows (count=100)"
+
 echo "ALL schema assertions passed"
