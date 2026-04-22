@@ -6,3 +6,12 @@ bin/
 pnpm-lock.yaml
 .omc/
 .claude/
+
+# Pre-existing operator-authored docs — grandfathered.
+# Fix formatting and delete the entry to opt in.
+docs/ROADMAP-phase*.md
+docs/BACKLOG.md
+docs/watchkeeper-business-concept.md
+docs/watchkeeper-spawn-flow.md
+docs/superpowers/
+
