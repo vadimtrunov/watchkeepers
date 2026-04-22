@@ -18,6 +18,50 @@ successful `/rdd` run.
 
 ---
 
+## 2026-04-22 — M2.1.b: keepers_log table DDL + append-only trigger
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/6
+**Phases with incidents**: 6
+
+### What worked
+
+Phase 4 review converged on iteration 0 (3 nits, 0 blocker/important). Scope
+discipline held tight: executor produced exactly 2 files (migration + test
+extension), no feature creep. LESSONS.md from M2.1.a provided concrete patterns
+(SQLSTATE, UUID PKs) that the executor brief could cite, reducing discovery
+friction.
+
+### What wasted effort
+
+Phase 6 iteration 0: PR-title commitlint failure (same as M2.1.a). Title
+generated as `M2.1.b: keepers_log append-only table` lacked conventional-commits
+type. Fix required `gh pr edit --title "feat(migrations): add keepers_log
+append-only table (M2.1.b)"` and empty commit `07bb7d5` (ci: re-trigger checks)
+because the repo's `pull_request` workflow omits `edited` event type and `gh run
+rerun --failed` replays the cached payload.
+
+### Suggested skill changes
+
+- Update `references/agent-briefs/git-master.md` §pr mode: detect commitlint
+  enforcement (commitlint config present or conventional-commits history) and
+  derive PR title from branch's single commit subject or a type-prefixed form
+  (`feat(scope): <summary> (<roadmap-id>)`) instead of raw `<roadmap-id>:
+  <title>`.
+- Add Phase 5 pre-push sanity check: pipe candidate PR title through local
+  `commitlint` when config exists, surfacing failure before PR open.
+- Document in `references/bounded-loop.md` §"Signal source": `gh run rerun
+  --failed` replays cached event payload — for title/payload failures, use
+  empty-commit synchronize re-trigger instead.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 1
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: 01:15
+
+---
+
 ## 2026-04-22 — M2.6: Migration tool chosen and wired
 
 **PR**: https://github.com/vadimtrunov/watchkeepers/pull/4

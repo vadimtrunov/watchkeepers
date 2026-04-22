@@ -8,6 +8,49 @@ prior context. Read by humans whenever.
 
 ---
 
+## 2026-04-22 — M2.1.b: keepers_log table DDL + append-only trigger
+
+**PR**: [#6](https://github.com/vadimtrunov/watchkeepers/pull/6)
+**Merged**: 2026-04-22 21:15
+
+### Context
+
+Created the `keepers_log` audit table with append-only enforcement via PL/pgSQL
+triggers. This establishes the event-sourcing foundation for tracking all
+mutations to core entities (organization, watchkeeper, watch_order). Migration
+`003_keepers_log.sql` introduces the pattern for immutable audit logs that
+future tables will reuse.
+
+### Pattern
+
+**Append-only audit table via trigger-owned error messages**: PL/pgSQL function
+`keepers_log_reject_mutation()` raises a stable, locale-independent phrase
+(`keepers_log is append-only`). Two BEFORE-ROW triggers (one for UPDATE, one for
+DELETE) call this function, enforcing immutability per-row. Unlike grepping
+Postgres-translated error text (M2.1.a anti-pattern), we own the message,
+making tests locale-independent. Grep for the phrase in test assertions;
+SQLSTATE codes handle Postgres-native errors.
+
+**Partial index on optional correlation columns**: `CREATE INDEX ... ON
+(correlation_id) WHERE correlation_id IS NOT NULL` avoids bloating the index
+with nulls. Applied when a column starts nullable and fills over time — here,
+correlation IDs link mutations to external events but are initially sparse.
+
+### Anti-pattern
+
+TRUNCATE cleanup order comment incorrectly justified "keepers_log first because
+it has nullable FKs" — nullable FKs do not affect TRUNCATE ordering. Correct
+reason: reverse-dependency order (newest-leaf tables first). Future migrations
+should cite dependency order, not FK nullability.
+
+### References
+
+- Files: `deploy/migrations/003_keepers_log.sql`,
+  `scripts/migrate-schema-test.sh`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.1 → M2.1.b
+
+---
+
 ## 2026-04-22 — M2.6: Migration tool chosen and wired
 
 **PR**: [#4](https://github.com/vadimtrunov/watchkeepers/pull/4)
