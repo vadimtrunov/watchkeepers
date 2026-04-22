@@ -54,52 +54,20 @@ Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
 
 ## Hard rules
 
-1. NEVER write code, tests, or long-form documentation from the orchestrator
-   process. Always dispatch. Allowed exceptions: TASK progress log, ROADMAP
-   checkbox toggles.
-2. NEVER skip a gate. If the operator is unreachable, halt.
-3. NEVER merge without explicit operator confirmation at Gate 3.
-4. NEVER modify `SKILL.md` or anything under `references/` (including
-   `agent-briefs/`) from the orchestrator. `FEEDBACK.md` is appended ONLY
-   via the `writer` agent at Phase 7; the orchestrator never writes it
-   directly.
-5. NEVER resolve review comments on behalf of the reviewer. The `executor`
-   (fixer mode) may post a `fixed in <sha>` reply; the "Resolve" click stays
-   with a human.
-6. NEVER run when the active `gh` account is not the owner of `origin`. Stop
-   with the exact instructions in `references/preflight.md`.
-7. ALL files written to the repo are in English.
-8. `TASK-*.md` is gitignored and must never be committed to `main`.
-9. Every internal link inside this skill uses a path relative to the skill
-   root (`.claude/skills/rdd/`) — i.e. starts with `references/`. When
-   writing or editing any file under this skill, preserve that convention.
-10. NEVER end the orchestrator's turn immediately after an `Agent` tool
-    result. **The Agent's returned report is NOT your follow-up text** —
-    the Agent-tool content block is a tool result, not an orchestrator
-    message; the operator may not see it at all. Every `Agent` call MUST
-    be followed, in the same reply, by an orchestrator-authored text
-    block before the turn ends.
+1. NEVER write code, tests, or long-form documentation from the orchestrator.
+   Delegate via `Agent`. Exceptions: TASK progress log, ROADMAP checkbox
+   toggles.
+2. NEVER skip a gate, including Gate 3 (merge). If the operator is
+   unreachable, halt.
+3. All repo content is English.
+4. `TASK-*.md` is gitignored and must never be committed to `main`.
+5. After every `Agent` call, end the same reply with an orchestrator-authored
+   text block (verdict + next step). A Gate prompt counts. Never let the
+   Agent tool result itself be the last thing the operator sees.
 
-    **Minimum follow-up template** (two lines, non-negotiable):
-
-    > **Verdict**: `<agent outcome in ≤ 2 lines — pass/fail, key counts>`.
-    > **Next**: `<immediate next action — next phase, gate prompt, or clarifying question>`.
-
-    A full Gate prompt counts as the follow-up text. Re-posting or
-    quoting the agent's raw report without an orchestrator-authored
-    sentence does NOT count.
-
-    **Self-check before ending the turn** (run every time, no exceptions):
-    is the last content block of this reply an orchestrator-authored
-    text message (not a tool-use, not a tool-result)? If not, append
-    the two-line template above and only then end the turn.
-
-    Silent-exit after an agent result makes the orchestrator look
-    stalled to the operator even when it isn't; this rule exists to
-    make that failure mode impossible. Prior runs have logged
-    silent-exit incidents repeatedly (see `FEEDBACK.md`) — that
-    history is the reason this rule is prescriptive rather than
-    advisory.
+The skill does not self-modify `SKILL.md`, `references/`, or agent briefs;
+proposed changes route through `FEEDBACK.md` (appended at Phase 7 by the
+`writer` agent) and are promoted by the operator manually.
 
 ## Dispatching agents
 
