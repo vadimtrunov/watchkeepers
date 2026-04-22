@@ -153,7 +153,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [ ] **M2.3** Row-Level Security: namespace column `scope ∈ {org, user:<id>, agent:<id>}`; policies enforce read/write per session role.
 - [ ] **M2.4** Append-only invariant on `keepers_log` via trigger rejecting `UPDATE`/`DELETE`.
 - [ ] **M2.5** Outbox table + publisher worker scaffold.
-- [ ] **M2.6** Migration tool chosen and wired (goose / atlas / sqlc).
+- [x] **M2.6** Migration tool chosen and wired (goose / atlas / sqlc).
 - [ ] **M2.7** **Keep service binary** (Go) exposing HTTP/gRPC API: `search`, `store`, `subscribe`, `log_append`, `log_tail`, `get_manifest`, `put_manifest_version`. Auth via short-lived capability tokens issued by core.
 - [ ] **M2.8** Go client package `keepclient` used by core and by harness (no direct DB access from either).
 - [ ] **M2.9** Manifest schema fields added: `personality` (free-text) and `language` (ISO code).
