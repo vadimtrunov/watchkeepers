@@ -3,11 +3,11 @@
 -- Real schema lands in M2 (Keep service) per docs/ROADMAP-phase1.md.
 -- Keep holds business knowledge only; no infrastructure metadata.
 
-begin;
+BEGIN;
 
-create schema if not exists watchkeeper;
+CREATE SCHEMA IF NOT EXISTS watchkeeper;
 
-comment on schema watchkeeper is
-  'Watchkeeper Keep — business knowledge namespace. Schema owner is the keep service role.';
+COMMENT ON SCHEMA watchkeeper IS
+'Watchkeeper Keep — business knowledge namespace. Schema owner is the keep service role.';
 
-commit;
+COMMIT;
