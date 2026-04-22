@@ -89,13 +89,14 @@ export WATCHKEEPER_DB_URL='postgres://watchkeeper:<password>@localhost:5432/watc
 
 ### Make surface
 
-| Target                            | Purpose                                                   |
-| --------------------------------- | --------------------------------------------------------- |
-| `make migrate-up`                 | Apply all pending migrations. Idempotent (no-op when up). |
-| `make migrate-down`               | Roll back the most recent applied migration.              |
-| `make migrate-status`             | Show applied / pending migrations.                        |
-| `make migrate-create NAME=<slug>` | Scaffold a new timestamped SQL migration file.            |
-| `make migrate-round-trip`         | Up -> down-to-0 -> up; assert schema dumps match.         |
+| Target                            | Purpose                                                    |
+| --------------------------------- | ---------------------------------------------------------- |
+| `make migrate-up`                 | Apply all pending migrations. Idempotent (no-op when up).  |
+| `make migrate-down`               | Roll back the most recent applied migration.               |
+| `make migrate-status`             | Show applied / pending migrations.                         |
+| `make migrate-create NAME=<slug>` | Scaffold a new timestamped SQL migration file.             |
+| `make migrate-round-trip`         | Up -> down-to-0 -> up; assert schema dumps match.          |
+| `make migrate-test`               | Run schema smoke assertions against the migrated database. |
 
 ### Authoring a migration
 
@@ -123,8 +124,27 @@ export WATCHKEEPER_DB_URL='postgres://watchkeeper:<password>@localhost:5432/watc
 The `Migrate CI` job in `.github/workflows/ci.yml` stands up
 `postgres:16-alpine` as a service container, sets `WATCHKEEPER_DB_URL` to a
 throwaway value, and runs `scripts/test-migrate.sh` (happy path, idempotency,
-round-trip, broken-SQL negative case). This job must be added to the
-required-checks list (see **Branch protection** below).
+round-trip, broken-SQL negative case) followed by `make migrate-test` (schema
+smoke: happy-path insert chain, UNIQUE rejection, FK rejection). This job
+must be added to the required-checks list (see **Branch protection** below).
+
+### Schema overview
+
+After `002_core_business_tables.sql` the `watchkeeper` schema holds six core
+tables that model the Watchkeeper business domain. `organization` is the
+single-tenant customer container; `human` rows are members of an organization
+and fill "lead" roles relationally (there is no `role` column). A `manifest`
+is the role/identity definition for a Watchkeeper and owns one-or-more
+`manifest_version` rows — immutable snapshots carrying `system_prompt`,
+`tools`, `authority_matrix`, `knowledge_sources`, and the optional
+`personality` and `language`, uniquely keyed on `(manifest_id, version_no)`.
+A `watchkeeper` is the runtime agent row tied to a manifest, a lead human,
+and (once spawned) an active `manifest_version`; pre-approval state leaves
+`active_manifest_version_id` NULL and `status='pending'`. A `watch_order` is
+a task a lead issues to a watchkeeper with a `priority` and lifecycle
+`status`. Later milestones add `keepers_log`, `knowledge_chunk`, and
+`outbox` tables alongside the RLS `scope` column — none of those live here
+yet.
 
 ## Pre-commit hooks
 
