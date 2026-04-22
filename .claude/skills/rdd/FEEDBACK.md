@@ -34,8 +34,8 @@ identified the iteration-1 injection fix as incomplete and switched to the
 ### What wasted effort
 Three silent-turn-exits after `Agent` tool calls required operator nudge
 ("потерял?", "забило?", "подвисло?"). Not a skill process issue; a runtime-
-level one (skill dispatch missing commit 6924aee hard rule 10, which prevents
-this for future runs). commitlint `#<num>` footer-parser trap cost one
+level one (skill dispatch missing commit 6924aee's "Agent follow-up"
+hard rule, which prevents this for future runs). commitlint `#<num>` footer-parser trap cost one
 commit retry. CI timeout-minutes 5 on Migrate job was tight; apt install
 postgresql-client flaked once; rerun passed (not code).
 
@@ -46,10 +46,10 @@ postgresql-client flaked once; rerun passed (not code).
 - Expand `references/agent-briefs/code-reviewer.md` with "important vs nit"
   examples: flag "Make variable → shell context = injection risk" as blocker
   (iter-1 regex fix was incomplete); struct field ordering as nit.
-- Consider explicit rule in `references/pr-fix-loop.md`: CodeRabbit
-  `🔴 Critical` severity markers → classify as blocker regardless of review
-  state (currently defaults to nit because review state is COMMENTED not
-  CHANGES_REQUESTED).
+- Consider explicit rule in `references/bounded-loop.md` §Severity
+  (Phase 6 source column): CodeRabbit `🔴 Critical` severity markers →
+  classify as blocker regardless of review state (currently defaults to
+  nit because review state is COMMENTED not CHANGES_REQUESTED).
 
 ### Metrics
 - Review iterations: 2

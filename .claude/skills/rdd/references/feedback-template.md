@@ -29,7 +29,7 @@ not give it examples" is useful; "reviewer was too strict" is not>
 
 ### Suggested skill changes
 - <file-level suggestion: "tighten severity contract in
-  references/review-loop.md §'important' to exclude X">
+  references/bounded-loop.md §Severity to exclude X from 'important'">
 - <may be empty>
 
 ### Metrics

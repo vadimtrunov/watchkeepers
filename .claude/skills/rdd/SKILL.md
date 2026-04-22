@@ -20,6 +20,13 @@ Two narrow write exceptions: the orchestrator itself (a) appends short
 Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
 `docs/ROADMAP-*.md` after merge. Everything else goes through an agent.
 
+> **Turn-closure invariant** — every `Agent` tool result MUST be
+> followed, in the SAME reply, by at least one user-facing sentence
+> (agent verdict + next step). Silent turn-exit after an `Agent`
+> return is the #1 failure mode operators report (see `FEEDBACK.md`
+> 2026-04-22). Formal form: Hard rule 5. Structural reinforcement:
+> `## Dispatching agents` §Companion-todo.
+
 ## Invocation
 
 - `/rdd` — interactive: list available sub-items, operator picks one.
@@ -38,13 +45,13 @@ Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
    `references/task-template.md`. **GATE 2.**
 3. **Branch & implement** — dispatch the `executor` agent per
    `references/agent-briefs/executor.md` (TDD discipline).
-4. **Pre-PR review loop** — bounded loop per `references/review-loop.md`;
-   uses the `code-reviewer` agent per
+4. **Pre-PR review loop** — bounded loop per `references/bounded-loop.md`
+   §Phase 4; uses the `code-reviewer` agent per
    `references/agent-briefs/code-reviewer.md` and the `executor` (fixer
    mode).
 5. **Commit & push & PR** — dispatch the `git-master` agent per
    `references/agent-briefs/git-master.md` (`pr` mode).
-6. **PR-fix loop** — bounded loop per `references/pr-fix-loop.md`.
+6. **PR-fix loop** — bounded loop per `references/bounded-loop.md` §Phase 6.
 7. **Merge & update ROADMAP & learn** — **GATE 3**; `git-master` (`merge`
    mode) merges and commits the ROADMAP update following the cascade rules
    in `references/roadmap-migration.md`; the `writer` agent per
@@ -64,6 +71,12 @@ Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
 5. After every `Agent` call, end the same reply with an orchestrator-authored
    text block (verdict + next step). A Gate prompt counts. Never let the
    Agent tool result itself be the last thing the operator sees.
+   Minimal shape:
+   > `planner` returned verdict: fits one PR. Presenting Gate 1.
+
+   Silent-exit is the #1 failure mode recorded in `FEEDBACK.md`
+   2026-04-22; `## Dispatching agents` §Companion-todo gives the
+   workflow-level reinforcement.
 
 The skill does not self-modify `SKILL.md`, `references/`, or agent briefs;
 proposed changes route through `FEEDBACK.md` (appended at Phase 7 by the
@@ -89,6 +102,23 @@ Preferred agent types (resolve via the `subagent_type` parameter):
 | writer | `oh-my-claudecode:writer` | `general-purpose` |
 
 _Executor model override: pass `model: opus` for complex TASKs (operator judgement at Gate 2, or when the TASK lists ≥ 6 acceptance criteria)._
+
+### Companion-todo (Hard rule 5 reinforcement)
+
+**Before every `Agent` dispatch**, create a companion todo via
+`TaskCreate` so the required follow-up stays visible in the UI:
+
+```
+TaskCreate([{
+  content: "After <agent> returns: state verdict (≤2 lines) + next step (phase / gate / clarifying question)",
+  activeForm: "Drafting follow-up after <agent>"
+}])
+```
+
+Then dispatch the `Agent`. After the agent result lands, mark the todo
+`in_progress`, write the follow-up text in the same reply, and mark it
+`completed`. A lingering incomplete follow-up todo is a visible signal
+that Hard rule 5 is about to be violated.
 
 ## State recovery
 
@@ -119,7 +149,7 @@ Both the pre-PR review loop (Phase 4) and the PR-fix loop (Phase 6) enforce:
 - severity threshold (only `blocker` and `important` items block; `nit`
   items are moved to the TASK's `## Follow-up` section).
 
-Full pseudocode: `references/review-loop.md` and `references/pr-fix-loop.md`.
+Full pseudocode: `references/bounded-loop.md`.
 
 On escalation, stop the loop and present to the operator: phase name,
 iteration count, current unresolved issues, diff summary, and three choices
