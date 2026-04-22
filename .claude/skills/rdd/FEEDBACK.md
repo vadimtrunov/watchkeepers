@@ -182,3 +182,52 @@ retrigger CI (not a code issue, but workflow awareness gap).
 - Total wall time from /rdd to merge: 04:30
 
 ---
+
+## 2026-04-22 — M2.7.a: Keep service skeleton (HTTP server, health, pgx pool)
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/8
+**Phases with incidents**: 4, 6
+
+### What worked
+
+Gate 2 confirmed scope boundaries (7 AC, 7 test cases; exclusions explicit: auth M2.7.b,
+business endpoints M2.7.c/d/e). Phase 3 executor delivered 9 commits, 13 files, 60.7%
+coverage, all CI green locally. Phase 4 review converged immediately (0 blocker, 0
+important, 6 nit), demonstrating scope discipline. Severity rubric classified two Major
+CodeRabbit findings as nit (no `BLOCKER:`/`IMPORTANT:` prefix), correctly deferred to
+Follow-up per contract.
+
+### What wasted effort
+
+**Phase 4 iteration 0**: code-reviewer output violated strict JSON contract — emitted
+`{verdict/blocking_issues/non_blocking_findings}` instead of `{blocker, important, nit}`.
+Mapping unambiguous so loop proceeded; flag for brief tightening.
+
+**Phase 5**: git-master authored PR title `M2.7.a: Keep service skeleton …`, failing
+commitlint (`subject-empty + type-empty`; repo enforces `<type>(<scope>)?: <subject>`).
+Title edit via `gh pr edit` + empty commit `chore(keep): trigger CI after title fix`
+required to re-fire `pull_request.synchronize` (workflow lacks `edited` trigger type).
+
+### Suggested skill changes
+
+- Tighten code-reviewer brief (`references/agent-briefs/code-reviewer.md` §Output
+  contract) to mandate exact JSON schema `{blocker, important, nit}` with strict
+  output-validator step or reinforcement bullet.
+- Amend git-master brief (`references/agent-briefs/git-master.md` §Mode — pr) to
+  require PR title matching conventional-commits and dry-run commitlint (check repo
+  config first). Pattern: `feat(keep): add Keep service skeleton (M2.7.a)`.
+- Document Phase 6 pattern in `references/bounded-loop.md` §"Title edit + CI re-trigger":
+  when commitlint-on-PR-title is sole failure, title edit alone does NOT re-fire; push
+  empty commit for `synchronize` or add `edited` to workflow trigger.
+- Note in `references/bounded-loop.md` §Severity contract: Major-severity bot findings
+  naming concrete logic defects (e.g. non-positive shutdown timeout) SHOULD promote to
+  `important` to avoid shipping known bugs under Follow-up IOU.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 1
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: 01:30
+
+---

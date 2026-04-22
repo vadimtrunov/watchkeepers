@@ -185,3 +185,42 @@ relies on unique-index prefixes only. Worth adding before real traffic or RLS
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.1.a
 
 ---
+
+## 2026-04-22 — M2.7.a: Keep service skeleton (HTTP server, health, pgx pool)
+
+**PR**: [#8](https://github.com/vadimtrunov/watchkeepers/pull/8)
+**Merged**: 2026-04-22
+
+### Context
+
+Bootstrapped the Keep service as a separate Go binary (`core/cmd/keep/`) with HTTP
+as the chosen protocol (over gRPC), environment-based config, Postgres connection
+pooling via pgx/v5, graceful shutdown handling, and a distroless multi-stage Dockerfile.
+Established the service boot template for future M2.7.b/c/d/e endpoints.
+
+### Pattern
+
+**Go service boot pattern (signal + context + shutdown)**: `signal.NotifyContext` wraps
+a base context; main defers `http.Server.Shutdown(ctx.WithoutCancel())` to close
+gracefully without cancellation races. Two-stage `main()` (exit wrapper + `run(args,
+stdout, stderr) int`) enables unit testing without mocking `os.Exit`. Config loaded
+via `os.Getenv`-first approach + typed `Config{}` + `Load()` sentinel errors (`ErrMissingDatabaseURL`)
+— locale-independent, no framework yet (viper/koanf promoted only when multi-service
+configs share a model).
+
+**HTTP-vs-gRPC decision recorded**: Protocol choice documented in `docs/DEVELOPING.md`
+"Keep service" section with reversibility criteria (future M9/Phase-2 streaming
+benefits can revisit). Rationale: simpler initial endpoints, JSON compatibility,
+debuggability (`curl`), deferring RPC overhead.
+
+**Distroless + multi-stage Dockerfile template**: `golang:1.26-alpine` (build) →
+`gcr.io/distroless/static-debian12:nonroot` (runtime), final image ~10 MB, `USER
+nonroot:nonroot`, `COPY go.mod go.sum ./` for cacheable `go mod download`, hadolint-clean.
+
+### References
+
+- Files: `core/cmd/keep/main.go`, `core/internal/keep/config/`, `core/internal/keep/server/`,
+  `deploy/Dockerfile.keep`, `Makefile` (keep-build, keep-run targets)
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.7 → M2.7.a, `docs/DEVELOPING.md` "Keep service"
+
+---
