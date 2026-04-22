@@ -44,8 +44,12 @@ fail() {
 
 cleanup_sql=$(cat <<'SQL'
 -- Leave the schema empty so re-runs start from the same baseline. Order
--- mirrors the reverse-dependency FK chain.
+-- mirrors the reverse-dependency FK chain. `keepers_log` is first because
+-- it references `watchkeeper` and `human` via nullable FKs.
+-- The append-only trigger on `keepers_log` fires on DELETE but not TRUNCATE,
+-- so the TRUNCATE chain continues to clear it cleanly.
 TRUNCATE TABLE
+  watchkeeper.keepers_log,
   watchkeeper.watch_order,
   watchkeeper.watchkeeper,
   watchkeeper.manifest_version,
@@ -189,5 +193,67 @@ if ! printf '%s' "${fk_output}" | grep -qi 'violates foreign key constraint'; th
   fail "expected a foreign-key-violation error for non-existent watchkeeper_id; got: ${fk_output}"
 fi
 echo "OK: watch_order with non-existent watchkeeper_id rejected by FK"
+
+echo ">> migrate-schema-test: (d) keepers_log happy-path insert (system-emitted event)"
+"${PSQL[@]}" >/dev/null <<'SQL'
+BEGIN;
+
+-- Both actor_* columns left NULL to represent a system-emitted event
+-- (AC1 nullability + edge case from the TASK test plan).
+INSERT INTO watchkeeper.keepers_log (event_type, payload)
+VALUES ('watchkeeper_spawned', '{"agent":"x"}'::jsonb);
+
+COMMIT;
+SQL
+
+kl_count=$("${PSQL[@]}" -tA -c "SELECT count(*) FROM watchkeeper.keepers_log;")
+if [[ "${kl_count}" != "1" ]]; then
+  fail "keepers_log happy-path insert count expected 1, got ${kl_count}"
+fi
+echo "OK: keepers_log happy-path insert accepted (count = ${kl_count})"
+
+echo ">> migrate-schema-test: (d-update) UPDATE on keepers_log rejected by append-only trigger"
+kl_update_output=$("${PSQL[@]}" <<'SQL' 2>&1 || true
+BEGIN;
+
+SAVEPOINT before_kl_update;
+
+UPDATE watchkeeper.keepers_log SET event_type = 'x';
+
+ROLLBACK TO SAVEPOINT before_kl_update;
+ROLLBACK;
+SQL
+)
+
+if ! printf '%s' "${kl_update_output}" | grep -q 'append-only'; then
+  fail "expected UPDATE on keepers_log to be rejected with 'append-only'; got: ${kl_update_output}"
+fi
+kl_count_after_update=$("${PSQL[@]}" -tA -c "SELECT count(*) FROM watchkeeper.keepers_log;")
+if [[ "${kl_count_after_update}" != "1" ]]; then
+  fail "keepers_log row count after UPDATE attempt expected 1, got ${kl_count_after_update}"
+fi
+echo "OK: keepers_log UPDATE rejected (append-only) and row count unchanged"
+
+echo ">> migrate-schema-test: (d-delete) DELETE on keepers_log rejected by append-only trigger"
+kl_delete_output=$("${PSQL[@]}" <<'SQL' 2>&1 || true
+BEGIN;
+
+SAVEPOINT before_kl_delete;
+
+DELETE FROM watchkeeper.keepers_log;
+
+ROLLBACK TO SAVEPOINT before_kl_delete;
+ROLLBACK;
+SQL
+)
+
+if ! printf '%s' "${kl_delete_output}" | grep -q 'append-only'; then
+  fail "expected DELETE on keepers_log to be rejected with 'append-only'; got: ${kl_delete_output}"
+fi
+kl_count_after_delete=$("${PSQL[@]}" -tA -c "SELECT count(*) FROM watchkeeper.keepers_log;")
+if [[ "${kl_count_after_delete}" != "1" ]]; then
+  fail "keepers_log row count after DELETE attempt expected 1, got ${kl_count_after_delete}"
+fi
+echo "OK: keepers_log DELETE rejected (append-only) and row count unchanged"
 
 echo "ALL schema assertions passed"
