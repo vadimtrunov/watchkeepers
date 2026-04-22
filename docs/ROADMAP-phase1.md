@@ -163,6 +163,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [ ] **M2.7.e** `subscribe` endpoint plus outbox publisher worker (from M2.1.e).
 - [ ] **M2.8** Go client package `keepclient` used by core and by harness (no direct DB access from either).
 - [ ] **M2.9** Manifest schema fields added: `personality` (free-text) and `language` (ISO code).
+  - [ ] **M2.9.a** Manifest `personality`/`language` constraints, validation, and docs (columns already landed with M2.1.a).
 
 **Artifacts**: schema SQL, migrations, Keep service binary, Go `keepclient` package, RLS and append-only tests, contract tests against the Keep API.
 
