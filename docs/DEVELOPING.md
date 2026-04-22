@@ -112,8 +112,9 @@ Renovate and Dependabot PRs must also satisfy these checks before auto-merge.
 4. Add the job name to the required-checks list above.
 5. Document any developer-facing prerequisites in this file.
 
-The cross-cutting constraint from the roadmap: **any check that runs in CI
-must also run in pre-commit** — no local-only or CI-only gates.
+The cross-cutting constraint from the roadmap: **every CI gate must have a
+local equivalent via `lefthook` (staged-files subset) and/or `make ci`
+(full-repo)** — no undocumented local-only or CI-only gates.
 
 ## Troubleshooting
 

@@ -8,6 +8,6 @@ BEGIN;
 CREATE SCHEMA IF NOT EXISTS watchkeeper;
 
 COMMENT ON SCHEMA watchkeeper IS
-'Watchkeeper Keep — business knowledge namespace. Schema owner is the keep service role.';
+'Watchkeeper Keep — business knowledge namespace. Role provisioning and ownership land in M2.';
 
 COMMIT;
