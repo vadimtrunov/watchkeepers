@@ -52,7 +52,8 @@ Each item is `{file, line, rationale, suggested_fix}`:
 - **important** — any ONE of:
   - real logic defect (wrong branch, off-by-one, swallowed error) that is
     not caught by an existing test;
-  - violates an architecture decision recorded in `docs/ROADMAP-phase1.md §2`;
+  - violates an architecture decision recorded in §2 of the active
+    `docs/ROADMAP-*.md` file;
   - missing a test case from the approved test plan (happy / edge /
     negative / security);
   - inconsistent with a pattern established in `docs/LESSONS.md` when

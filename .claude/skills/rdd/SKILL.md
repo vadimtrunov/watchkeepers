@@ -43,13 +43,14 @@ Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
    `references/agent-briefs/code-reviewer.md` and the `executor` (fixer
    mode).
 5. **Commit & push & PR** — dispatch the `git-master` agent per
-   `references/agent-briefs/git-master.md` (Phase 5 mode).
+   `references/agent-briefs/git-master.md` (`pr` mode).
 6. **PR-fix loop** — bounded loop per `references/pr-fix-loop.md`.
-7. **Merge & update ROADMAP & learn** — **GATE 3**; `git-master` (Phase 7
+7. **Merge & update ROADMAP & learn** — **GATE 3**; `git-master` (`merge`
    mode) merges and commits the ROADMAP update following the cascade rules
    in `references/roadmap-migration.md`; the `writer` agent per
    `references/agent-briefs/writer.md` appends `docs/LESSONS.md` and
-   `FEEDBACK.md`.
+   `FEEDBACK.md`; after `writer` returns, the orchestrator deletes the
+   `TASK-*.md` file.
 
 ## Hard rules
 
@@ -103,9 +104,10 @@ All state is in the repo:
 - Git branches — where the code is.
 - `gh` PR state — where review/CI is.
 
-On `/rdd resume`:
+On `/rdd resume` (preflight Check 5 already confirmed the current branch
+matches a resumable `rdd/*`):
 1. Find the most recent `TASK-*.md` in the working tree with
-   `Status: in-progress`.
+   `Status: in-progress` whose `**Branch**` header equals the current branch.
 2. Read its `## Progress log` to find the last completed phase.
 3. Resume from the next phase.
 4. If no such file exists, tell the operator and exit — do not silently start
