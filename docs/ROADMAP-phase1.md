@@ -156,7 +156,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M2.1.e** `outbox` table DDL only (publisher worker → M2.7).
 - [x] **M2.6** Migration tool chosen and wired (goose / atlas / sqlc).
 - [ ] **M2.7** **Keep service binary** (Go) exposing HTTP/gRPC API: `search`, `store`, `subscribe`, `log_append`, `log_tail`, `get_manifest`, `put_manifest_version`. Auth via short-lived capability tokens issued by core.
-  - [ ] **M2.7.a** Keep service skeleton, HTTP-vs-gRPC decision, health endpoint, config, Dockerfile.
+  - [x] **M2.7.a** Keep service skeleton, HTTP-vs-gRPC decision, health endpoint, config, Dockerfile.
   - [ ] **M2.7.b** Capability-token auth middleware and token-issuance contract.
   - [ ] **M2.7.c** Read endpoints: `search`, `get_manifest`, `log_tail` with contract tests.
   - [ ] **M2.7.d** Write endpoints: `store`, `log_append`, `put_manifest_version` with contract tests.
