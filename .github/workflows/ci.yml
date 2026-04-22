@@ -177,6 +177,9 @@ jobs:
       - name: Integration test (all migrate-* targets)
         run: scripts/test-migrate.sh
 
+      - name: Schema smoke (migrate-test)
+        run: make migrate-test
+
   docker-ci:
     name: Docker CI
     runs-on: ubuntu-24.04
