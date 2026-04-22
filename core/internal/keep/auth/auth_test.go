@@ -181,3 +181,80 @@ func TestNewHMACVerifier_ShortKey(t *testing.T) {
 		t.Errorf("err = %v; want mention of 32-byte minimum", err)
 	}
 }
+
+// TestNewHMACVerifier_EmptyIssuer guards against a verifier configured
+// with an empty issuer — the constructor must reject.
+func TestNewHMACVerifier_EmptyIssuer(t *testing.T) {
+	_, err := auth.NewHMACVerifier(fixedKey, "", time.Now)
+	if err == nil {
+		t.Fatal("NewHMACVerifier with empty issuer returned nil error")
+	}
+}
+
+// TestNewTestIssuer_EmptyIssuer guards the mirror case on the mint path.
+func TestNewTestIssuer_EmptyIssuer(t *testing.T) {
+	_, err := auth.NewTestIssuer(fixedKey, "", time.Now)
+	if err == nil {
+		t.Fatal("NewTestIssuer with empty issuer returned nil error")
+	}
+}
+
+// TestNewTestIssuer_ShortKey asserts the mirror of the key-length guard.
+func TestNewTestIssuer_ShortKey(t *testing.T) {
+	_, err := auth.NewTestIssuer([]byte("too-short"), "k", time.Now)
+	if err == nil {
+		t.Fatal("NewTestIssuer with short key returned nil error")
+	}
+}
+
+// TestIssueWithExpiry lets tests mint a token whose `exp` is decoupled
+// from the issuer's clock — useful for edge cases like "already expired
+// at mint time".
+func TestIssueWithExpiry(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC) }
+	ti := mustIssuer(t, "keep-test", now)
+	v := mustVerifier(t, "keep-test", now)
+
+	// exp 2 minutes past the issuer's clock → valid.
+	exp := now().Add(2 * time.Minute)
+	tok, err := ti.IssueWithExpiry(auth.Claim{Subject: "u", Scope: "org"}, exp)
+	if err != nil {
+		t.Fatalf("IssueWithExpiry: %v", err)
+	}
+	got, err := v.Verify(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !got.ExpiresAt.Equal(exp) {
+		t.Errorf("ExpiresAt = %v, want %v", got.ExpiresAt, exp)
+	}
+
+	// exp 1 hour before now → ErrExpired.
+	past := now().Add(-time.Hour)
+	expiredTok, err := ti.IssueWithExpiry(auth.Claim{Subject: "u", Scope: "org"}, past)
+	if err != nil {
+		t.Fatalf("IssueWithExpiry (past): %v", err)
+	}
+	_, err = v.Verify(context.Background(), expiredTok)
+	if !errors.Is(err, auth.ErrExpired) {
+		t.Errorf("Verify past exp = %v, want ErrExpired", err)
+	}
+}
+
+// TestValidScope asserts the exported scope validator (used by both the
+// verifier and db.RoleForScope) returns the right call for every
+// documented shape.
+func TestValidScope(t *testing.T) {
+	good := []string{"org", "user:abc", "agent:abc"}
+	for _, s := range good {
+		if !auth.ValidScope(s) {
+			t.Errorf("ValidScope(%q) = false, want true", s)
+		}
+	}
+	bad := []string{"", "ORG", "user:", "agent:", "weird"}
+	for _, s := range bad {
+		if auth.ValidScope(s) {
+			t.Errorf("ValidScope(%q) = true, want false", s)
+		}
+	}
+}
