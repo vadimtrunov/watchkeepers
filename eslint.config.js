@@ -53,36 +53,38 @@ export default tseslint.config(
         "error",
         {
           paths: [
-            {
-              name: "fs",
+            ...["fs", "fs/promises", "node:fs", "node:fs/promises"].map((name) => ({
+              name,
               message:
                 "Direct fs access is gated. Declare an fs capability and go through the capability broker (see ROADMAP M5).",
-            },
-            {
-              name: "node:fs",
-              message:
-                "Direct fs access is gated. Declare an fs capability and go through the capability broker (see ROADMAP M5).",
-            },
-            {
-              name: "http",
-              message:
-                "Direct network access is gated. Declare a net capability and go through the capability broker (see ROADMAP M5).",
-            },
-            {
-              name: "node:http",
-              message:
-                "Direct network access is gated. Declare a net capability and go through the capability broker (see ROADMAP M5).",
-            },
-            {
-              name: "https",
-              message:
-                "Direct network access is gated. Declare a net capability and go through the capability broker (see ROADMAP M5).",
-            },
-            {
-              name: "node:https",
+            })),
+            ...[
+              "http",
+              "https",
+              "http2",
+              "net",
+              "tls",
+              "dgram",
+              "dns",
+              "dns/promises",
+              "node:http",
+              "node:https",
+              "node:http2",
+              "node:net",
+              "node:tls",
+              "node:dgram",
+              "node:dns",
+              "node:dns/promises",
+            ].map((name) => ({
+              name,
               message:
                 "Direct network access is gated. Declare a net capability and go through the capability broker (see ROADMAP M5).",
-            },
+            })),
+            ...["child_process", "node:child_process"].map((name) => ({
+              name,
+              message:
+                "Subprocess execution is gated. Declare a proc capability and go through the capability broker (see ROADMAP M5).",
+            })),
           ],
         },
       ],

@@ -9,32 +9,9 @@ assert_lefthook_installed: true
 pre-commit:
   parallel: true
   jobs:
+    # Tools that touch disjoint file sets may run in parallel.
     - name: gitleaks
       run: gitleaks protect --staged --redact --config .gitleaks.toml
-
-    - name: gofumpt
-      glob: "*.go"
-      run: |
-        set -euo pipefail
-        go run mvdan.cc/gofumpt@latest -l -w {staged_files}
-        git add {staged_files}
-
-    - name: golangci-lint
-      glob: "*.go"
-      run: golangci-lint run --new-from-rev HEAD --fix {staged_files}
-      stage_fixed: true
-
-    - name: prettier
-      glob:
-        - "*.{ts,tsx,js,mjs,cjs,json,jsonc,md,yml,yaml}"
-      run: pnpm exec prettier --write {staged_files}
-      stage_fixed: true
-
-    - name: eslint
-      glob:
-        - "*.{ts,tsx}"
-      run: pnpm exec eslint --fix {staged_files}
-      stage_fixed: true
 
     - name: markdownlint
       glob: "*.md"
@@ -60,6 +37,37 @@ pre-commit:
       glob:
         - "deploy/migrations/*.sql"
       run: sqlfluff lint {staged_files}
+
+    # Same-file tools run sequentially inside one job so the formatter's writes
+    # and the linter's --fix don't race on git's index lock or overwrite each
+    # other. Lefthook >= v2.1 serialises stage_fixed `git add` calls via a
+    # mutex, but combining here also avoids the formatter re-running after the
+    # linter stages its fixes.
+
+    - name: go-fmt-lint
+      glob: "*.go"
+      run: |
+        set -euo pipefail
+        go run mvdan.cc/gofumpt@latest -l -w {staged_files}
+        golangci-lint run --new-from-rev HEAD --fix {staged_files}
+      stage_fixed: true
+
+    - name: ts-fmt-lint
+      glob:
+        - "*.{ts,tsx}"
+      run: |
+        set -euo pipefail
+        pnpm exec prettier --write {staged_files}
+        pnpm exec eslint --fix {staged_files}
+      stage_fixed: true
+
+    # Prettier-only targets (non-TypeScript) run independently since eslint
+    # doesn't touch them.
+    - name: prettier-misc
+      glob:
+        - "*.{js,mjs,cjs,json,jsonc,yml,yaml,md}"
+      run: pnpm exec prettier --write {staged_files}
+      stage_fixed: true
 
 commit-msg:
   jobs:

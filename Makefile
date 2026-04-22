@@ -62,10 +62,14 @@ tools-check: ## Verify required toolchain is installed
 # ---------------------------------------------------------------------------
 
 .PHONY: ci
-ci: lint test secrets-scan deps-scan license-scan ## Run the full CI matrix locally (mirrors GitHub Actions)
+ci: fmt-check lint build test secrets-scan deps-scan license-scan ## Run the full CI matrix locally (mirrors GitHub Actions)
+
+.PHONY: fmt-check
+fmt-check: ## Run prettier --check (CI parity for the ts-ci format gate)
+	@$(PNPM) exec prettier --check .
 
 .PHONY: lint
-lint: go-lint ts-lint sql-lint docker-lint md-lint yaml-lint shell-lint ## Run every linter
+lint: go-vet go-lint ts-lint sql-lint docker-lint md-lint yaml-lint shell-lint ## Run every linter
 
 .PHONY: fmt
 fmt: go-fmt ts-fmt ## Format Go and TypeScript sources
@@ -145,7 +149,8 @@ ts-audit: ## Scan TypeScript dependencies for known vulnerabilities (needs osv-s
 	@if command -v osv-scanner >/dev/null 2>&1; then \
 	  osv-scanner scan --lockfile=pnpm-lock.yaml .; \
 	else \
-	  echo "osv-scanner not installed — install via 'brew install osv-scanner' or 'go install github.com/google/osv-scanner/v2/cmd/osv-scanner@$(OSV_SCANNER_VERSION)' to run this scan locally; CI installs it via the google/osv-scanner action"; \
+	  echo "ERROR: osv-scanner is required for 'make ci'. Install via 'brew install osv-scanner' or 'go install github.com/google/osv-scanner/v2/cmd/osv-scanner@$(OSV_SCANNER_VERSION)'. CI installs it from the official release tarball." >&2; \
+	  exit 1; \
 	fi
 
 # ---------------------------------------------------------------------------
