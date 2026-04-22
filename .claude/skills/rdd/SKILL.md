@@ -73,6 +73,15 @@ Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
 9. Every internal link inside this skill uses a path relative to the skill
    root (`.claude/skills/rdd/`) — i.e. starts with `references/`. When
    writing or editing any file under this skill, preserve that convention.
+10. NEVER end the orchestrator's turn immediately after an `Agent` tool
+    result. Every `Agent` call MUST be followed, in the same reply, by at
+    least one line of user-facing text before the turn ends. The follow-up
+    text states, at minimum: (a) the agent's verdict in ≤ 2 lines,
+    (b) the next step (next phase, gate prompt, or clarifying question).
+    A Gate prompt counts as the follow-up text. Silent-exit after an
+    agent result makes the orchestrator look stalled to the operator
+    even when it isn't; this rule exists to make that failure mode
+    impossible.
 
 ## Dispatching agents
 
