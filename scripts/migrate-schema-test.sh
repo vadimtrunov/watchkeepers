@@ -468,4 +468,35 @@ else
   echo "WARN: outbox_unpublished_idx not chosen by planner on empty/near-empty table (soft; see TASK test plan §Security)"
 fi
 
+# ---------------------------------------------------------------------------
+# M2.7.b+c — read-grants assertions (migration 007).
+#
+# The Keep service runs read endpoints under `SET LOCAL ROLE wk_*_role`
+# (M2.7.b), so every read path must have SELECT on the audit-log and
+# manifest tables (no RLS there) plus the lookup tables (`organization`,
+# `human`, `watchkeeper`). We assert per role + per table via
+# `has_table_privilege` so a future accidental REVOKE trips this gate.
+# ---------------------------------------------------------------------------
+echo ">> migrate-schema-test: (k) read-grants for wk_*_role on manifest/log/lookup tables"
+
+read_grant_tables=(
+  'watchkeeper.organization'
+  'watchkeeper.human'
+  'watchkeeper.watchkeeper'
+  'watchkeeper.manifest'
+  'watchkeeper.manifest_version'
+  'watchkeeper.keepers_log'
+)
+read_grant_roles=(wk_org_role wk_user_role wk_agent_role)
+
+for role in "${read_grant_roles[@]}"; do
+  for tbl in "${read_grant_tables[@]}"; do
+    has=$("${PSQL[@]}" -tA -c "SELECT has_table_privilege('${role}', '${tbl}', 'SELECT');")
+    if [[ "${has}" != "t" ]]; then
+      fail "expected ${role} to have SELECT on ${tbl}; got '${has}'"
+    fi
+  done
+done
+echo "OK: read-grants present for all three roles across manifest/log/lookup tables"
+
 echo "ALL schema assertions passed"
