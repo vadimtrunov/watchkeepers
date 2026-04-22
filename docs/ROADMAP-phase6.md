@@ -120,20 +120,20 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ## 4. Milestones
 
-### ⬜ M1 — Multi-tenancy foundation
+### M1 — Multi-tenancy foundation [ ]
 **Goal**: `tenant` becomes a top-level entity; every resource in the platform is tenant-scoped; isolation verified at every boundary.
 
 **Scope**
-- [ ] Schema: `tenant` table; foreign-key `tenant_id` added to every Keep table (organization, human, watchkeeper, manifest, manifest_version, keepers_log, knowledge_chunk, outbox, watch_order, role_template, shared_lesson, cross_org rows).
-- [ ] RLS policies updated: every query constrained to the tenant_id of the caller's session. Cross-tenant reads refused at RLS layer.
-- [ ] `keepclient` sessions carry tenant_id; operator's SSO identity maps to one tenant (Phase 6 default — federated multi-tenant identity is post-Phase-6).
-- [ ] Notebook files: path includes `<tenant_id>/<agent_id>.sqlite`; filesystem perms restrict per tenant.
-- [ ] Tool sources per tenant: `$DATA_DIR/tools/<tenant_id>/private/`, `$DATA_DIR/tools-local/<tenant_id>/`. Built-in and platform sources shared across tenants (read-only, identical).
-- [ ] Messenger bindings: each tenant has its own Slack/Teams/etc workspace linkage; core never mixes channels across tenants.
-- [ ] Manifest `tenant_id` immutable after creation; Watchkeepers cannot migrate across tenants.
-- [ ] Capability broker per-tenant namespace: capability tokens carry tenant_id; cross-tenant capability use refused at broker layer.
-- [ ] Federation `cross_org` rows from Phase 5 get a tenant scope — each tenant federates independently.
-- [ ] Migration tool for Phase 5 deployments: existing single-tenant data migrates to a single `tenant_id=primary` — zero functional change for self-hosted, lays the groundwork.
+- [ ] **M1.1** Schema: `tenant` table; foreign-key `tenant_id` added to every Keep table (organization, human, watchkeeper, manifest, manifest_version, keepers_log, knowledge_chunk, outbox, watch_order, role_template, shared_lesson, cross_org rows).
+- [ ] **M1.2** RLS policies updated: every query constrained to the tenant_id of the caller's session. Cross-tenant reads refused at RLS layer.
+- [ ] **M1.3** `keepclient` sessions carry tenant_id; operator's SSO identity maps to one tenant (Phase 6 default — federated multi-tenant identity is post-Phase-6).
+- [ ] **M1.4** Notebook files: path includes `<tenant_id>/<agent_id>.sqlite`; filesystem perms restrict per tenant.
+- [ ] **M1.5** Tool sources per tenant: `$DATA_DIR/tools/<tenant_id>/private/`, `$DATA_DIR/tools-local/<tenant_id>/`. Built-in and platform sources shared across tenants (read-only, identical).
+- [ ] **M1.6** Messenger bindings: each tenant has its own Slack/Teams/etc workspace linkage; core never mixes channels across tenants.
+- [ ] **M1.7** Manifest `tenant_id` immutable after creation; Watchkeepers cannot migrate across tenants.
+- [ ] **M1.8** Capability broker per-tenant namespace: capability tokens carry tenant_id; cross-tenant capability use refused at broker layer.
+- [ ] **M1.9** Federation `cross_org` rows from Phase 5 get a tenant scope — each tenant federates independently.
+- [ ] **M1.10** Migration tool for Phase 5 deployments: existing single-tenant data migrates to a single `tenant_id=primary` — zero functional change for self-hosted, lays the groundwork.
 
 **Artifacts**: schema migrations, RLS policy updates, `keepclient` session extensions, Notebook file-path changes, capability broker namespace updates, single-tenant migration tool.
 
@@ -149,20 +149,20 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M2 — RBAC (capability-based for operators)
+### M2 — RBAC (capability-based for operators) [ ]
 **Goal**: Tenants can restrict what operators within their tenant can do, via capability-based role presets.
 
 **Scope**
-- [ ] Operator capability model: reuse Phase 1 broker primitives, operators get capability tokens scoped to their tenant and their role.
-- [ ] Three default role presets per tenant:
+- [ ] **M2.1** Operator capability model: reuse Phase 1 broker primitives, operators get capability tokens scoped to their tenant and their role.
+- [ ] **M2.2** Three default role presets per tenant:
   - `admin` — every capability.
   - `operator` — spawn/retire/approve/read-write Keep; no billing, no role-preset edits, no tenant-admin actions.
   - `viewer` — read-only: Keeper's Log tail, Watchkeeper list, Manifest read. No writes anywhere.
-- [ ] Custom role presets: tenant admin can compose custom role presets via the Manifest editor UI (Phase 3 M4 extended).
-- [ ] SSO attribute mapping extended: IdP group claims map to tenant roles (not just binary operator-yes/no from Phase 4 M1).
-- [ ] Capability enforcement in every operator-facing endpoint: CLI checks role, editor UI checks role, HTTP/RPC APIs check role.
-- [ ] Operator action audit: every privileged action already in Keeper's Log; now carries both SSO identity and resolved role.
-- [ ] Role changes: tenant admin demotes a user in real time — active sessions refresh capability tokens on next request, access tightens immediately.
+- [ ] **M2.3** Custom role presets: tenant admin can compose custom role presets via the Manifest editor UI (Phase 3 M4 extended).
+- [ ] **M2.4** SSO attribute mapping extended: IdP group claims map to tenant roles (not just binary operator-yes/no from Phase 4 M1).
+- [ ] **M2.5** Capability enforcement in every operator-facing endpoint: CLI checks role, editor UI checks role, HTTP/RPC APIs check role.
+- [ ] **M2.6** Operator action audit: every privileged action already in Keeper's Log; now carries both SSO identity and resolved role.
+- [ ] **M2.7** Role changes: tenant admin demotes a user in real time — active sessions refresh capability tokens on next request, access tightens immediately.
 
 **Artifacts**: role-preset schema, operator capability broker extension, editor UI role management, SSO attribute mapping update.
 
@@ -177,11 +177,11 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M3 — Per-tenant resource quotas + noisy-neighbor isolation
+### M3 — Per-tenant resource quotas + noisy-neighbor isolation [ ]
 **Goal**: One tenant's heavy usage cannot degrade another tenant's experience; quotas enforceable for billing.
 
 **Scope**
-- [ ] Quota dimensions per tenant (configurable, with billing-tier defaults):
+- [ ] **M3.1** Quota dimensions per tenant (configurable, with billing-tier defaults):
   - Concurrent Watchkeepers (soft + hard limits).
   - Token spend per day across all `LLMProvider`s.
   - Keep storage (rows + bytes in `knowledge_chunk`).
@@ -189,11 +189,11 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
   - ArchiveStore storage.
   - Federation bandwidth (in + out).
   - `propose_tool` / `self_tune` / `propose_intervention` per day per Watchkeeper and per tenant.
-- [ ] Enforcement points: capability broker checks quota before token issuance; writes to Keep / Notebook / ArchiveStore check size; harness spawn checks concurrent count.
-- [ ] Soft vs hard limits: soft limit triggers alert + cost-tier upgrade suggestion; hard limit refuses the action with a clear error + upgrade CTA.
-- [ ] Per-tenant runtime isolation: harness processes can be assigned per-tenant host pools (from Phase 4 M3) to prevent cross-tenant CPU contention at the hardware level.
-- [ ] Postgres row-level fairness: slow queries scoped to a single tenant don't block other tenants (statement timeouts, per-role connection limits, separate connection pools per tenant optionally).
-- [ ] Usage metrics collection (feeds M5 billing): real-time usage counters, end-of-hour rollups, end-of-day snapshots.
+- [ ] **M3.2** Enforcement points: capability broker checks quota before token issuance; writes to Keep / Notebook / ArchiveStore check size; harness spawn checks concurrent count.
+- [ ] **M3.3** Soft vs hard limits: soft limit triggers alert + cost-tier upgrade suggestion; hard limit refuses the action with a clear error + upgrade CTA.
+- [ ] **M3.4** Per-tenant runtime isolation: harness processes can be assigned per-tenant host pools (from Phase 4 M3) to prevent cross-tenant CPU contention at the hardware level.
+- [ ] **M3.5** Postgres row-level fairness: slow queries scoped to a single tenant don't block other tenants (statement timeouts, per-role connection limits, separate connection pools per tenant optionally).
+- [ ] **M3.6** Usage metrics collection (feeds M5 billing): real-time usage counters, end-of-hour rollups, end-of-day snapshots.
 
 **Artifacts**: quota schema + enforcement package, usage-metering service, per-tenant host-pool extension to lifecycle manager, Postgres fairness config.
 
@@ -208,17 +208,17 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M4 — SaaS deployment architecture
+### M4 — SaaS deployment architecture [ ]
 **Goal**: Vendor operates a central multi-tenant cluster; new tenants provisioned on demand.
 
 **Scope**
-- [ ] SaaS cluster topology: Kubernetes-based deployment (or operator equivalent) with core, Keep (HA from Phase 4), harness pool, editor UI, marketplace, federation registry (M10).
-- [ ] Tenant provisioning flow: new tenant signup → tenant row created → tenant admin invited via email → initial default Manifest templates installed → ready in ≤5 min.
-- [ ] Tenant lifecycle operations: pause (stop all Watchkeepers, retain data), resume, suspend (billing failure), delete (full tenant data purge with GDPR-equivalent retention window).
-- [ ] Per-tenant secrets: each tenant's secrets (LLM keys, Slack tokens, etc.) live in a tenant-scoped path in the secrets backend; cross-tenant secret read refused at the secrets-backend layer.
-- [ ] Tenant domain model: SaaS customer might have `acme.wk-saas.com` subdomain OR custom domain; both supported with TLS.
-- [ ] Vendor operations runbook: tenant creation / suspension / deletion, incident response per tenant, emergency access procedures (break-glass from Phase 4 M11 extended with tenant scoping).
-- [ ] Deployment smoke: `make saas-deploy-smoke` provisions a SaaS cluster from scratch, creates a tenant, verifies full flow.
+- [ ] **M4.1** SaaS cluster topology: Kubernetes-based deployment (or operator equivalent) with core, Keep (HA from Phase 4), harness pool, editor UI, marketplace, federation registry (M10).
+- [ ] **M4.2** Tenant provisioning flow: new tenant signup → tenant row created → tenant admin invited via email → initial default Manifest templates installed → ready in ≤5 min.
+- [ ] **M4.3** Tenant lifecycle operations: pause (stop all Watchkeepers, retain data), resume, suspend (billing failure), delete (full tenant data purge with GDPR-equivalent retention window).
+- [ ] **M4.4** Per-tenant secrets: each tenant's secrets (LLM keys, Slack tokens, etc.) live in a tenant-scoped path in the secrets backend; cross-tenant secret read refused at the secrets-backend layer.
+- [ ] **M4.5** Tenant domain model: SaaS customer might have `acme.wk-saas.com` subdomain OR custom domain; both supported with TLS.
+- [ ] **M4.6** Vendor operations runbook: tenant creation / suspension / deletion, incident response per tenant, emergency access procedures (break-glass from Phase 4 M11 extended with tenant scoping).
+- [ ] **M4.7** Deployment smoke: `make saas-deploy-smoke` provisions a SaaS cluster from scratch, creates a tenant, verifies full flow.
 
 **Artifacts**: k8s manifests / operator, tenant provisioning API, tenant lifecycle state machine, vendor ops runbook, deploy automation, SaaS smoke test.
 
@@ -233,18 +233,18 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M5 — Billing integration + usage metering
+### M5 — Billing integration + usage metering [ ]
 **Goal**: Vendor charges tenants based on usage; billing accurate, transparent, audit-able.
 
 **Scope**
-- [ ] `BillingBackend` Go interface with Stripe as the first implementation.
-- [ ] Usage metering pipeline: real-time events from M3 → hourly aggregates → daily snapshots → monthly invoice generation.
-- [ ] Billing plan templates: Free, Starter, Pro, Enterprise — each defining quota defaults for M3 dimensions + monthly fee + per-unit overage pricing.
-- [ ] Invoice generation: monthly cycle per tenant, PDF + email, usage breakdown per dimension, historical invoice archive in ArchiveStore.
-- [ ] Payment failure handling: retry logic; soft-suspend tenant after N failed retries with tenant-admin notifications; hard-suspend → eventual deletion per service agreement.
-- [ ] Tax handling: via Stripe Tax or equivalent; tenant's jurisdiction inferred from billing address, user-correctable.
-- [ ] Customer-portal billing view: current month usage against quota + projected overage + historical invoices + payment method management.
-- [ ] Audit: every billing-affecting event (quota breach, plan change, invoice generation, payment) in Keeper's Log with tenant_id.
+- [ ] **M5.1** `BillingBackend` Go interface with Stripe as the first implementation.
+- [ ] **M5.2** Usage metering pipeline: real-time events from M3 → hourly aggregates → daily snapshots → monthly invoice generation.
+- [ ] **M5.3** Billing plan templates: Free, Starter, Pro, Enterprise — each defining quota defaults for M3 dimensions + monthly fee + per-unit overage pricing.
+- [ ] **M5.4** Invoice generation: monthly cycle per tenant, PDF + email, usage breakdown per dimension, historical invoice archive in ArchiveStore.
+- [ ] **M5.5** Payment failure handling: retry logic; soft-suspend tenant after N failed retries with tenant-admin notifications; hard-suspend → eventual deletion per service agreement.
+- [ ] **M5.6** Tax handling: via Stripe Tax or equivalent; tenant's jurisdiction inferred from billing address, user-correctable.
+- [ ] **M5.7** Customer-portal billing view: current month usage against quota + projected overage + historical invoices + payment method management.
+- [ ] **M5.8** Audit: every billing-affecting event (quota breach, plan change, invoice generation, payment) in Keeper's Log with tenant_id.
 
 **Artifacts**: `billing/` Go package with Stripe implementation, metering pipeline, billing plans config, invoice generator, customer-portal billing section, tax plumbing.
 
@@ -260,7 +260,7 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M6 — Customer self-service portal
+### M6 — Customer self-service portal [ ]
 **Goal**: Customers sign up, configure their tenant, invite users, spawn their first Watchkeeper — all without vendor engineering involvement.
 
 **Scope**
@@ -290,7 +290,7 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M7 — Vendor-side SOC2 Type II readiness
+### M7 — Vendor-side SOC2 Type II readiness [ ]
 **Goal**: Vendor corp has the controls and evidence to pass a SOC2 Type II audit as the SaaS platform operator, distinct from customer-side SOC2 work (Phase 3 M11).
 
 **Scope**
@@ -316,7 +316,7 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M8 — Public cross-org marketplace
+### M8 — Public cross-org marketplace [ ]
 **Goal**: Tenants can publish templates and tools to a shared, cross-tenant catalog; tenants can discover and install published artifacts.
 
 **Scope**
@@ -348,7 +348,7 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M9 — Runtime-extension SDK (WASM-sandboxed harness plugins)
+### M9 — Runtime-extension SDK (WASM-sandboxed harness plugins) [ ]
 **Goal**: Third parties write runtime-level extensions to the harness in any WASM-targetable language. Sandboxed execution, capability-gated host calls.
 
 **Scope**
@@ -381,7 +381,7 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M10 — Dynamic peer discovery (federation registry)
+### M10 — Dynamic peer discovery (federation registry) [ ]
 **Goal**: Keep instances discover each other through a registry rather than static config. Replaces Phase 5 M9's static peering.
 
 **Scope**
@@ -407,7 +407,7 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M11 — Differential-privacy tier for anonymization
+### M11 — Differential-privacy tier for anonymization [ ]
 **Goal**: Opt-in stronger anonymization guarantee for federations in sensitive industries, on top of Phase 5 M10 k-anonymity.
 
 **Scope**
@@ -431,7 +431,7 @@ Total: ~91–129 days for one team. **Consider splitting into Phase 6a (M1–M7,
 
 ---
 
-### ⬜ M12 — Phase 6 integration demo + ecosystem acceptance
+### M12 — Phase 6 integration demo + ecosystem acceptance [ ]
 **Goal**: Acceptance gate for the full ecosystem. Three tenants operating independently, SaaS self-service onboarding, public marketplace with cross-tenant consumption, runtime plugin in action, dynamic federation.
 
 **Scope**

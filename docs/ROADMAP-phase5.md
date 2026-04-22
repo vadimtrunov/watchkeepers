@@ -106,22 +106,22 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ## 4. Milestones
 
-### ⬜ M1 — Pattern detection engine
+### M1 — Pattern detection engine [ ]
 
 **Goal**: Watchmaster continuously observes the event stream and metric series, surfaces detected patterns (trends, anomalies, bottlenecks) to an in-process query API other milestones consume.
 
 **Scope**
 
-- [ ] Watchmaster-side `analyzer/` component subscribing to Keeper's Log via `keepclient.subscribe(filter)` — real-time stream + historical window queries.
-- [ ] Metric stream ingestion: reads Prometheus metrics + event counts; builds time-series features per Watchkeeper and per role.
-- [ ] Pattern types detected (Phase 5 minimum set):
+- [ ] **M1.1** Watchmaster-side `analyzer/` component subscribing to Keeper's Log via `keepclient.subscribe(filter)` — real-time stream + historical window queries.
+- [ ] **M1.2** Metric stream ingestion: reads Prometheus metrics + event counts; builds time-series features per Watchkeeper and per role.
+- [ ] **M1.3** Pattern types detected (Phase 5 minimum set):
   - Trend detection — linear/exponential growth/decline in a metric.
   - Anomaly detection — simple thresholds + rolling z-score; per-metric configurable sensitivity.
   - Periodicity detection — repeating cycles in event counts.
   - Correlation detection — two metrics moving together (e.g., PR-review-time up with tool-error-rate up).
-- [ ] Pattern API: `analyzer.detect(scope, metric, window)` returns detected patterns with confidence scores; consumable by other Watchmaster tools (M2, M3).
-- [ ] Back-pressure safe: stream processor drops lowest-value events under load.
-- [ ] Keeper's Log events: `pattern_detected`, `anomaly_detected`, `trend_detected`, `correlation_detected` with structured payload.
+- [ ] **M1.4** Pattern API: `analyzer.detect(scope, metric, window)` returns detected patterns with confidence scores; consumable by other Watchmaster tools (M2, M3).
+- [ ] **M1.5** Back-pressure safe: stream processor drops lowest-value events under load.
+- [ ] **M1.6** Keeper's Log events: `pattern_detected`, `anomaly_detected`, `trend_detected`, `correlation_detected` with structured payload.
 
 **Artifacts**: Go `analyzer/` package in Watchmaster scope, pattern-type implementations, API surface for downstream milestones.
 
@@ -137,18 +137,18 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M2 — Anomaly detection + alert flow per role
+### M2 — Anomaly detection + alert flow per role [ ]
 
 **Goal**: Detected anomalies and trends reach the human lead as contextualized Slack alerts, not as raw metrics.
 
 **Scope**
 
-- [ ] Watchmaster gains a long-running cron job (every N minutes) invoking `analyzer.detect` across configured patterns per Watchkeeper.
-- [ ] Alert templates per pattern type: plain-language description of what was detected, which Watchkeeper, relevant metric snapshot, suggested next step ("consider proactive intervention", "review Manifest", "check for runaway lesson").
-- [ ] Alert throttling per (Watchkeeper, pattern type): no more than N alerts per day; rollup digest if exceeded.
-- [ ] Lead acknowledge flow: Slack buttons `[Investigate] [Ignore] [Silence for 24h]`; silence state stored and honored.
-- [ ] Correlation with Phase 3 M10 auto-iteration: if an anomaly suggests self-tune, route through M10's automated iteration; if it suggests intervention, route to M3.
-- [ ] Event taxonomy: `alert_raised`, `alert_acknowledged`, `alert_silenced`, `alert_rolled_up`.
+- [ ] **M2.1** Watchmaster gains a long-running cron job (every N minutes) invoking `analyzer.detect` across configured patterns per Watchkeeper.
+- [ ] **M2.2** Alert templates per pattern type: plain-language description of what was detected, which Watchkeeper, relevant metric snapshot, suggested next step ("consider proactive intervention", "review Manifest", "check for runaway lesson").
+- [ ] **M2.3** Alert throttling per (Watchkeeper, pattern type): no more than N alerts per day; rollup digest if exceeded.
+- [ ] **M2.4** Lead acknowledge flow: Slack buttons `[Investigate] [Ignore] [Silence for 24h]`; silence state stored and honored.
+- [ ] **M2.5** Correlation with Phase 3 M10 auto-iteration: if an anomaly suggests self-tune, route through M10's automated iteration; if it suggests intervention, route to M3.
+- [ ] **M2.6** Event taxonomy: `alert_raised`, `alert_acknowledged`, `alert_silenced`, `alert_rolled_up`.
 
 **Artifacts**: Watchmaster cron extension, alert templates, throttling logic, silence-state store in Keep.
 
@@ -164,19 +164,19 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M3 — Proactive intervention framework
+### M3 — Proactive intervention framework [ ]
 
 **Goal**: Watchkeepers propose preventive actions before detected patterns materialize into incidents; humans approve before any mutation.
 
 **Scope**
 
-- [ ] Built-in tool `propose_intervention(pattern_ref, proposed_action, rationale, expected_outcome)` available to Watchkeepers whose Manifest grants `intervention:propose` capability (off by default, granted per role).
-- [ ] Intervention schema: target (what to affect — another Watchkeeper, a tool version, a Manifest field, a Keep knowledge chunk), action (revert, retune, update, send-message-to-lead, escalate), expected measurable outcome.
-- [ ] Approval flow: Watchmaster posts the intervention as an approval card with pattern snapshot, proposed action, expected outcome, and reversal plan. Approve/Reject/Modify.
-- [ ] Auto-execute on approval: capability broker validates the acting Watchkeeper (or Watchmaster) has the necessary capability; action takes effect.
-- [ ] **Intervention audit**: every approved + executed intervention recorded with full context — pattern that triggered it, approver, action, expected outcome, reversal plan. Joins with M4 outcome tracking.
-- [ ] Intervention cooldown per Watchkeeper-target pair: no more than N interventions per target per day.
-- [ ] Keeper's Log events: `intervention_proposed`, `intervention_approved`, `intervention_rejected`, `intervention_executed`, `intervention_reverted`.
+- [ ] **M3.1** Built-in tool `propose_intervention(pattern_ref, proposed_action, rationale, expected_outcome)` available to Watchkeepers whose Manifest grants `intervention:propose` capability (off by default, granted per role).
+- [ ] **M3.2** Intervention schema: target (what to affect — another Watchkeeper, a tool version, a Manifest field, a Keep knowledge chunk), action (revert, retune, update, send-message-to-lead, escalate), expected measurable outcome.
+- [ ] **M3.3** Approval flow: Watchmaster posts the intervention as an approval card with pattern snapshot, proposed action, expected outcome, and reversal plan. Approve/Reject/Modify.
+- [ ] **M3.4** Auto-execute on approval: capability broker validates the acting Watchkeeper (or Watchmaster) has the necessary capability; action takes effect.
+- [ ] **M3.5** **Intervention audit**: every approved + executed intervention recorded with full context — pattern that triggered it, approver, action, expected outcome, reversal plan. Joins with M4 outcome tracking.
+- [ ] **M3.6** Intervention cooldown per Watchkeeper-target pair: no more than N interventions per target per day.
+- [ ] **M3.7** Keeper's Log events: `intervention_proposed`, `intervention_approved`, `intervention_rejected`, `intervention_executed`, `intervention_reverted`.
 
 **Artifacts**: `propose_intervention` built-in tool, Watchmaster extensions, intervention-audit schema in Keep.
 
@@ -192,18 +192,18 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M4 — Outcome tracking + evolution feedback loop
+### M4 — Outcome tracking + evolution feedback loop [ ]
 
 **Goal**: Close the loop — did the prediction come true? did the intervention work? feed outcomes into self-tuning evolution.
 
 **Scope**
 
-- [ ] Outcome-tracking schema in Keep: every `pattern_detected`, `intervention_executed`, `self_tune_applied` gets a corresponding `outcome_observation` record at a configurable horizon (N turns, or N hours).
-- [ ] Outcome metrics: did the predicted trend continue? did the anomaly resolve? did the intervention produce the expected measurable outcome?
-- [ ] Outcome classifier: simple rules (prediction horizon met / prediction failed / inconclusive). No ML in Phase 5; deterministic rules against the metric at the observation horizon.
-- [ ] Feedback channel: outcomes feed into Manifest evolution (M5 uses outcome history to inform next self-tune proposal) and into alert-template tuning (false-positive alerts surface for review).
-- [ ] Outcome report: weekly Watchmaster-generated summary to admin — "N predictions, X confirmed, Y false, Z inconclusive; M interventions, K successful".
-- [ ] Auto-revert: intervention whose outcome is measurably negative triggers an auto-revert proposal at its cooldown window close (lead approves).
+- [ ] **M4.1** Outcome-tracking schema in Keep: every `pattern_detected`, `intervention_executed`, `self_tune_applied` gets a corresponding `outcome_observation` record at a configurable horizon (N turns, or N hours).
+- [ ] **M4.2** Outcome metrics: did the predicted trend continue? did the anomaly resolve? did the intervention produce the expected measurable outcome?
+- [ ] **M4.3** Outcome classifier: simple rules (prediction horizon met / prediction failed / inconclusive). No ML in Phase 5; deterministic rules against the metric at the observation horizon.
+- [ ] **M4.4** Feedback channel: outcomes feed into Manifest evolution (M5 uses outcome history to inform next self-tune proposal) and into alert-template tuning (false-positive alerts surface for review).
+- [ ] **M4.5** Outcome report: weekly Watchmaster-generated summary to admin — "N predictions, X confirmed, Y false, Z inconclusive; M interventions, K successful".
+- [ ] **M4.6** Auto-revert: intervention whose outcome is measurably negative triggers an auto-revert proposal at its cooldown window close (lead approves).
 
 **Artifacts**: Keep schema migration for outcome records, outcome-classifier rules package, weekly report generator.
 
@@ -219,18 +219,18 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M5 — Multi-round self-tuning (iterative Manifest evolution)
+### M5 — Multi-round self-tuning (iterative Manifest evolution) [ ]
 
 **Goal**: Watchkeepers iterate their own Manifests across rounds, each round informed by outcomes from the previous.
 
 **Scope**
 
-- [ ] Self-tune proposal schema extended: `parent_proposal_id`, `outcome_summary_of_parent`, `iteration_round`. Watchmaster's AI reviewer includes these in the approval card.
-- [ ] Harness built-in tool `self_tune_iteration(prior_outcome, increment, rationale)` — proposes a small additional change based on observed outcome of prior round; same approval flow.
-- [ ] Evolution depth limit: no more than N iterations from any single seed Manifest without lead-requested "reset" (default N=5; after 5 iterations, lead must explicitly greenlight continuation).
-- [ ] Iteration history surfaced to lead via Watchmaster: `manifest.iteration_history(watchkeeper)` — shows the chain of iterations, each round's prior outcome, current state.
-- [ ] Abandoned-iteration detection: if an iteration chain shows three consecutive negative outcomes, Watchmaster auto-proposes a revert to an earlier round.
-- [ ] Interaction with Phase 3 M8 shadow-compare: raw `system_prompt` edits still use shadow-compare; iteration on `personality`/`language`/`toolset_acls` uses the lighter flow from Phase 2 M2.
+- [ ] **M5.1** Self-tune proposal schema extended: `parent_proposal_id`, `outcome_summary_of_parent`, `iteration_round`. Watchmaster's AI reviewer includes these in the approval card.
+- [ ] **M5.2** Harness built-in tool `self_tune_iteration(prior_outcome, increment, rationale)` — proposes a small additional change based on observed outcome of prior round; same approval flow.
+- [ ] **M5.3** Evolution depth limit: no more than N iterations from any single seed Manifest without lead-requested "reset" (default N=5; after 5 iterations, lead must explicitly greenlight continuation).
+- [ ] **M5.4** Iteration history surfaced to lead via Watchmaster: `manifest.iteration_history(watchkeeper)` — shows the chain of iterations, each round's prior outcome, current state.
+- [ ] **M5.5** Abandoned-iteration detection: if an iteration chain shows three consecutive negative outcomes, Watchmaster auto-proposes a revert to an earlier round.
+- [ ] **M5.6** Interaction with Phase 3 M8 shadow-compare: raw `system_prompt` edits still use shadow-compare; iteration on `personality`/`language`/`toolset_acls` uses the lighter flow from Phase 2 M2.
 
 **Artifacts**: self-tune schema extension, iteration-history tooling, abandonment heuristic.
 
@@ -246,19 +246,19 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M6 — Role bifurcation / specialist spawning
+### M6 — Role bifurcation / specialist spawning [ ]
 
 **Goal**: An agent that notices it's handling two distinct sub-task patterns can propose spawning a specialist sibling to take over one.
 
 **Scope**
 
-- [ ] Pattern detection extension: analyzer detects when one Watchkeeper's workload splits along identifiable axes (e.g., Coordinator handling both "quick-status-check" and "complex-multi-step-coordination" tasks).
-- [ ] Built-in tool `propose_bifurcation(sub_task_profile, proposed_specialist_manifest_draft, rationale)` — requires capability `role:bifurcate` (off by default).
-- [ ] Draft Manifest generation: Watchmaster-as-reviewer takes parent Manifest + sub-task profile → drafts a specialist Manifest (narrower toolset_acls, specialized personality, same immutable_core except `role_boundaries` narrowed).
-- [ ] Approval flow: lead sees parent Manifest + proposed specialist draft + which sub-tasks would migrate to specialist; approve spawns via Phase 1 M7 flow.
-- [ ] Post-spawn traffic routing: parent may emit `peer.broadcast` redirects for matching sub-task requests to the new specialist; or the Watchmaster gently reintroduces the specialist in relevant channels.
-- [ ] Anti-sprawl metric: `watchkeepers_per_role` tracked; soft-limit alerts when crossing threshold (default 5 active Watchkeepers per role).
-- [ ] Keeper's Log: `bifurcation_proposed`, `bifurcation_approved`, `bifurcation_rejected`, `specialist_spawned`, `specialist_traffic_migrated`.
+- [ ] **M6.1** Pattern detection extension: analyzer detects when one Watchkeeper's workload splits along identifiable axes (e.g., Coordinator handling both "quick-status-check" and "complex-multi-step-coordination" tasks).
+- [ ] **M6.2** Built-in tool `propose_bifurcation(sub_task_profile, proposed_specialist_manifest_draft, rationale)` — requires capability `role:bifurcate` (off by default).
+- [ ] **M6.3** Draft Manifest generation: Watchmaster-as-reviewer takes parent Manifest + sub-task profile → drafts a specialist Manifest (narrower toolset_acls, specialized personality, same immutable_core except `role_boundaries` narrowed).
+- [ ] **M6.4** Approval flow: lead sees parent Manifest + proposed specialist draft + which sub-tasks would migrate to specialist; approve spawns via Phase 1 M7 flow.
+- [ ] **M6.5** Post-spawn traffic routing: parent may emit `peer.broadcast` redirects for matching sub-task requests to the new specialist; or the Watchmaster gently reintroduces the specialist in relevant channels.
+- [ ] **M6.6** Anti-sprawl metric: `watchkeepers_per_role` tracked; soft-limit alerts when crossing threshold (default 5 active Watchkeepers per role).
+- [ ] **M6.7** Keeper's Log: `bifurcation_proposed`, `bifurcation_approved`, `bifurcation_rejected`, `specialist_spawned`, `specialist_traffic_migrated`.
 
 **Artifacts**: analyzer extension for sub-task clustering, `propose_bifurcation` tool, Watchmaster draft-generation, anti-sprawl metric.
 
@@ -274,23 +274,23 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M7 — Tool contribution SDK (docs + examples + vendor onboarding)
+### M7 — Tool contribution SDK (docs + examples + vendor onboarding) [ ]
 
 **Goal**: Third-party vendors (not only customer operators) can write TS tools, get them signed, and submit to the marketplace. Documented, example-driven, reproducible.
 
 **Scope**
 
-- [ ] SDK documentation site (static site, could be the same SvelteKit editor from Phase 3 M4 with a `/sdk` section, or a separate docs site — operator decides deployment):
+- [ ] **M7.1** SDK documentation site (static site, could be the same SvelteKit editor from Phase 3 M4 with a `/sdk` section, or a separate docs site — operator decides deployment):
   - Tool anatomy: `manifest.json`, `tool.ts`, `tool.test.ts`, capability declarations.
   - Capability dictionary reference.
   - Schema validation rules; common lint failures with fixes.
   - Signing procedure for vendors (extends Phase 2 M8 signing).
   - Testing locally against a mock platform.
   - Submission flow for the marketplace (M8).
-- [ ] Reference examples: at least 6 tools covering the main integration shapes (read-only, mutating, webhook-driven, scheduled, K2K-integrated, Keep-reading).
-- [ ] Local-dev harness: `wk sdk dev` — spins up a local sandbox where a vendor can iterate on their tool without a full platform deployment. Mocks Keep, messenger, LLM.
-- [ ] Test harness for vendor: `wk sdk test <tool-path>` — runs lint + typecheck + capability-declaration check + vitest + signing-dry-run; same gates as the full tool-authoring CI.
-- [ ] Vendor onboarding flow: vendor generates a vendor key pair; submits public key for platform verification; signs their tools with their private key; platform accepts per-operator-opt-in (M8).
+- [ ] **M7.2** Reference examples: at least 6 tools covering the main integration shapes (read-only, mutating, webhook-driven, scheduled, K2K-integrated, Keep-reading).
+- [ ] **M7.3** Local-dev harness: `wk sdk dev` — spins up a local sandbox where a vendor can iterate on their tool without a full platform deployment. Mocks Keep, messenger, LLM.
+- [ ] **M7.4** Test harness for vendor: `wk sdk test <tool-path>` — runs lint + typecheck + capability-declaration check + vitest + signing-dry-run; same gates as the full tool-authoring CI.
+- [ ] **M7.5** Vendor onboarding flow: vendor generates a vendor key pair; submits public key for platform verification; signs their tools with their private key; platform accepts per-operator-opt-in (M8).
 
 **Artifacts**: SDK docs site, 6 reference example tools, `wk sdk` CLI subcommand, vendor key-pair generation docs, vendor onboarding page.
 
@@ -305,22 +305,22 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M8 — Third-party tool marketplace
+### M8 — Third-party tool marketplace [ ]
 
 **Goal**: Vendors submit signed tools to a moderation queue; operators opt-in per vendor for their deployment; approved tools become visible in the Phase 3 M5 marketplace UI.
 
 **Scope**
 
-- [ ] Marketplace submission API: vendor POSTs a signed tool bundle with metadata (name, description, tags, vendor key fingerprint). Returns submission ID; enters moderation queue.
-- [ ] Moderation dashboard (extension of Manifest editor UI from Phase 3 M4): platform admin (or designated reviewer) sees pending submissions; reviews code + metadata; approves / rejects with reason.
-- [ ] Operator-level vendor opt-in: per-deployment config lists trusted vendors by key fingerprint; only tools signed by trusted vendors appear in that deployment's marketplace.
-- [ ] Default vendor set: empty. Operators explicitly add vendors. Platform-default vendors (if any — e.g., the platform vendor itself) clearly marked.
-- [ ] Marketplace UI extensions (builds on Phase 3 M5):
+- [ ] **M8.1** Marketplace submission API: vendor POSTs a signed tool bundle with metadata (name, description, tags, vendor key fingerprint). Returns submission ID; enters moderation queue.
+- [ ] **M8.2** Moderation dashboard (extension of Manifest editor UI from Phase 3 M4): platform admin (or designated reviewer) sees pending submissions; reviews code + metadata; approves / rejects with reason.
+- [ ] **M8.3** Operator-level vendor opt-in: per-deployment config lists trusted vendors by key fingerprint; only tools signed by trusted vendors appear in that deployment's marketplace.
+- [ ] **M8.4** Default vendor set: empty. Operators explicitly add vendors. Platform-default vendors (if any — e.g., the platform vendor itself) clearly marked.
+- [ ] **M8.5** Marketplace UI extensions (builds on Phase 3 M5):
   - Filter: platform / customer-authored / vendor-authored.
   - Vendor badge + fingerprint on each tool listing.
   - "Adopt this tool" flow: operator picks a vendor tool, spawns a Watchkeeper using it, or adds to an existing Manifest's toolset.
-- [ ] Revocation: vendor key revoked → all tools by that vendor flagged; operators receive a warning in Slack; opt-out is one CLI command.
-- [ ] Keeper's Log events: `vendor_tool_submitted`, `vendor_tool_moderated`, `vendor_tool_adopted`, `vendor_key_revoked`.
+- [ ] **M8.6** Revocation: vendor key revoked → all tools by that vendor flagged; operators receive a warning in Slack; opt-out is one CLI command.
+- [ ] **M8.7** Keeper's Log events: `vendor_tool_submitted`, `vendor_tool_moderated`, `vendor_tool_adopted`, `vendor_key_revoked`.
 
 **Artifacts**: submission API, moderation dashboard in editor UI, per-deployment vendor-trust config, marketplace UI filter extensions, revocation flow.
 
@@ -337,20 +337,20 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M9 — Keep federation foundation (`cross_org` scope + peer discovery)
+### M9 — Keep federation foundation (`cross_org` scope + peer discovery) [ ]
 
 **Goal**: Keep gains a `scope=cross_org` namespace and the ability to peer with other Keep instances. Deployment opt-in; per-peer opt-in; mutual TLS pinning.
 
 **Scope**
 
-- [ ] Keep schema: `scope ∈ {org, user:<id>, agent:<id>, cross_org}` — new fourth scope. RLS policy: `cross_org` rows readable by the acting agent if Manifest has `federation:read` capability; never writable by agents directly (writes happen via anonymization pipeline in M10).
-- [ ] Federation config: list of peer Keep endpoints with mutual TLS certs pinned; per-peer push/pull direction config; trust-group tag.
-- [ ] Peer discovery: simple for Phase 5 — static list in config. Dynamic discovery (registry-based) → Phase 6.
-- [ ] Federation service inside Keep: periodic sync per-peer; pushes rows in `cross_org` scope to peers who've opted to pull; pulls rows from peers this deployment has opted to follow.
-- [ ] Sync integrity: each `cross_org` row carries source-deployment-id (hashed, not human-readable) + signature; receiver verifies; mismatched signature refuses.
-- [ ] Airgap guard: if `airgap=true`, federation refuses to start; boot-time error.
-- [ ] Per-peer cost metrics: bytes synced in/out, records synced, last-sync time, error counts.
-- [ ] Keeper's Log events: `peer_sync_started`, `peer_sync_completed`, `peer_sync_failed`, `cross_org_row_received`, `cross_org_row_sent`.
+- [ ] **M9.1** Keep schema: `scope ∈ {org, user:<id>, agent:<id>, cross_org}` — new fourth scope. RLS policy: `cross_org` rows readable by the acting agent if Manifest has `federation:read` capability; never writable by agents directly (writes happen via anonymization pipeline in M10).
+- [ ] **M9.2** Federation config: list of peer Keep endpoints with mutual TLS certs pinned; per-peer push/pull direction config; trust-group tag.
+- [ ] **M9.3** Peer discovery: simple for Phase 5 — static list in config. Dynamic discovery (registry-based) → Phase 6.
+- [ ] **M9.4** Federation service inside Keep: periodic sync per-peer; pushes rows in `cross_org` scope to peers who've opted to pull; pulls rows from peers this deployment has opted to follow.
+- [ ] **M9.5** Sync integrity: each `cross_org` row carries source-deployment-id (hashed, not human-readable) + signature; receiver verifies; mismatched signature refuses.
+- [ ] **M9.6** Airgap guard: if `airgap=true`, federation refuses to start; boot-time error.
+- [ ] **M9.7** Per-peer cost metrics: bytes synced in/out, records synced, last-sync time, error counts.
+- [ ] **M9.8** Keeper's Log events: `peer_sync_started`, `peer_sync_completed`, `peer_sync_failed`, `cross_org_row_received`, `cross_org_row_sent`.
 
 **Artifacts**: schema migration adding `cross_org`, federation service inside Keep binary, config templates, peer mTLS setup docs.
 
@@ -366,22 +366,22 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M10 — Anonymization pipeline + pattern extraction
+### M10 — Anonymization pipeline + pattern extraction [ ]
 
 **Goal**: The only path a row can reach `scope=cross_org` is via an anonymization pipeline that strips sensitive fields and applies pattern-level aggregation.
 
 **Scope**
 
-- [ ] **Promotion-to-cross-org is explicit**: an org-scoped pattern becomes cross-org only through a deliberate `promote_to_federation(pattern, anonymization_policy)` action routed through Watchmaster approval — same model as Phase 1 M6 `promote_to_keep`.
-- [ ] Anonymization policies (configurable per deployment; strictest by default):
+- [ ] **M10.1** **Promotion-to-cross-org is explicit**: an org-scoped pattern becomes cross-org only through a deliberate `promote_to_federation(pattern, anonymization_policy)` action routed through Watchmaster approval — same model as Phase 1 M6 `promote_to_keep`.
+- [ ] **M10.2** Anonymization policies (configurable per deployment; strictest by default):
   - Field redaction: list of fields always stripped (person names, emails, URLs, IDs, free-text fields).
   - Pattern abstraction: the row is reduced to an abstract pattern (e.g., "PRs of type X tend to need reviewer Y's skills" becomes "code-review tasks involving [redacted-repo-type] tend to benefit from [redacted-skillset]").
   - K-anonymity guarantee: only patterns observed across K ≥ 5 distinct org-instances (after peer sync) reach back-propagation consumers.
-- [ ] **Anonymization-is-Keep-egress-only**: rows cannot bypass the pipeline. Enforced at schema level (insert trigger on `cross_org` rows requires a signed pipeline-execution reference).
-- [ ] Pattern extraction tool `promote_pattern(observation_id)` callable by Watchkeepers with `federation:propose` capability; Watchmaster reviews + approves + runs pipeline.
-- [ ] Operator-level review before first cross-org push: on first promotion in a deployment, lead reviews not just this pattern but the anonymization policy itself — confirms what's being stripped. Subsequent promotions use the confirmed policy.
-- [ ] Per-row audit: `cross_org_row.source_pattern` references the original org-scoped row (kept local, never federated); promotion history traceable.
-- [ ] Keeper's Log events: `federation_promotion_proposed`, `federation_promotion_approved`, `federation_promotion_executed`, `anonymization_failed`.
+- [ ] **M10.3** **Anonymization-is-Keep-egress-only**: rows cannot bypass the pipeline. Enforced at schema level (insert trigger on `cross_org` rows requires a signed pipeline-execution reference).
+- [ ] **M10.4** Pattern extraction tool `promote_pattern(observation_id)` callable by Watchkeepers with `federation:propose` capability; Watchmaster reviews + approves + runs pipeline.
+- [ ] **M10.5** Operator-level review before first cross-org push: on first promotion in a deployment, lead reviews not just this pattern but the anonymization policy itself — confirms what's being stripped. Subsequent promotions use the confirmed policy.
+- [ ] **M10.6** Per-row audit: `cross_org_row.source_pattern` references the original org-scoped row (kept local, never federated); promotion history traceable.
+- [ ] **M10.7** Keeper's Log events: `federation_promotion_proposed`, `federation_promotion_approved`, `federation_promotion_executed`, `anonymization_failed`.
 
 **Artifacts**: anonymization pipeline Go package (in Keep binary), policy config schema, `promote_pattern` tool, insert trigger enforcing pipeline, audit schema for promotions.
 
@@ -397,19 +397,19 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M11 — Federation back-propagation + opt-in subscription
+### M11 — Federation back-propagation + opt-in subscription [ ]
 
 **Goal**: Patterns learned across peers flow back into individual deployments as consumable knowledge; deployments opt-in per-peer per-pattern-type.
 
 **Scope**
 
-- [ ] Pattern subscription config: each deployment declares which pattern types it wants to ingest from which peers (trust groups + pattern type filters).
-- [ ] Ingestion: pulled `cross_org` rows become queryable by Watchkeepers with `federation:read` capability; surfaced in the same `keep.search` API but with explicit `scope=cross_org` flag.
-- [ ] Watchkeeper access: Manifest can declare `federation_access: {pattern_types: [...], peers: [...]}` to scope the read capability further than `federation:read` alone.
-- [ ] Applied-pattern tracking: when a local Watchkeeper consumes a cross-org pattern and uses it (e.g., in a decision), the consumption is logged with the cross-org-row reference. Enables later measurement of cross-org value.
-- [ ] Reputation signal (Phase 5 simple form): cross-org patterns whose consumption produces good local outcomes (via M4 outcome tracking) get a "useful" mark; patterns never consumed or with negative outcomes fade out of auto-injection.
-- [ ] Operator controls: `wk federation peers list | status | pause <peer> | trust <peer> --pattern-types=...`.
-- [ ] Phase 5 **does not** auto-apply any cross-org pattern — agent sees them via recall/search, uses them in reasoning, but no blind execution.
+- [ ] **M11.1** Pattern subscription config: each deployment declares which pattern types it wants to ingest from which peers (trust groups + pattern type filters).
+- [ ] **M11.2** Ingestion: pulled `cross_org` rows become queryable by Watchkeepers with `federation:read` capability; surfaced in the same `keep.search` API but with explicit `scope=cross_org` flag.
+- [ ] **M11.3** Watchkeeper access: Manifest can declare `federation_access: {pattern_types: [...], peers: [...]}` to scope the read capability further than `federation:read` alone.
+- [ ] **M11.4** Applied-pattern tracking: when a local Watchkeeper consumes a cross-org pattern and uses it (e.g., in a decision), the consumption is logged with the cross-org-row reference. Enables later measurement of cross-org value.
+- [ ] **M11.5** Reputation signal (Phase 5 simple form): cross-org patterns whose consumption produces good local outcomes (via M4 outcome tracking) get a "useful" mark; patterns never consumed or with negative outcomes fade out of auto-injection.
+- [ ] **M11.6** Operator controls: `wk federation peers list | status | pause <peer> | trust <peer> --pattern-types=...`.
+- [ ] **M11.7** Phase 5 **does not** auto-apply any cross-org pattern — agent sees them via recall/search, uses them in reasoning, but no blind execution.
 
 **Artifacts**: subscription config, `keep.search` extension for cross-org filter, applied-pattern tracking schema, reputation marking, CLI extensions.
 
@@ -425,24 +425,24 @@ Total: ~64–91 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M12 — Phase 5 integration demo + proactive-prevention metric harness
+### M12 — Phase 5 integration demo + proactive-prevention metric harness [ ]
 
 **Goal**: Acceptance gate. Demonstrate all four themes working together, with the Phase 5 success metric measured.
 
 **Scope**
 
-- [ ] Demo deployment (extends Phase 4 demo): existing Party + a dedicated test scenario that exercises:
+- [ ] **M12.1** Demo deployment (extends Phase 4 demo): existing Party + a dedicated test scenario that exercises:
   - **Theme A**: anomaly detection on seeded metric trajectory → proactive intervention proposal → lead approves → action → M4 outcome tracking confirms prevention.
   - **Theme B**: multi-round self-tuning on a Watchkeeper across 3 rounds with visible improvement; role bifurcation proposed and approved for a Coordinator noticed to be handling two sub-tasks.
   - **Theme C**: vendor (simulated by teammate) submits a signed tool via SDK; admin moderates and approves; operator opts-in vendor; operator spawns a Watchkeeper using the vendor tool.
   - **Theme D**: two federated deployments (A and B); A promotes anonymized pattern; B ingests; B's Watchkeeper demonstrably uses the pattern in a decision.
-- [ ] **Proactive-prevention metric harness**: 2-week window in demo environment.
+- [ ] **M12.2** **Proactive-prevention metric harness**: 2-week window in demo environment.
   - Baseline week: Watchkeepers operate reactively only (intervention capability disabled).
   - Instrumented week: proactive intervention enabled.
   - Metric: count of patterns-that-would-have-become-incidents prevented; count of incidents despite prevention attempt; count of false-positive interventions.
   - Acceptance threshold: at least N > 0 demonstrably-prevented issues over the week, false-positive rate ≤ threshold.
-- [ ] `make phase5-smoke` runs condensed versions of all four demonstrations in CI.
-- [ ] Runbook appendix: proactive intervention setup, self-mod monitoring, vendor onboarding, federation configuration, airgap-mode caveats.
+- [ ] **M12.3** `make phase5-smoke` runs condensed versions of all four demonstrations in CI.
+- [ ] **M12.4** Runbook appendix: proactive intervention setup, self-mod monitoring, vendor onboarding, federation configuration, airgap-mode caveats.
 
 **Artifacts**: demo scripts, proactive-prevention metric harness, smoke test, runbook additions.
 

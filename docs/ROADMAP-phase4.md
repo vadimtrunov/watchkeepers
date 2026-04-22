@@ -103,19 +103,19 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ## 4. Milestones
 
-### ⬜ M1 — SSO (SAML + OIDC) for operators
+### M1 — SSO (SAML + OIDC) for operators [ ]
 
 **Goal**: Operator identity sourced from the customer's corporate IdP. Joiner/leaver lifecycle handled automatically.
 
 **Scope**
 
-- [ ] SAML 2.0 SP implementation with standard metadata exchange; tested against Okta, Azure AD, Google Workspace, ADFS.
-- [ ] OIDC client implementation for IdPs exposing OIDC (Auth0, Keycloak, Okta OIDC, Azure AD v2).
-- [ ] Operator session: SSO-issued identity minted into a short-lived capability token consumed by all Phase 1+ interfaces (CLI, Manifest editor UI, HTTP APIs).
-- [ ] Keeper's Log `actor` field now records SSO identity (email + IdP group claims) rather than local operator name where SSO enabled.
-- [ ] Local account fallback: kept for bootstrap (first operator before SSO is configured) and for break-glass; disabled automatically once an SSO session has been established. Break-glass local login is a loud audit event.
-- [ ] SSO attribute mapping: which IdP group maps to "operator"; no finer-grained RBAC (per Phase 4 decision).
-- [ ] Runbook: SSO bootstrap procedure, metadata refresh, IdP outage response.
+- [ ] **M1.1** SAML 2.0 SP implementation with standard metadata exchange; tested against Okta, Azure AD, Google Workspace, ADFS.
+- [ ] **M1.2** OIDC client implementation for IdPs exposing OIDC (Auth0, Keycloak, Okta OIDC, Azure AD v2).
+- [ ] **M1.3** Operator session: SSO-issued identity minted into a short-lived capability token consumed by all Phase 1+ interfaces (CLI, Manifest editor UI, HTTP APIs).
+- [ ] **M1.4** Keeper's Log `actor` field now records SSO identity (email + IdP group claims) rather than local operator name where SSO enabled.
+- [ ] **M1.5** Local account fallback: kept for bootstrap (first operator before SSO is configured) and for break-glass; disabled automatically once an SSO session has been established. Break-glass local login is a loud audit event.
+- [ ] **M1.6** SSO attribute mapping: which IdP group maps to "operator"; no finer-grained RBAC (per Phase 4 decision).
+- [ ] **M1.7** Runbook: SSO bootstrap procedure, metadata refresh, IdP outage response.
 
 **Artifacts**: `auth/saml/` + `auth/oidc/` Go packages, CLI + editor UI integration, runbook section.
 
@@ -132,19 +132,19 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M2 — Keep HA (replication + failover)
+### M2 — Keep HA (replication + failover) [ ]
 
 **Goal**: Keep survives primary DB failure with RPO ≤ 5 seconds and RTO ≤ 60 seconds.
 
 **Scope**
 
-- [ ] Postgres streaming replication: primary + at least one synchronous replica + one asynchronous replica; config templates for both streaming and logical modes.
-- [ ] Patroni (or equivalent) for automated failover; etcd/consul cluster for coordination.
-- [ ] `keepclient` changes: connection string accepts a service name that resolves to current primary; on write-failure, retry against newly-elected primary with idempotency-safe semantics.
-- [ ] Read-replica routing: read-only operations (e.g., `keep.search`, `keep.log_tail`) can be directed to replicas via a client-side preference flag. Writes always go to primary.
-- [ ] Append-only invariant on `keepers_log` verified to survive replication + failover (trigger replicates; constraint holds on replicas).
-- [ ] Backup chain updated to be replication-aware (base backup + WAL archive), compatible with Phase 2 M9 cron scheduler.
-- [ ] HA drill: `make keep-failover-drill` kills the primary, observes election, confirms traffic continues.
+- [ ] **M2.1** Postgres streaming replication: primary + at least one synchronous replica + one asynchronous replica; config templates for both streaming and logical modes.
+- [ ] **M2.2** Patroni (or equivalent) for automated failover; etcd/consul cluster for coordination.
+- [ ] **M2.3** `keepclient` changes: connection string accepts a service name that resolves to current primary; on write-failure, retry against newly-elected primary with idempotency-safe semantics.
+- [ ] **M2.4** Read-replica routing: read-only operations (e.g., `keep.search`, `keep.log_tail`) can be directed to replicas via a client-side preference flag. Writes always go to primary.
+- [ ] **M2.5** Append-only invariant on `keepers_log` verified to survive replication + failover (trigger replicates; constraint holds on replicas).
+- [ ] **M2.6** Backup chain updated to be replication-aware (base backup + WAL archive), compatible with Phase 2 M9 cron scheduler.
+- [ ] **M2.7** HA drill: `make keep-failover-drill` kills the primary, observes election, confirms traffic continues.
 
 **Artifacts**: Patroni config, docker-compose / k8s templates for HA topology, `keepclient` failover extensions, drill script, runbook.
 
@@ -160,18 +160,18 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M3 — Multi-host harness deployment + zero-downtime upgrades
+### M3 — Multi-host harness deployment + zero-downtime upgrades [ ]
 
 **Goal**: Harnesses run across a pool of hosts; core-binary and harness-binary upgrades complete with zero user-visible downtime.
 
 **Scope**
 
-- [ ] Harness host pool: config declares a set of hosts; lifecycle manager picks placement based on simple policy (load-aware by default; pinnable per Watchkeeper via Manifest `host_affinity` hint).
-- [ ] Health-based migration: harness crashloop on host X triggers re-spawn on a healthy host; Notebook file either travels (via ArchiveStore round-trip) or the new instance is seeded with a fresh Notebook + import of latest archive.
-- [ ] Zero-downtime upgrade for **core**: blue/green deployment — new core instance spun up, passes health checks, traffic swung over via service discovery, old instance drained.
-- [ ] Zero-downtime upgrade for **harnesses**: rolling replacement — one Watchkeeper at a time, `SIGTERM` + grace period allows in-flight turn to finish, new harness binary picks up identical Manifest, confirmed healthy, next one.
-- [ ] Upgrade verification: post-upgrade smoke must pass before the next node is touched; rollback on smoke failure.
-- [ ] Graceful shutdown signal handling everywhere; in-flight saga state persisted so an interrupted spawn flow can resume post-restart.
+- [ ] **M3.1** Harness host pool: config declares a set of hosts; lifecycle manager picks placement based on simple policy (load-aware by default; pinnable per Watchkeeper via Manifest `host_affinity` hint).
+- [ ] **M3.2** Health-based migration: harness crashloop on host X triggers re-spawn on a healthy host; Notebook file either travels (via ArchiveStore round-trip) or the new instance is seeded with a fresh Notebook + import of latest archive.
+- [ ] **M3.3** Zero-downtime upgrade for **core**: blue/green deployment — new core instance spun up, passes health checks, traffic swung over via service discovery, old instance drained.
+- [ ] **M3.4** Zero-downtime upgrade for **harnesses**: rolling replacement — one Watchkeeper at a time, `SIGTERM` + grace period allows in-flight turn to finish, new harness binary picks up identical Manifest, confirmed healthy, next one.
+- [ ] **M3.5** Upgrade verification: post-upgrade smoke must pass before the next node is touched; rollback on smoke failure.
+- [ ] **M3.6** Graceful shutdown signal handling everywhere; in-flight saga state persisted so an interrupted spawn flow can resume post-restart.
 
 **Artifacts**: lifecycle manager host-pool extensions, upgrade script, blue/green config, graceful-shutdown hardening across core + harness.
 
@@ -187,18 +187,18 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M4 — Encryption at rest (Keep + Notebook + ArchiveStore)
+### M4 — Encryption at rest (Keep + Notebook + ArchiveStore) [ ]
 
 **Goal**: Every persistent data store encrypted at rest with customer-controllable keys where possible.
 
 **Scope**
 
-- [ ] Keep Postgres: filesystem-layer encryption via LUKS for self-hosted Postgres; or Postgres TDE extension (`pgcrypto` for column-level PHI) on top.
-- [ ] Notebook SQLite: migrate from plain SQLite to **SQLCipher** (compatible API, encrypted file); key derived from secrets backend per-agent.
-- [ ] ArchiveStore encryption: for `LocalFS`, filesystem LUKS; for `S3Compatible`, SSE-S3 / SSE-KMS configured per endpoint.
-- [ ] Key management integration: keys live in the secrets backend from M5 — not on disk.
-- [ ] Rotation procedure: key rotation documented and drill-tested; in-flight Watchkeepers smoothly transition.
-- [ ] Column-level encryption for explicit PHI/PII fields in Keep (optional per deployment; activated by data-classification tags from M11).
+- [ ] **M4.1** Keep Postgres: filesystem-layer encryption via LUKS for self-hosted Postgres; or Postgres TDE extension (`pgcrypto` for column-level PHI) on top.
+- [ ] **M4.2** Notebook SQLite: migrate from plain SQLite to **SQLCipher** (compatible API, encrypted file); key derived from secrets backend per-agent.
+- [ ] **M4.3** ArchiveStore encryption: for `LocalFS`, filesystem LUKS; for `S3Compatible`, SSE-S3 / SSE-KMS configured per endpoint.
+- [ ] **M4.4** Key management integration: keys live in the secrets backend from M5 — not on disk.
+- [ ] **M4.5** Rotation procedure: key rotation documented and drill-tested; in-flight Watchkeepers smoothly transition.
+- [ ] **M4.6** Column-level encryption for explicit PHI/PII fields in Keep (optional per deployment; activated by data-classification tags from M11).
 
 **Artifacts**: LUKS provisioning scripts (or TDE setup), SQLCipher integration in Notebook library, ArchiveStore encryption config, rotation runbook.
 
@@ -213,19 +213,19 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M5 — Encryption in transit (mTLS) + secrets backend
+### M5 — Encryption in transit (mTLS) + secrets backend [ ]
 
 **Goal**: All internal communication mTLS-protected; secrets live in a proper backend, not env vars.
 
 **Scope**
 
-- [ ] Cert issuance: `cert-manager` for k8s deployments; operator-managed certs for docker-compose (bootstrap script generates per-component certs via a local CA).
-- [ ] mTLS between: core ↔ Keep, harness ↔ Keep, harness ↔ core (JSON-RPC over stdio within the same host stays unencrypted since it's same-process; cross-host harness gets mTLS).
-- [ ] Editor UI ↔ core: TLS 1.3 with optional client cert for operator authentication when SSO is unavailable (break-glass).
-- [ ] Secrets backend pluggable interface gets real implementations: **Vault** (recommended), **AWS KMS**, **GCP KMS**, **Azure Key Vault**, **HashiCorp Boundary** (for short-lived creds).
-- [ ] All Phase 1+ secret consumers migrated from env-first path to backend-first: Claude Code credentials, Slack tokens, GitHub/GitLab/Jira/Confluence tokens, database passwords, signing keys, encryption keys.
-- [ ] Env-first path still works for dev (documented); disabled automatically in production when `environment=production` config is set.
-- [ ] Rotation automation: secrets backend rotates where supported; core refreshes via short-lived lease pattern.
+- [ ] **M5.1** Cert issuance: `cert-manager` for k8s deployments; operator-managed certs for docker-compose (bootstrap script generates per-component certs via a local CA).
+- [ ] **M5.2** mTLS between: core ↔ Keep, harness ↔ Keep, harness ↔ core (JSON-RPC over stdio within the same host stays unencrypted since it's same-process; cross-host harness gets mTLS).
+- [ ] **M5.3** Editor UI ↔ core: TLS 1.3 with optional client cert for operator authentication when SSO is unavailable (break-glass).
+- [ ] **M5.4** Secrets backend pluggable interface gets real implementations: **Vault** (recommended), **AWS KMS**, **GCP KMS**, **Azure Key Vault**, **HashiCorp Boundary** (for short-lived creds).
+- [ ] **M5.5** All Phase 1+ secret consumers migrated from env-first path to backend-first: Claude Code credentials, Slack tokens, GitHub/GitLab/Jira/Confluence tokens, database passwords, signing keys, encryption keys.
+- [ ] **M5.6** Env-first path still works for dev (documented); disabled automatically in production when `environment=production` config is set.
+- [ ] **M5.7** Rotation automation: secrets backend rotates where supported; core refreshes via short-lived lease pattern.
 
 **Artifacts**: `secrets/` Go packages for each backend, cert-generation script, mTLS config templates, migration docs.
 
@@ -241,21 +241,21 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M6 — Airgap mode + offline install
+### M6 — Airgap mode + offline install [ ]
 
 **Goal**: Platform can be deployed on a host with zero internet connectivity; all required capabilities work in-cluster.
 
 **Scope**
 
-- [ ] `airgap: true` flag in core config. When set:
+- [ ] **M6.1** `airgap: true` flag in core config. When set:
   - Core refuses any outbound HTTP to non-whitelist destinations; whitelist explicitly empty by default (customer adds on-prem services: their GitLab, their Jira, their Mattermost).
   - Runtime verification at boot: resolves every configured integration URL; refuses to start if any resolves to a public IP outside whitelist.
   - Self-hosted LLM (Gemma via vLLM/Ollama from Phase 3 M3) becomes the default `LLMProvider`.
   - Mattermost (from M7) becomes the default `MessengerAdapter`.
   - Claude Code / Codex providers disabled automatically.
-- [ ] Offline install package: docker image tarballs (`wk-core`, `wk-keep`, `wk-editor`, `wk-gemma-backend`, `wk-mattermost`, `wk-postgres`) + Go/npm/pip offline mirrors + install script that works from a USB drive on an isolated host.
-- [ ] Dependency update procedure: documented process for importing a new release into an airgapped environment (platform ships a signed tarball; customer verifies signature + runs an import script).
-- [ ] Airgap smoke test: `make airgap-smoke` launches a network-namespaced test environment with no internet; full Phase 1 success scenario passes.
+- [ ] **M6.2** Offline install package: docker image tarballs (`wk-core`, `wk-keep`, `wk-editor`, `wk-gemma-backend`, `wk-mattermost`, `wk-postgres`) + Go/npm/pip offline mirrors + install script that works from a USB drive on an isolated host.
+- [ ] **M6.3** Dependency update procedure: documented process for importing a new release into an airgapped environment (platform ships a signed tarball; customer verifies signature + runs an import script).
+- [ ] **M6.4** Airgap smoke test: `make airgap-smoke` launches a network-namespaced test environment with no internet; full Phase 1 success scenario passes.
 
 **Artifacts**: airgap-mode config gating, boot-time verification, offline install package build script, airgap smoke test, runbook chapter on airgap deployment.
 
@@ -271,18 +271,18 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M7 — Mattermost adapter
+### M7 — Mattermost adapter [ ]
 
 **Goal**: Mattermost as a `MessengerAdapter` implementation — the self-hosted, airgap-compatible default messenger alternative to Slack.
 
 **Scope**
 
-- [ ] `messenger/mattermost/` Go adapter using Mattermost REST API + WebSocket for events.
-- [ ] `MessengerAdapter` methods: `SendMessage`, `Subscribe`, `CreateApp` (Mattermost bots are created via admin API — simpler than Slack Manifest API), `InstallApp`, `SetBotProfile`, `LookupUser`.
-- [ ] Channel model parity: public channels, private channels (equivalent to Slack private channels), DMs, threading.
-- [ ] K2K over Mattermost: private channel per conversation, same pattern as Slack.
-- [ ] Bot token management via secrets backend.
-- [ ] Runbook: Mattermost workspace bootstrap, admin token provisioning, rate-limit guidance.
+- [ ] **M7.1** `messenger/mattermost/` Go adapter using Mattermost REST API + WebSocket for events.
+- [ ] **M7.2** `MessengerAdapter` methods: `SendMessage`, `Subscribe`, `CreateApp` (Mattermost bots are created via admin API — simpler than Slack Manifest API), `InstallApp`, `SetBotProfile`, `LookupUser`.
+- [ ] **M7.3** Channel model parity: public channels, private channels (equivalent to Slack private channels), DMs, threading.
+- [ ] **M7.4** K2K over Mattermost: private channel per conversation, same pattern as Slack.
+- [ ] **M7.5** Bot token management via secrets backend.
+- [ ] **M7.6** Runbook: Mattermost workspace bootstrap, admin token provisioning, rate-limit guidance.
 
 **Artifacts**: `messenger/mattermost/` adapter, runbook section, docker-compose service for self-hosted Mattermost (used in airgap deployments).
 
@@ -298,18 +298,18 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M8 — MS Teams adapter
+### M8 — MS Teams adapter [ ]
 
 **Goal**: MS Teams as a `MessengerAdapter` for enterprise customers standardized on Microsoft.
 
 **Scope**
 
-- [ ] `messenger/teams/` Go adapter using Microsoft Bot Framework + Graph API.
-- [ ] `MessengerAdapter` methods: standard set; Teams has more bureaucratic bot-creation flow (Azure AD app registration + Bot Channel Registration + app manifest upload). Runbook walks through the one-time setup; adapter picks up from a registered app onwards.
-- [ ] Teams conversation model: 1:1 chats, group chats, channels in Teams (different from Slack channels), threaded messages.
-- [ ] K2K over Teams: private Teams group chat per conversation; escalation via lead's 1:1 DM.
-- [ ] Bot credentials via secrets backend; token lifecycle handled.
-- [ ] Runbook: Azure AD app registration walkthrough, permission consent, rate-limit awareness.
+- [ ] **M8.1** `messenger/teams/` Go adapter using Microsoft Bot Framework + Graph API.
+- [ ] **M8.2** `MessengerAdapter` methods: standard set; Teams has more bureaucratic bot-creation flow (Azure AD app registration + Bot Channel Registration + app manifest upload). Runbook walks through the one-time setup; adapter picks up from a registered app onwards.
+- [ ] **M8.3** Teams conversation model: 1:1 chats, group chats, channels in Teams (different from Slack channels), threaded messages.
+- [ ] **M8.4** K2K over Teams: private Teams group chat per conversation; escalation via lead's 1:1 DM.
+- [ ] **M8.5** Bot credentials via secrets backend; token lifecycle handled.
+- [ ] **M8.6** Runbook: Azure AD app registration walkthrough, permission consent, rate-limit awareness.
 
 **Artifacts**: `messenger/teams/` adapter, runbook chapter, credential-setup script.
 
@@ -325,17 +325,17 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M9 — Discord adapter
+### M9 — Discord adapter [ ]
 
 **Goal**: Discord as a `MessengerAdapter`, covering gaming / community / dev-heavy customers who run on Discord.
 
 **Scope**
 
-- [ ] `messenger/discord/` Go adapter via `discordgo` or similar; uses the Gateway + REST APIs.
-- [ ] Standard `MessengerAdapter` methods; Discord's model: servers ("guilds"), channels (text/voice/thread), DMs. Voice is out of scope.
-- [ ] Slash command registration per bot (Discord's primary interaction pattern).
-- [ ] Bot token management via secrets backend.
-- [ ] Runbook: Discord developer portal walkthrough, bot creation, server invite link generation.
+- [ ] **M9.1** `messenger/discord/` Go adapter via `discordgo` or similar; uses the Gateway + REST APIs.
+- [ ] **M9.2** Standard `MessengerAdapter` methods; Discord's model: servers ("guilds"), channels (text/voice/thread), DMs. Voice is out of scope.
+- [ ] **M9.3** Slash command registration per bot (Discord's primary interaction pattern).
+- [ ] **M9.4** Bot token management via secrets backend.
+- [ ] **M9.5** Runbook: Discord developer portal walkthrough, bot creation, server invite link generation.
 
 **Artifacts**: `messenger/discord/` adapter, runbook chapter.
 
@@ -351,22 +351,22 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M10 — Bitbucket adapter + code-review tool suite
+### M10 — Bitbucket adapter + code-review tool suite [ ]
 
 **Goal**: Bitbucket as a VCS integration, symmetric with Phase 2 M4 (GitHub) and Phase 3 M6 (GitLab).
 
 **Scope**
 
-- [ ] `bitbucket/` Go adapter supporting Bitbucket Cloud and Bitbucket Data Center (self-hosted). Base URL configurable.
-- [ ] Tool suite:
+- [ ] **M10.1** `bitbucket/` Go adapter supporting Bitbucket Cloud and Bitbucket Data Center (self-hosted). Base URL configurable.
+- [ ] **M10.2** Tool suite:
   - `bitbucket.list_open_prs(repo, filters)`
   - `bitbucket.fetch_pr(repo, pr_id)`
   - `bitbucket.post_pr_comment`, `bitbucket.post_diff_comment`
   - `bitbucket.request_changes`, `bitbucket.approve_pr`
   - `bitbucket.fetch_pipeline_status`
-- [ ] Capabilities: `bitbucket:read`, `bitbucket:write`, `bitbucket:review`.
-- [ ] Webhook intake for Bitbucket events (`bitbucket.pr_opened`, etc.).
-- [ ] Manifest template `code-reviewer-bitbucket.yaml`.
+- [ ] **M10.3** Capabilities: `bitbucket:read`, `bitbucket:write`, `bitbucket:review`.
+- [ ] **M10.4** Webhook intake for Bitbucket events (`bitbucket.pr_opened`, etc.).
+- [ ] **M10.5** Manifest template `code-reviewer-bitbucket.yaml`.
 
 **Artifacts**: `bitbucket/` adapter, TS tools in platform registry, capability dictionary entries, template, webhook receiver.
 
@@ -382,19 +382,19 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M11 — HIPAA-friendly posture + data classification
+### M11 — HIPAA-friendly posture + data classification [ ]
 
 **Goal**: Controls and documentation sufficient for a customer to claim HIPAA readiness without us claiming certification. SOC2 audit-forwarding from Phase 3 M11 is already in place; M11 adds HIPAA-specific controls.
 
 **Scope**
 
-- [ ] **Data classification tags**: `keep_row.classification ∈ {public, internal, confidential, phi, pii}`; `notebook_entry.classification` same. Policy: `phi`/`pii` rows subject to column-level encryption (M4) + stricter audit.
-- [ ] **PHI-aware access logging**: every access to a `phi`/`pii` row/entry requires a `justification` field (free-text supplied by the operator CLI or embedded by the agent's tool invocation). Access logs retained per HIPAA minimum retention (6 years).
-- [ ] **Break-glass procedure**: emergency access that bypasses normal approval flows (e.g., lead unreachable during incident). Requires explicit `--break-glass <reason>` flag; emits high-severity Keeper's Log event + immediate notification to all configured contacts + automatic post-incident review ticket.
-- [ ] **Retention enforcement for HIPAA**: log retention configurable per event type; default minimums aligned with HIPAA; automated purge of expired low-classification data.
-- [ ] **Data subject controls**: GDPR APIs from Phase 3 M11 extended with HIPAA-specific data-type filters.
-- [ ] **Evidence bundle**: `wk compliance evidence-bundle --framework hipaa` produces a structured bundle for an auditor (policies applied, sample audit logs, data-classification inventory, access-log samples, retention proofs).
-- [ ] **Customer documentation**: HIPAA policies-and-procedures template (customer fills in specifics), shared responsibility matrix (what the platform does vs what the customer does for certification), sample BAA language.
+- [ ] **M11.1** **Data classification tags**: `keep_row.classification ∈ {public, internal, confidential, phi, pii}`; `notebook_entry.classification` same. Policy: `phi`/`pii` rows subject to column-level encryption (M4) + stricter audit.
+- [ ] **M11.2** **PHI-aware access logging**: every access to a `phi`/`pii` row/entry requires a `justification` field (free-text supplied by the operator CLI or embedded by the agent's tool invocation). Access logs retained per HIPAA minimum retention (6 years).
+- [ ] **M11.3** **Break-glass procedure**: emergency access that bypasses normal approval flows (e.g., lead unreachable during incident). Requires explicit `--break-glass <reason>` flag; emits high-severity Keeper's Log event + immediate notification to all configured contacts + automatic post-incident review ticket.
+- [ ] **M11.4** **Retention enforcement for HIPAA**: log retention configurable per event type; default minimums aligned with HIPAA; automated purge of expired low-classification data.
+- [ ] **M11.5** **Data subject controls**: GDPR APIs from Phase 3 M11 extended with HIPAA-specific data-type filters.
+- [ ] **M11.6** **Evidence bundle**: `wk compliance evidence-bundle --framework hipaa` produces a structured bundle for an auditor (policies applied, sample audit logs, data-classification inventory, access-log samples, retention proofs).
+- [ ] **M11.7** **Customer documentation**: HIPAA policies-and-procedures template (customer fills in specifics), shared responsibility matrix (what the platform does vs what the customer does for certification), sample BAA language.
 
 **Artifacts**: classification schema migration, access-log justification field, break-glass CLI, evidence-bundle generator, HIPAA documentation package.
 
@@ -412,13 +412,13 @@ Total: ~60–85 days for one team. 12 milestones.
 
 ---
 
-### ⬜ M12 — Phase 4 integration demo + compliance evidence
+### M12 — Phase 4 integration demo + compliance evidence [ ]
 
 **Goal**: Acceptance gate. Demonstrate Phase 4 end-to-end in a simulated regulated-customer environment, with compliance evidence collected.
 
 **Scope**
 
-- [ ] Demo deployment in a regulated-scenario stand-in:
+- [ ] **M12.1** Demo deployment in a regulated-scenario stand-in:
   - SSO-integrated operator login (via a test IdP).
   - Keep running in HA with replicas + failover drill executed in the demo.
   - Harnesses spread across 2+ hosts with a zero-downtime upgrade executed in the demo.
@@ -428,9 +428,9 @@ Total: ~60–85 days for one team. 12 milestones.
   - GitHub + GitLab + Bitbucket adapters all spawned with Watchkeepers.
   - Airgap mode exercised in a separate stand (sub-demo): isolated host, offline install, full Phase 1 success scenario reproduced without internet.
   - Data classification + PHI access + break-glass exercised.
-- [ ] Compliance evidence bundle generated and reviewed by a mock auditor (teammate).
-- [ ] `make phase4-smoke` and `make phase4-airgap-smoke` both pass in CI.
-- [ ] Phase 4 runbook appendix: SSO bootstrap, HA operations, encryption key rotation, airgap install, secrets rotation, HIPAA evidence collection, each adapter's workspace setup.
+- [ ] **M12.2** Compliance evidence bundle generated and reviewed by a mock auditor (teammate).
+- [ ] **M12.3** `make phase4-smoke` and `make phase4-airgap-smoke` both pass in CI.
+- [ ] **M12.4** Phase 4 runbook appendix: SSO bootstrap, HA operations, encryption key rotation, airgap install, secrets rotation, HIPAA evidence collection, each adapter's workspace setup.
 
 **Artifacts**: demo scripts, mock-audit scenario, smoke tests, runbook additions.
 

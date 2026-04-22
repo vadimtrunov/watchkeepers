@@ -102,25 +102,25 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 ## 4. Milestones
 
-### ⬜ M1 — Keeper-to-Keeper communication
+### M1 — Keeper-to-Keeper communication [ ]
 
 **Goal**: Watchkeepers can talk to each other naturally, subscribe to each other's events, and escalate when a peer conversation stalls.
 
 **Scope**
 
-- [ ] Dedicated K2K channels: one private Slack channel per K2K conversation, visible only to participating bots (humans opt in via CLI `wk channel reveal <convo_id>`).
-- [ ] `keepclient.list_peers()` returning active Watchkeepers with role description, language, capabilities, availability.
-- [ ] Built-in tools added to every Watchkeeper's base toolset:
+- [ ] **M1.1** Dedicated K2K channels: one private Slack channel per K2K conversation, visible only to participating bots (humans opt in via CLI `wk channel reveal <convo_id>`).
+- [ ] **M1.2** `keepclient.list_peers()` returning active Watchkeepers with role description, language, capabilities, availability.
+- [ ] **M1.3** Built-in tools added to every Watchkeeper's base toolset:
   - `peer.ask(target, subject, body, timeout)` — send K2K message, await reply.
   - `peer.reply(conversation_id, body)` — continue an existing K2K conversation.
   - `peer.subscribe(target, event_types)` — subscribe to a peer's events.
   - `peer.broadcast(role_filter, body)` — fan-out to peers matching a filter.
   - `peer.close(conversation_id, summary)` — mark conversation resolved.
-- [ ] Standard K2K event taxonomy in `keeperslog`: `k2k_message_sent`, `k2k_message_received`, `k2k_conversation_opened`, `k2k_conversation_closed`, `k2k_over_budget`, `k2k_escalated`.
-- [ ] Token-budget per conversation (configurable default, per-Watchkeeper override via Manifest). Overage triggers `k2k_over_budget` + automatic escalation to the Watchkeepers' leads.
-- [ ] Escalation saga: peer timeout or budget overage → human lead in Slack; if lead unresponsive for N minutes → Watchmaster.
-- [ ] Conversation archive on close: channel archived; summary written as a single Keeper's Log entry + a Keep knowledge chunk for future retrieval.
-- [ ] Capability boundary: every tool invoked as a result of a K2K request still checks against the **acting** agent's Manifest ACLs — K2K can never lend capability.
+- [ ] **M1.4** Standard K2K event taxonomy in `keeperslog`: `k2k_message_sent`, `k2k_message_received`, `k2k_conversation_opened`, `k2k_conversation_closed`, `k2k_over_budget`, `k2k_escalated`.
+- [ ] **M1.5** Token-budget per conversation (configurable default, per-Watchkeeper override via Manifest). Overage triggers `k2k_over_budget` + automatic escalation to the Watchkeepers' leads.
+- [ ] **M1.6** Escalation saga: peer timeout or budget overage → human lead in Slack; if lead unresponsive for N minutes → Watchmaster.
+- [ ] **M1.7** Conversation archive on close: channel archived; summary written as a single Keeper's Log entry + a Keep knowledge chunk for future retrieval.
+- [ ] **M1.8** Capability boundary: every tool invoked as a result of a K2K request still checks against the **acting** agent's Manifest ACLs — K2K can never lend capability.
 
 **Artifacts**: Go `peer/` package, `keepclient.list_peers`, Slack channel management extensions, escalation saga, capability-gating tests.
 
@@ -137,19 +137,19 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 ---
 
-### ⬜ M2 — Constrained prompt self-tuning
+### M2 — Constrained prompt self-tuning [ ]
 
 **Goal**: A Watchkeeper can propose changes to its own `personality`, `language`, or `toolset_acls`, approved through the existing self-modification flow. Any attempt to touch `system_prompt` or `immutable_core` is mechanically refused.
 
 **Scope**
 
-- [ ] Built-in tool `self_tune(field, new_value, reason)` on every Watchkeeper. Tool schema restricts `field ∈ {personality, language, toolset_acls}`. Any other value fails at the schema layer.
-- [ ] Self-tuning proposal creates a new Manifest version via `keepclient.put_manifest_version` with `status=proposed`, `reason` (mandatory), `proposer=<agent_id>`, `parent_version_id=<current>`.
-- [ ] Validation pass (before the approval card is posted): Watchmaster-as-AI-reviewer verifies only allowed fields changed; verifies `immutable_core` byte-identical to parent; produces a plain-language diff summary for the approval card.
-- [ ] Routes through the existing approval flow (git-pr or slack-native, per deployment configuration).
-- [ ] Approved version hot-applies on the next turn (same pattern as tool hot-load, with grace period for in-flight interactions).
-- [ ] Per-Watchkeeper quota: max N self-tuning proposals per day (default 3), enforced at the tool level.
-- [ ] Self-tune events: `self_tune_proposed`, `self_tune_approved`, `self_tune_rejected`, `self_tune_applied`, `self_tune_blocked_immutable`, `self_tune_quota_exceeded`.
+- [ ] **M2.1** Built-in tool `self_tune(field, new_value, reason)` on every Watchkeeper. Tool schema restricts `field ∈ {personality, language, toolset_acls}`. Any other value fails at the schema layer.
+- [ ] **M2.2** Self-tuning proposal creates a new Manifest version via `keepclient.put_manifest_version` with `status=proposed`, `reason` (mandatory), `proposer=<agent_id>`, `parent_version_id=<current>`.
+- [ ] **M2.3** Validation pass (before the approval card is posted): Watchmaster-as-AI-reviewer verifies only allowed fields changed; verifies `immutable_core` byte-identical to parent; produces a plain-language diff summary for the approval card.
+- [ ] **M2.4** Routes through the existing approval flow (git-pr or slack-native, per deployment configuration).
+- [ ] **M2.5** Approved version hot-applies on the next turn (same pattern as tool hot-load, with grace period for in-flight interactions).
+- [ ] **M2.6** Per-Watchkeeper quota: max N self-tuning proposals per day (default 3), enforced at the tool level.
+- [ ] **M2.7** Self-tune events: `self_tune_proposed`, `self_tune_approved`, `self_tune_rejected`, `self_tune_applied`, `self_tune_blocked_immutable`, `self_tune_quota_exceeded`.
 
 **Artifacts**: `self_tune` built-in tool + schema, Watchmaster AI-reviewer extensions for Manifest diffs, approval-card templates.
 
@@ -165,27 +165,27 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 ---
 
-### ⬜ M3 — Immutable core + Manifest state history + conversational retune
+### M3 — Immutable core + Manifest state history + conversational retune [ ]
 
 **Goal**: Make the immutable boundary mechanical; expose Manifest history as a first-class surface; let leads roll back through conversation, not CLI.
 
 **Scope**
 
-- [ ] Manifest schema: `immutable_core` sub-object with 5 buckets:
+- [ ] **M3.1** Manifest schema: `immutable_core` sub-object with 5 buckets:
   - `role_boundaries` — explicit list of capabilities the Watchkeeper is NOT allowed to have, regardless of what self-tuning proposes.
   - `security_constraints` — data-handling rules, forbidden data destinations, classification floors.
   - `escalation_protocols` — when and to whom to escalate; cannot be disabled.
   - `cost_limits` — max token spend per task / day / week.
   - `audit_requirements` — what must be logged; cannot be reduced.
-- [ ] Set at spawn by a platform admin (config file or Watchmaster flow); changeable only via direct Manifest edit + core restart. Never modifiable by the agent, the lead, or any self-tuning path.
-- [ ] `manifest_version` schema: add `reason`, `previous_version_id`, `proposer` columns (make explicit; Phase 1 may have them implicit by timestamp).
-- [ ] Watchmaster tools:
+- [ ] **M3.2** Set at spawn by a platform admin (config file or Watchmaster flow); changeable only via direct Manifest edit + core restart. Never modifiable by the agent, the lead, or any self-tuning path.
+- [ ] **M3.3** `manifest_version` schema: add `reason`, `previous_version_id`, `proposer` columns (make explicit; Phase 1 may have them implicit by timestamp).
+- [ ] **M3.4** Watchmaster tools:
   - `manifest.history(watchkeeper, limit)` — returns versions with timestamps, reasons, proposers.
   - `manifest.diff(watchkeeper, v1, v2)` — returns a human-readable diff.
   - `manifest.rollback(watchkeeper, target_version, reason)` — creates a new Manifest version that is a copy of `target_version`, routed through approval.
   - `manifest.merge_fields(watchkeeper, base_version, source_version, fields)` — creates a proposal taking specified fields from `source_version` on top of `base_version`. Routed through approval.
-- [ ] Slack UX: lead says "coordinator was better last Tuesday" to Watchmaster → Watchmaster calls `manifest.history`, finds the version active on that date, calls `manifest.diff` vs current, posts the diff in chat, asks "revert to that version?" with Approve/Reject. On approve: `manifest.rollback` → approval card → Manifest applied.
-- [ ] Self-tuning validator (enforced in M2): any proposal touching `immutable_core` fields refused before reaching the approval card.
+- [ ] **M3.5** Slack UX: lead says "coordinator was better last Tuesday" to Watchmaster → Watchmaster calls `manifest.history`, finds the version active on that date, calls `manifest.diff` vs current, posts the diff in chat, asks "revert to that version?" with Approve/Reject. On approve: `manifest.rollback` → approval card → Manifest applied.
+- [ ] **M3.6** Self-tuning validator (enforced in M2): any proposal touching `immutable_core` fields refused before reaching the approval card.
 
 **Artifacts**: schema migration for `immutable_core` + `manifest_version` metadata, Watchmaster manifest tools, Slack UX templates for history navigation, validator tests.
 
@@ -201,14 +201,14 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 ---
 
-### ⬜ M4 — GitHub adapter + code-review tool suite
+### M4 — GitHub adapter + code-review tool suite [ ]
 
 **Goal**: Platform ships GitHub integration plus tools oriented for code review. Operators spawn any Manifest that uses these tools to create a code-reviewing agent. **No "Code Reviewer" role exists in core.**
 
 **Scope**
 
-- [ ] GitHub adapter (Go): uses `go-github`; installation-token flow for GitHub Apps; PAT fallback for simpler deployments. Credentials via the Phase 1 secrets interface.
-- [ ] Tool suite in platform Tool Registry (TypeScript):
+- [ ] **M4.1** GitHub adapter (Go): uses `go-github`; installation-token flow for GitHub Apps; PAT fallback for simpler deployments. Credentials via the Phase 1 secrets interface.
+- [ ] **M4.2** Tool suite in platform Tool Registry (TypeScript):
   - `github.list_open_prs(repo, filters)`
   - `github.fetch_pr(repo, pr_number)` — full context: diff, description, linked issues, prior reviews, CI status, comments, changed files.
   - `github.post_review_comment(repo, pr_number, path, line, body)`
@@ -217,9 +217,9 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
   - `github.approve_pr(repo, pr_number, body)`
   - `github.fetch_ci_status(repo, pr_number)`
   - `github.list_recent_commits(repo, branch, since)`
-- [ ] Capability declarations: read-only tools have `github:read`; mutating tools have `github:write` or `github:review`. Operator grants per-Watchkeeper via Manifest.
-- [ ] Webhook intake: GitHub webhook receiver in the core emits events `github.pr_opened`, `github.pr_updated`, `github.review_submitted`, etc., consumable via K2K `peer.subscribe` or directly from the core event bus.
-- [ ] Rate limiting + circuit breakers on the adapter layer (not exposed to agents; transparent retries + backoff).
+- [ ] **M4.3** Capability declarations: read-only tools have `github:read`; mutating tools have `github:write` or `github:review`. Operator grants per-Watchkeeper via Manifest.
+- [ ] **M4.4** Webhook intake: GitHub webhook receiver in the core emits events `github.pr_opened`, `github.pr_updated`, `github.review_submitted`, etc., consumable via K2K `peer.subscribe` or directly from the core event bus.
+- [ ] **M4.5** Rate limiting + circuit breakers on the adapter layer (not exposed to agents; transparent retries + backoff).
 
 **Artifacts**: Go `github/` adapter, TS tool implementations in platform tool registry, capability dictionary entries (`github:read`, `github:write`, `github:review`), webhook receiver.
 
@@ -236,22 +236,22 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 ---
 
-### ⬜ M5 — Confluence adapter + doc-sync tool suite
+### M5 — Confluence adapter + doc-sync tool suite [ ]
 
 **Goal**: Platform ships Confluence integration and tools oriented for detecting stale docs and drafting updates. Same pattern as M4.
 
 **Scope**
 
-- [ ] Confluence adapter (Go): REST client; OAuth or API-token auth; credentials via secrets interface.
-- [ ] Tool suite in platform Tool Registry:
+- [ ] **M5.1** Confluence adapter (Go): REST client; OAuth or API-token auth; credentials via secrets interface.
+- [ ] **M5.2** Tool suite in platform Tool Registry:
   - `confluence.list_pages(space, filters)`
   - `confluence.fetch_page(page_id)` — content + metadata (last modified, author, labels, inbound link count).
   - `confluence.propose_page_update(page_id, new_content, reason)` — creates a draft (unpublished); never auto-publishes.
   - `confluence.diff_page_against_source(page_id, source_ref)` — compares documented contract to current source (e.g., doc vs OpenAPI spec, doc vs runbook).
   - `confluence.list_stale_pages(space, threshold_days)` — pages older than threshold with no activity.
   - `confluence.list_orphaned_pages(space)` — pages without inbound links.
-- [ ] Capability declarations: read tools `confluence:read`; draft tools `confluence:draft`. `confluence:publish` exists but is **never** granted by default — only explicit operator grant after trust is built.
-- [ ] Dry-run support: `propose_page_update` supports `dry_run=true` returning the proposed diff without creating the draft — consumed by the approval flow from Phase 1 M9.
+- [ ] **M5.3** Capability declarations: read tools `confluence:read`; draft tools `confluence:draft`. `confluence:publish` exists but is **never** granted by default — only explicit operator grant after trust is built.
+- [ ] **M5.4** Dry-run support: `propose_page_update` supports `dry_run=true` returning the proposed diff without creating the draft — consumed by the approval flow from Phase 1 M9.
 
 **Artifacts**: Go `confluence/` adapter, TS tools in registry, capability dictionary entries.
 
@@ -267,20 +267,20 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 ---
 
-### ⬜ M6 — Manifest template catalog
+### M6 — Manifest template catalog [ ]
 
 **Goal**: Ship a small catalog of example Manifests so common role patterns have a tested starting point. Templates are documentation-style artifacts — the platform still has zero hardcoded roles.
 
 **Scope**
 
-- [ ] `templates/manifests/` directory with YAML Manifests for:
+- [ ] **M6.1** `templates/manifests/` directory with YAML Manifests for:
   - `code-reviewer.yaml` — uses GitHub tools from M4.
   - `tech-writer.yaml` — uses Confluence tools from M5.
   - `pm-assistant.yaml` — uses Jira (Phase 1 M8) + Confluence tools.
   - `incident-responder.yaml` — uses Jira + Slack + K2K to Coordinator.
-- [ ] Every template fills: `immutable_core` example values (least-privilege recommendations), `personality` example, `language` default, `toolset_acls` with least-privilege capability list, `system_prompt` scaffolding role intent.
-- [ ] Template linter in CI: every template passes the same capability-declaration + Manifest schema checks as live Manifests.
-- [ ] Watchmaster tools:
+- [ ] **M6.2** Every template fills: `immutable_core` example values (least-privilege recommendations), `personality` example, `language` default, `toolset_acls` with least-privilege capability list, `system_prompt` scaffolding role intent.
+- [ ] **M6.3** Template linter in CI: every template passes the same capability-declaration + Manifest schema checks as live Manifests.
+- [ ] **M6.4** Watchmaster tools:
   - `template.list()` — returns catalog.
   - `template.show(name)` — returns full Manifest.
   - `template.propose_spawn(name, customizations)` — drafts a concrete Manifest from template + overrides, enters the Phase 1 spawn flow.
@@ -298,16 +298,16 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 ---
 
-### ⬜ M7 — Notebook Phase 2 upgrades
+### M7 — Notebook Phase 2 upgrades [ ]
 
 **Goal**: Close the deferred items from Phase 1 Notebook design. Scale experience; sharpen signal-to-noise; make personality structurable.
 
 **Scope**
 
-- [ ] **Auto-inheritance on retire→spawn**: when a new Watchkeeper is spawned with the same `role_id` (derived from template or an explicit field) as a recently retired one, its Notebook is seeded from the predecessor's latest archive **by default**. Opt-out flag at spawn. `notebook_inherited` event logged; lead receives a 24h digest summarizing inherited entries.
-- [ ] **Reflection sampling on tool success**: configurable sampling rate (default 1-in-50). Success reflections stored as `observation` category; lower default auto-injection weight than `lesson`.
-- [ ] **Lesson consolidation**: daily background job clusters semantically similar `lesson` entries; produces a consolidated summary entry; originals marked `superseded_by`; consolidated entry inherits the highest `active_after`. `lessons_consolidated` event with counts.
-- [ ] **Personality preset catalog**: optional structured fields layered over the Phase 1 free-text `personality`:
+- [ ] **M7.1** **Auto-inheritance on retire→spawn**: when a new Watchkeeper is spawned with the same `role_id` (derived from template or an explicit field) as a recently retired one, its Notebook is seeded from the predecessor's latest archive **by default**. Opt-out flag at spawn. `notebook_inherited` event logged; lead receives a 24h digest summarizing inherited entries.
+- [ ] **M7.2** **Reflection sampling on tool success**: configurable sampling rate (default 1-in-50). Success reflections stored as `observation` category; lower default auto-injection weight than `lesson`.
+- [ ] **M7.3** **Lesson consolidation**: daily background job clusters semantically similar `lesson` entries; produces a consolidated summary entry; originals marked `superseded_by`; consolidated entry inherits the highest `active_after`. `lessons_consolidated` event with counts.
+- [ ] **M7.4** **Personality preset catalog**: optional structured fields layered over the Phase 1 free-text `personality`:
   - `tone_preset ∈ {formal_technical, warm_collaborative, terse_pragmatic, ...}`
   - `emoji_policy ∈ {none, sparing, rich}`
   - `humor_level ∈ {none, dry, playful}`
@@ -329,18 +329,18 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 ---
 
-### ⬜ M8 — Tool signing mandatory for non-local sources
+### M8 — Tool signing mandatory for non-local sources [ ]
 
 **Goal**: Raise the trust bar: in Phase 2 every tool in `built-in`, `platform`, `private:git`, `private:hosted` sources must be signed and verified on load. Only `local` may remain unsigned (loud audit continues).
 
 **Scope**
 
-- [ ] Core config: `tool_signing.required_for` defaults to all non-local sources.
-- [ ] Platform release CI: signs `watchkeeper-tools` release artifacts with the platform key; `built-in` tools signed at core-binary build time.
-- [ ] Customer-side procedure: key-pair generation, public key pinning in operator config, tool-signing on PR merge or hosted-storage write.
-- [ ] `wk tool sign <folder> --key <path>` CLI for operators upgrading from Phase 1.
-- [ ] `wk tool sources verify` reports every currently-loaded tool's signature status.
-- [ ] Migration path: Phase 1 deployments keep permissive default for one minor version; hard-fail behind a config flag so operators flip when ready.
+- [ ] **M8.1** Core config: `tool_signing.required_for` defaults to all non-local sources.
+- [ ] **M8.2** Platform release CI: signs `watchkeeper-tools` release artifacts with the platform key; `built-in` tools signed at core-binary build time.
+- [ ] **M8.3** Customer-side procedure: key-pair generation, public key pinning in operator config, tool-signing on PR merge or hosted-storage write.
+- [ ] **M8.4** `wk tool sign <folder> --key <path>` CLI for operators upgrading from Phase 1.
+- [ ] **M8.5** `wk tool sources verify` reports every currently-loaded tool's signature status.
+- [ ] **M8.6** Migration path: Phase 1 deployments keep permissive default for one minor version; hard-fail behind a config flag so operators flip when ready.
 
 **Artifacts**: updated `toolregistry/` with strict verification, `wk tool sign` CLI, platform release CI update, migration docs + runbook section.
 
@@ -357,17 +357,17 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 ---
 
-### ⬜ M9 — Keep backup/restore automation + retention
+### M9 — Keep backup/restore automation + retention [ ]
 
 **Goal**: Operate Keep reliably as it grows; automate what was manual in Phase 1 runbook.
 
 **Scope**
 
-- [ ] Cron-scheduled Keep backup to `ArchiveStore` (LocalFS for dev, S3-compatible for prod). Full + incremental; operator-configurable schedule.
-- [ ] `keepers_log` retention: move entries older than a configurable threshold to a cold `ArchiveStore` bucket. `keep.log_tail` reads transparently across hot + cold.
-- [ ] Backup integrity validator: periodic job restores a random recent backup to a scratch Postgres, runs sanity queries, emits `backup_verified` or `backup_corrupt` event.
-- [ ] Restore drill: `make keep-restore-drill` spins up an isolated Keep from the latest backup, runs smoke queries, tears down. Monthly by default.
-- [ ] `knowledge_chunk` growth monitoring: Prometheus metric; dashboard alert when crossing threshold; runbook guidance on compaction.
+- [ ] **M9.1** Cron-scheduled Keep backup to `ArchiveStore` (LocalFS for dev, S3-compatible for prod). Full + incremental; operator-configurable schedule.
+- [ ] **M9.2** `keepers_log` retention: move entries older than a configurable threshold to a cold `ArchiveStore` bucket. `keep.log_tail` reads transparently across hot + cold.
+- [ ] **M9.3** Backup integrity validator: periodic job restores a random recent backup to a scratch Postgres, runs sanity queries, emits `backup_verified` or `backup_corrupt` event.
+- [ ] **M9.4** Restore drill: `make keep-restore-drill` spins up an isolated Keep from the latest backup, runs smoke queries, tears down. Monthly by default.
+- [ ] **M9.5** `knowledge_chunk` growth monitoring: Prometheus metric; dashboard alert when crossing threshold; runbook guidance on compaction.
 
 **Artifacts**: backup cron jobs, retention migration, cold-storage read-through layer on `log_tail`, restore drill script, Grafana panel.
 
@@ -383,20 +383,20 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 ---
 
-### ⬜ M10 — Phase 2 integration demo + metric harness
+### M10 — Phase 2 integration demo + metric harness [ ]
 
 **Goal**: Acceptance gate — three Watchkeepers live together, K2K conversations happen, and a business metric moves measurably.
 
 **Scope**
 
-- [ ] Demo deployment: three Watchkeepers running simultaneously in the dev workspace:
+- [ ] **M10.1** Demo deployment: three Watchkeepers running simultaneously in the dev workspace:
   1. Coordinator (from Phase 1, unchanged).
   2. GitHub-capable bot (spawned from `code-reviewer.yaml`, wired to a real test GitHub repo).
   3. Confluence-capable bot (spawned from `tech-writer.yaml`, wired to a Confluence test space).
-- [ ] Scripted K2K scenario: new PR opens → GitHub-capable bot reviews → Coordinator subscribed to `review_completed` receives the event → Coordinator pings the PR author in Slack; all three bots visible in logs with correlated events.
-- [ ] Metric harness: `review_cycle_time` — median time from PR-opened to PR-merged, emitted to Prometheus. Baseline window of 2 weeks with bots passive (read-only); instrumented window of 2 weeks with bots active; delta reported in a Grafana panel.
-- [ ] Phase 2 smoke test: `make phase2-smoke` runs the full scenario end-to-end against stubbed GitHub + Confluence + real Keep + real Notebook.
-- [ ] Runbook appendix: spawning additional bots from templates, debugging K2K stalls, navigating Manifest history, performing a conversational rollback.
+- [ ] **M10.2** Scripted K2K scenario: new PR opens → GitHub-capable bot reviews → Coordinator subscribed to `review_completed` receives the event → Coordinator pings the PR author in Slack; all three bots visible in logs with correlated events.
+- [ ] **M10.3** Metric harness: `review_cycle_time` — median time from PR-opened to PR-merged, emitted to Prometheus. Baseline window of 2 weeks with bots passive (read-only); instrumented window of 2 weeks with bots active; delta reported in a Grafana panel.
+- [ ] **M10.4** Phase 2 smoke test: `make phase2-smoke` runs the full scenario end-to-end against stubbed GitHub + Confluence + real Keep + real Notebook.
+- [ ] **M10.5** Runbook appendix: spawning additional bots from templates, debugging K2K stalls, navigating Manifest history, performing a conversational rollback.
 
 **Artifacts**: demo scripts, metric harness, Grafana dashboard panel, smoke-test flow, runbook additions.
 
