@@ -140,9 +140,13 @@ ts-build: ## Build TypeScript packages
 OSV_SCANNER_VERSION ?= v2.2.4
 
 .PHONY: ts-audit
-ts-audit: ## Scan TypeScript dependencies for known vulnerabilities
+ts-audit: ## Scan TypeScript dependencies for known vulnerabilities (needs osv-scanner on PATH)
 	@$(PNPM) audit --audit-level=high
-	@$(PNPM) dlx osv-scanner@$(OSV_SCANNER_VERSION) --lockfile=pnpm-lock.yaml .
+	@if command -v osv-scanner >/dev/null 2>&1; then \
+	  osv-scanner scan --lockfile=pnpm-lock.yaml .; \
+	else \
+	  echo "osv-scanner not installed — install via 'brew install osv-scanner' or 'go install github.com/google/osv-scanner/v2/cmd/osv-scanner@$(OSV_SCANNER_VERSION)' to run this scan locally; CI installs it via the google/osv-scanner action"; \
+	fi
 
 # ---------------------------------------------------------------------------
 # Cross-cutting linters
