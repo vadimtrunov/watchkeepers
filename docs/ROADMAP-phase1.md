@@ -149,7 +149,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 **Scope**
 
 - [ ] **M2.1** Keep schema foundation (business-domain only, protocol-neutral DDL). Subsumes former M2.1–M2.5. **No infrastructure-metadata columns** (explicitly no `deployment_id` — multi-environment is multi-instance). Publisher **worker** scaffold moves to M2.7 to preserve the standalone-Keep boundary; only the table lands here.
-  - [ ] **M2.1.a** Core tables DDL: `organization`, `human`, `watchkeeper`, `manifest`, `manifest_version` (with `personality` + `language`), `watch_order`. FKs + primary indices.
+  - [x] **M2.1.a** Core tables DDL: `organization`, `human`, `watchkeeper`, `manifest`, `manifest_version` (with `personality` + `language`), `watch_order`. FKs + primary indices.
   - [ ] **M2.1.b** `keepers_log` table DDL + append-only trigger rejecting `UPDATE`/`DELETE` (+ trigger tests).
   - [ ] **M2.1.c** `knowledge_chunk` table DDL + pgvector extension + HNSW index on `embedding` (+ `EXPLAIN` assertion that KNN uses HNSW).
   - [ ] **M2.1.d** Row-Level Security: `scope ∈ {org, user:<id>, agent:<id>}` column on scoped tables, session-role setup, per-table policies, cross-scope rejection tests.
