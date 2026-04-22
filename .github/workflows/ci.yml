@@ -180,6 +180,44 @@ jobs:
       - name: Schema smoke (migrate-test)
         run: make migrate-test
 
+  keep-integration-ci:
+    name: Keep Integration CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # POSTGRES_PASSWORD below is a throwaway value scoped to this service
+    # container; it never touches a real database.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KEEP_INTEGRATION_DB_URL: "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+      WATCHKEEPER_DB_URL: "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Apply Keep migrations
+        run: make migrate-up
+
+      - name: Run Keep integration tests
+        run: go test -tags=integration -race -v ./core/cmd/keep/...
+
   docker-ci:
     name: Docker CI
     runs-on: ubuntu-24.04
