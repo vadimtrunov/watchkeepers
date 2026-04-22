@@ -1,0 +1,29 @@
+# Watchkeeper gitleaks configuration.
+# Extends the bundled default ruleset; project-specific allowlists go here.
+#
+# Upstream baseline: https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Project-wide allowlist — paths and patterns that must never trigger a finding."
+paths = [
+  '''(?i)\.gitleaks\.toml$''',
+  '''pnpm-lock\.yaml$''',
+  '''go\.sum$''',
+]
+regexes = [
+  '''EXAMPLE[_-]?(API|ACCESS)[_-]?KEY''',
+  '''dummy[_-]?secret''',
+  '''test[_-]?token''',
+]
+
+# Document-friendly override: release notes and ADRs can quote sample tokens
+# so long as the sample prefix clearly marks them as non-credentials.
+[[rules]]
+id = "generic-placeholder-token"
+description = "Exempt obviously fake example tokens from the generic-api-key rule."
+regex = '''(?i)EXAMPLE[_-]?(API|ACCESS)[_-]?KEY[_-]?[A-Z0-9]{8,}'''
+tags = ["placeholder"]
+entropy = 0
