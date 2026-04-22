@@ -9,11 +9,39 @@ Thumbs.db
 
 # Claude Code
 .claude/
+.omc/
 
-# Env
+# Env / secrets
 .env
 .env.local
 *.local
+secrets/
 
 # Logs
 *.log
+
+# Go build outputs
+/bin/
+/dist/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
+coverage/
+.vitest-cache/
+
+# Tooling state
+.cache/
+.turbo/
+.lefthook-local.yml
+
+# Docker
+.docker/
+
+# rdd skill: TASK files are ephemeral, never committed to main
+TASK-*.md
