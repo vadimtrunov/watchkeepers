@@ -58,3 +58,44 @@ postgresql-client flaked once; rerun passed (not code).
 - Total wall time from /rdd to merge: 01:45
 
 ---
+
+## 2026-04-22 — M2.1.a: Core business-domain tables DDL
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/5
+**Phases with incidents**: 5, 6
+
+### What worked
+
+Gate 2 discipline caught scope tight (six tables, no extras). Phase 3 executor
+delivered all AC green in one pass. Phase 4 review loop converged in 2
+iterations — fixer correctly identified the important items (nullable FK test,
+DROP EXTENSION footgun) and closed both in one commit. Bounded-loop severity
+contract worked: CodeRabbit's 2 Minor threads (TRUNCATE warning, SQLSTATE
+locale-sensitivity) correctly classified as nit, deferred to Follow-up.
+
+### What wasted effort
+
+Phase 5: git-master generated PR title `M2.1.a: Keep schema foundation — …`
+violated commitlint (not a conventional type). Had to retitle via `gh pr edit`
+to `feat(migrations): add core business-domain tables (M2.1.a)`. Because default
+`pull_request` event lacks `edited` type, close/reopen was required to
+retrigger CI (not a code issue, but workflow awareness gap).
+
+### Suggested skill changes
+
+- Add commitlint pre-flight check to `references/agent-briefs/git-master.md` §pr
+  mode: validate PR title against conventional-commits before `gh pr create`, or
+  require the caller to pass a conforming title.
+- Document in same brief the `gh pr close && gh pr reopen` workaround for repos
+  whose `pull_request` trigger lacks `edited` type (alternatives: add `edited`
+  to the workflow trigger, or use `gh run rerun --failed` + wait, though the
+  latter reuses stale snapshot).
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 0 (metadata-only fix + CI retrigger, not code)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: 04:30
+
+---

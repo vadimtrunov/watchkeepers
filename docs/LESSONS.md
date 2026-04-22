@@ -59,3 +59,51 @@ var instead.
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.6
 
 ---
+
+## 2026-04-22 — M2.1.a: Core business-domain tables DDL
+
+**PR**: [#5](https://github.com/vadimtrunov/watchkeepers/pull/5)
+**Merged**: 2026-04-22 18:40
+
+### Context
+
+Created the first real Keep migration (`002_core_business_tables.sql`) with six
+core business-domain tables — organization, human, watchkeeper, manifest,
+manifest_version, watch_order — under the watchkeeper schema. Added psql-driven
+schema smoke tests (happy-path inserts, unique-constraint rejection, FK
+rejection) and integrated into CI.
+
+### Pattern
+
+**UUID primary keys + pgcrypto**: All core tables use `uuid` PKs with
+`gen_random_uuid()` from pgcrypto. Protocol-neutral (works for HTTP+JSON and
+gRPC), no exposed ordering, federation-ready. Reused for M2.1.b/c/d/e and
+beyond.
+
+**SQLSTATE over English error text**: Schema tests grep on locale-independent
+SQLSTATE codes (`23505` unique_violation, `23503` foreign_key_violation)
+instead of English error messages. Server's `lc_messages` setting may not match
+the client; CI is safe on C locale, but local dev on non-English systems fails
+if matching error text.
+
+**Protocol-neutral DDL**: All column types portable (`uuid`, `text`,
+`timestamptz`, `jsonb`, `integer`, `boolean`). Deliberate decision to keep
+M2.7 protocol choice (HTTP vs gRPC) open.
+
+**DROP EXTENSION in Down is a cross-migration footgun**: Extensions are
+database-scoped, not migration-scoped. Per-migration Down should not drop
+extensions created with `IF NOT EXISTS` — future migrations may depend on them.
+
+### Anti-pattern
+
+Per-FK auto-indexing deferred. Postgres does not auto-index FKs; current DDL
+relies on unique-index prefixes only. Worth adding before real traffic or RLS
+(M2.1.d).
+
+### References
+
+- Files: `deploy/migrations/002_core_business_tables.sql`,
+  `scripts/migrate-schema-test.sh`, `Makefile`, `docs/DEVELOPING.md`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.1.a
+
+---
