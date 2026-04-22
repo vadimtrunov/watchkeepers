@@ -45,11 +45,12 @@ fail() {
 cleanup_sql=$(cat <<'SQL'
 -- Leave the schema empty so re-runs start from the same baseline. Order
 -- mirrors the reverse-dependency FK chain (newest-leaf tables first).
--- `knowledge_chunk` is standalone (no FKs to the core chain) so it sits at
--- the top without affecting ordering. The append-only trigger on
--- `keepers_log` fires on DELETE but not TRUNCATE, so the TRUNCATE chain
--- continues to clear it cleanly.
+-- `knowledge_chunk` and `outbox` are standalone (no FKs to the core chain)
+-- so they sit at the top without affecting ordering. The append-only
+-- trigger on `keepers_log` fires on DELETE but not TRUNCATE, so the
+-- TRUNCATE chain continues to clear it cleanly.
 TRUNCATE TABLE
+  watchkeeper.outbox,
   watchkeeper.knowledge_chunk,
   watchkeeper.keepers_log,
   watchkeeper.watch_order,
@@ -387,5 +388,25 @@ if [[ "${rls_empty_count}" != "100" ]]; then
   fail "RLS empty-scope visibility expected 100 (org rows only); got '${rls_empty_count}'"
 fi
 echo "OK: RLS with unset scope sees only scope='org' rows (count=100)"
+
+echo ">> migrate-schema-test: (i) outbox happy path + partial-index presence"
+"${PSQL[@]}" >/dev/null <<'SQL'
+BEGIN;
+INSERT INTO watchkeeper.outbox (aggregate_type, aggregate_id, event_type, payload)
+VALUES ('watchkeeper', gen_random_uuid(), 'spawned', '{"k":"v"}'::jsonb);
+COMMIT;
+SQL
+
+outbox_count=$("${PSQL[@]}" -tA -c "SELECT count(*) FROM watchkeeper.outbox;")
+if [[ "${outbox_count}" != "1" ]]; then
+  fail "outbox happy-path insert count expected 1, got ${outbox_count}"
+fi
+
+outbox_indexdef=$("${PSQL[@]}" -tA -c \
+  "SELECT indexdef FROM pg_indexes WHERE indexname = 'outbox_unpublished_idx';")
+if ! printf '%s' "${outbox_indexdef}" | grep -q 'WHERE (published_at IS NULL)'; then
+  fail "expected outbox_unpublished_idx to carry 'WHERE (published_at IS NULL)'; got: ${outbox_indexdef}"
+fi
+echo "OK: outbox insert accepted and partial-index predicate present"
 
 echo "ALL schema assertions passed"
