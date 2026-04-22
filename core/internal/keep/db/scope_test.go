@@ -55,7 +55,7 @@ func TestRoleForScope(t *testing.T) {
 func TestWithScope_BadScopeBeforeBegin(t *testing.T) {
 	// A nil *pgxpool.Pool dereferenced inside BeginTx would panic; the
 	// test passes only because the scope check short-circuits first.
-	err := db.WithScope(context.Background(), nil, auth.Claim{Scope: "weird"}, func(_ pgx.Tx) error {
+	err := db.WithScope(context.Background(), nil, auth.Claim{Scope: "weird"}, func(_ context.Context, _ pgx.Tx) error {
 		t.Fatal("fn must not run on bad scope")
 		return nil
 	})

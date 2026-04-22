@@ -59,12 +59,15 @@ func RoleForScope(scope string) (string, error) {
 }
 
 // WithScope opens a transaction on pool, issues `SET LOCAL ROLE` and
-// `SET LOCAL watchkeeper.scope`, runs fn, and commits. Any error from fn
-// triggers a rollback and is returned wrapped. The role name is validated
-// against the closed set in RoleForScope before the statement is built, so
-// the tiny bit of string interpolation that `SET LOCAL ROLE` requires
-// cannot be driven by attacker-controlled input.
-func WithScope(ctx context.Context, pool *pgxpool.Pool, claim auth.Claim, fn func(pgx.Tx) error) error {
+// `SET LOCAL watchkeeper.scope`, runs fn with the caller's ctx + the
+// opened tx, and commits. Any error from fn triggers a rollback and is
+// returned wrapped. The role name is validated against the closed set in
+// RoleForScope before the statement is built, so the tiny bit of string
+// interpolation that `SET LOCAL ROLE` requires cannot be driven by
+// attacker-controlled input. Passing ctx into fn (rather than letting it
+// close over one from the calling frame) keeps contextcheck satisfied and
+// makes cancellation explicit.
+func WithScope(ctx context.Context, pool *pgxpool.Pool, claim auth.Claim, fn func(context.Context, pgx.Tx) error) error {
 	role, err := RoleForScope(claim.Scope)
 	if err != nil {
 		return err
@@ -92,7 +95,7 @@ func WithScope(ctx context.Context, pool *pgxpool.Pool, claim auth.Claim, fn fun
 		return fmt.Errorf("set watchkeeper.scope: %w", err)
 	}
 
-	if err := fn(tx); err != nil {
+	if err := fn(ctx, tx); err != nil {
 		return err
 	}
 
