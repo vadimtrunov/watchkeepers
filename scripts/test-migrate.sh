@@ -56,6 +56,21 @@ if [[ -z "${created_file}" ]]; then
 fi
 echo "OK: migrate-create produced ${created_file}"
 
+echo "== Negative path: shell-injection attempt in NAME is rejected =="
+injection_log=$(mktemp)
+if make migrate-create NAME="x' ; echo injected" MIGRATIONS_DIR="${tmp_dir}" >"${injection_log}" 2>&1; then
+  cat "${injection_log}"
+  rm -f "${injection_log}"
+  fail "migrate-create with shell-injection NAME unexpectedly succeeded"
+fi
+if grep -q 'injected' "${injection_log}"; then
+  cat "${injection_log}"
+  rm -f "${injection_log}"
+  fail "migrate-create executed injected payload (found 'injected' in output)"
+fi
+rm -f "${injection_log}"
+echo "OK: shell-injection NAME rejected without side effect"
+
 echo "== Negative path: a broken SQL file causes migrate-up to exit non-zero =="
 cp deploy/migrations/*.sql "${tmp_dir}/"
 cat >"${tmp_dir}/999_bad.sql" <<'BAD'

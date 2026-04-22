@@ -215,10 +215,11 @@ migrate-status: ## Show applied / pending migrations
 	@$(GOOSE) -dir $(MIGRATIONS_DIR) postgres "$$WATCHKEEPER_DB_URL" status
 
 .PHONY: migrate-create
+migrate-create: export MIGRATION_NAME := $(NAME)
 migrate-create: ## Create a new SQL migration: make migrate-create NAME=<slug>
-	@test -n "$(NAME)" || { echo "ERROR: NAME=<slug> required (e.g. make migrate-create NAME=add_users_table)" >&2; exit 2; }
-	@printf '%s' '$(NAME)' | grep -Eq '^[a-z0-9_]+$$' || { echo "ERROR: NAME must match [a-z0-9_]+ (got '$(NAME)')" >&2; exit 2; }
-	@$(GOOSE) -dir $(MIGRATIONS_DIR) create "$(NAME)" sql
+	@: "$${MIGRATION_NAME:?ERROR: NAME=<slug> required (e.g. NAME=add_users_table)}"
+	@printf '%s' "$$MIGRATION_NAME" | grep -Eq '^[a-z0-9_]+$$' || { echo "ERROR: NAME must match ^[a-z0-9_]+\$$" >&2; exit 2; }
+	@$(GOOSE) -dir $(MIGRATIONS_DIR) create "$$MIGRATION_NAME" sql
 
 .PHONY: migrate-round-trip
 migrate-round-trip: ## Up -> down-to-0 -> up; assert schema dump is identical (AC6)
