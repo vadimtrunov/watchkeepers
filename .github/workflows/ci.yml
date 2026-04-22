@@ -146,7 +146,7 @@ jobs:
     # credentials in repo or logs.
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres

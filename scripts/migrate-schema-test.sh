@@ -44,11 +44,13 @@ fail() {
 
 cleanup_sql=$(cat <<'SQL'
 -- Leave the schema empty so re-runs start from the same baseline. Order
--- mirrors the reverse-dependency FK chain. `keepers_log` is first because
--- it references `watchkeeper` and `human` via nullable FKs.
--- The append-only trigger on `keepers_log` fires on DELETE but not TRUNCATE,
--- so the TRUNCATE chain continues to clear it cleanly.
+-- mirrors the reverse-dependency FK chain (newest-leaf tables first).
+-- `knowledge_chunk` is standalone (no FKs to the core chain) so it sits at
+-- the top without affecting ordering. The append-only trigger on
+-- `keepers_log` fires on DELETE but not TRUNCATE, so the TRUNCATE chain
+-- continues to clear it cleanly.
 TRUNCATE TABLE
+  watchkeeper.knowledge_chunk,
   watchkeeper.keepers_log,
   watchkeeper.watch_order,
   watchkeeper.watchkeeper,
@@ -255,5 +257,49 @@ if [[ "${kl_count_after_delete}" != "1" ]]; then
   fail "keepers_log row count after DELETE attempt expected 1, got ${kl_count_after_delete}"
 fi
 echo "OK: keepers_log DELETE rejected (append-only) and row count unchanged"
+
+echo ">> migrate-schema-test: (e) knowledge_chunk HNSW plan"
+# Seed 100 random-vector rows server-side via generate_series so we don't have
+# to embed a 1536-element literal. `vector(1536)` accepts a text literal of the
+# form `[a,b,...,c]`; we build one from 1536 random doubles per row.
+"${PSQL[@]}" >/dev/null <<'SQL'
+BEGIN;
+
+INSERT INTO watchkeeper.knowledge_chunk (scope, content, embedding)
+SELECT
+  'org',
+  'seed row ' || gs,
+  (
+    '[' || string_agg(random()::text, ',') || ']'
+  )::vector
+FROM generate_series(1, 100) AS gs,
+  LATERAL generate_series(1, 1536) AS dim
+GROUP BY gs;
+
+COMMIT;
+
+ANALYZE watchkeeper.knowledge_chunk;
+SQL
+
+# Build a 1536-element query vector as a string (1536 zeros joined by commas)
+# and EXPLAIN the KNN query. The HNSW index is built with `vector_cosine_ops`,
+# so the ORDER BY must use the cosine-distance operator `<=>` to match the
+# operator class; `<->` (L2) or `<#>` (inner product) will not hit this index.
+# SET LOCAL enable_seqscan = off hardens the assertion against planner cost
+# flips on tiny datasets.
+query_vec=$(python3 -c "print('[' + ','.join(['0']*1536) + ']')")
+plan_output=$("${PSQL[@]}" <<SQL
+BEGIN;
+SET LOCAL enable_seqscan = off;
+EXPLAIN (FORMAT TEXT) SELECT id FROM watchkeeper.knowledge_chunk
+ORDER BY embedding <=> '${query_vec}'::vector LIMIT 5;
+ROLLBACK;
+SQL
+)
+
+if ! printf '%s' "${plan_output}" | grep -q 'knowledge_chunk_embedding_hnsw_idx'; then
+  fail "expected EXPLAIN plan to reference knowledge_chunk_embedding_hnsw_idx; got: ${plan_output}"
+fi
+echo "OK: HNSW index chosen for KNN plan (knowledge_chunk_embedding_hnsw_idx)"
 
 echo "ALL schema assertions passed"
