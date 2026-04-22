@@ -411,6 +411,24 @@ if [[ "${rls_empty_count}" != "101" ]]; then
 fi
 echo "OK: RLS with unset scope sees only scope='org' rows (count=101)"
 
+echo ">> migrate-schema-test: (j) RLS owner baseline (default role sees all rows)"
+# Document owner-bypass baseline: the connecting CI/superuser role,
+# without SET ROLE, still sees all rows in knowledge_chunk (RLS policies
+# apply to non-owner roles only; FORCE RLS becomes relevant the moment
+# the owner issues SET ROLE into a policy-subject role, as exercised by
+# (f)/(g)/(h) above). This assertion documents the baseline and will
+# catch a regression where policies accidentally apply to the owner
+# default-role path (which would break admin tooling).
+#
+# Expected row count: 100 HNSW-seeded 'org' rows (block e) + 3 RLS-seeded
+# scope rows (rls-org, rls-agent-a, rls-agent-b from the hermetic RLS seed
+# block above) = 103.
+owner_baseline=$("${PSQL[@]}" -tA -c "SELECT count(*) FROM watchkeeper.knowledge_chunk;")
+if [[ "${owner_baseline}" != "103" ]]; then
+  fail "owner baseline count expected 103 (100 org-seeded HNSW rows + 3 RLS-seeded scope rows), got ${owner_baseline}"
+fi
+echo "OK: owner default-role sees all 103 rows (baseline for FORCE RLS policy application)"
+
 echo ">> migrate-schema-test: (i) outbox happy path + partial-index presence"
 "${PSQL[@]}" >/dev/null <<'SQL'
 BEGIN;
