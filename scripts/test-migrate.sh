@@ -37,12 +37,26 @@ printf '%s\n' "${second_run}"
 echo "${second_run}" | grep -qE 'no migrations to run|up to date|already applied|nothing to apply' \
   || fail "migrate-up second run did not report idempotency marker"
 
+echo "== AC3 migrate-down: rollback then re-apply via make targets =="
+make migrate-down
+make migrate-up
+
 echo "== AC6 round-trip: schema dump identical before/after down+up =="
 make migrate-round-trip
 
-echo "== Negative path: a broken SQL file causes migrate-up to exit non-zero =="
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "${tmp_dir}"' EXIT
+
+echo "== AC3 migrate-create: scaffold a timestamped file into a temp dir =="
+create_slug="smoke_$(date +%s)"
+make migrate-create NAME="${create_slug}" MIGRATIONS_DIR="${tmp_dir}"
+created_file=$(find "${tmp_dir}" -maxdepth 1 -type f -name "*_${create_slug}.sql" -print -quit)
+if [[ -z "${created_file}" ]]; then
+  fail "migrate-create did not produce a *_${create_slug}.sql file in ${tmp_dir}"
+fi
+echo "OK: migrate-create produced ${created_file}"
+
+echo "== Negative path: a broken SQL file causes migrate-up to exit non-zero =="
 cp deploy/migrations/*.sql "${tmp_dir}/"
 cat >"${tmp_dir}/999_bad.sql" <<'BAD'
 -- +goose Up
