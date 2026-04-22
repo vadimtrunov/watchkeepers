@@ -115,6 +115,29 @@ if [[ "${happy_counts}" != "1,1,1,1,1,1" ]]; then
 fi
 echo "OK: happy-path row counts = ${happy_counts}"
 
+echo ">> migrate-schema-test: (d) nullable active_manifest_version_id accepted (pending state)"
+"${PSQL[@]}" >/dev/null <<'SQL'
+BEGIN;
+
+-- Insert a second watchkeeper using the existing manifest and human rows,
+-- leaving active_manifest_version_id as NULL to represent pre-approval state.
+INSERT INTO watchkeeper.watchkeeper (
+  manifest_id, lead_human_id, status
+)
+SELECT
+  (SELECT id FROM watchkeeper.manifest LIMIT 1),
+  (SELECT id FROM watchkeeper.human LIMIT 1),
+  'pending';
+
+COMMIT;
+SQL
+
+null_count=$("${PSQL[@]}" -tA -c "SELECT count(*) FROM watchkeeper.watchkeeper WHERE active_manifest_version_id IS NULL;")
+if [[ "${null_count}" != "1" ]]; then
+  fail "nullable active_manifest_version_id count expected 1, got ${null_count}"
+fi
+echo "OK: watchkeeper with active_manifest_version_id = NULL accepted (count = ${null_count})"
+
 echo ">> migrate-schema-test: (b) duplicate (manifest_id, version_no) rejected"
 dup_output=$("${PSQL[@]}" <<'SQL' 2>&1 || true
 BEGIN;

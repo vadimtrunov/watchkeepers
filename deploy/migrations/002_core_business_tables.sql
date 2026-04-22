@@ -79,5 +79,3 @@ DROP TABLE IF EXISTS watchkeeper.manifest_version;
 DROP TABLE IF EXISTS watchkeeper.manifest;
 DROP TABLE IF EXISTS watchkeeper.human;
 DROP TABLE IF EXISTS watchkeeper.organization;
-
-DROP EXTENSION IF EXISTS pgcrypto;
