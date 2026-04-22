@@ -1,4 +1,4 @@
-SHELL := /usr/bin/env bash
+SHELL := /bin/bash
 .DEFAULT_GOAL := help
 .ONESHELL:
 .SHELLFLAGS := -eu -o pipefail -c
