@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"mime"
 	"net/http"
 	"strconv"
 	"time"
@@ -42,10 +43,18 @@ func (p poolRunner) WithScope(ctx context.Context, claim auth.Claim, fn func(con
 // and log-tail limit to [1, 200]; zero/negative values are rejected with
 // 400 rather than silently defaulting so clients learn about the contract
 // before traffic goes live.
+//
+// maxSearchBodyBytes caps the raw POST /v1/search body to 1 MiB so a single
+// authenticated client cannot force unbounded allocation by streaming a
+// multi-GB JSON body. maxEmbeddingDim mirrors the largest reasonable model
+// output dimension (OpenAI text-embedding-3-large is 3072); 4096 leaves
+// headroom without exposing a DoS surface.
 const (
-	maxSearchTopK   = 50
-	defaultLogLimit = 50
-	maxLogLimit     = 200
+	maxSearchTopK      = 50
+	defaultLogLimit    = 50
+	maxLogLimit        = 200
+	maxSearchBodyBytes = 1 << 20
+	maxEmbeddingDim    = 4096
 )
 
 // searchRequest is the JSON body accepted by POST /v1/search. The
@@ -72,6 +81,58 @@ type searchResponse struct {
 	Results []searchResult `json:"results"`
 }
 
+// parseSearchRequest validates the Content-Type, caps the body size,
+// decodes the JSON payload, and enforces the embedding/top_k bounds.
+// On any failure it writes the canonical error envelope to w and
+// returns ok=false so the caller must abort. Extracted from
+// handleSearch to keep that handler under the gocyclo budget.
+func parseSearchRequest(w http.ResponseWriter, req *http.Request) (searchRequest, bool) {
+	var body searchRequest
+
+	// Enforce application/json Content-Type (charset parameter allowed).
+	// Missing or mismatched types are rejected up-front so we don't
+	// allocate a JSON decoder for a non-JSON body.
+	if !isJSONContentType(req.Header.Get("Content-Type")) {
+		writeErrorReason(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "expected_application_json")
+		return body, false
+	}
+
+	// Cap the body to maxSearchBodyBytes so a single client cannot force
+	// unbounded allocation. This also bounds the read that
+	// DisallowUnknownFields would otherwise have to perform in full.
+	req.Body = http.MaxBytesReader(w, req.Body, maxSearchBodyBytes)
+
+	dec := json.NewDecoder(req.Body)
+	// Body size is already capped by MaxBytesReader above, so the full
+	// read DisallowUnknownFields forces stays bounded.
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeErrorReason(w, http.StatusRequestEntityTooLarge, "request_too_large", "body_too_large")
+			return body, false
+		}
+		writeError(w, http.StatusBadRequest, "invalid_body")
+		return body, false
+	}
+	if len(body.Embedding) == 0 {
+		writeError(w, http.StatusBadRequest, "missing_embedding")
+		return body, false
+	}
+	if len(body.Embedding) > maxEmbeddingDim {
+		writeError(w, http.StatusBadRequest, "invalid_embedding")
+		return body, false
+	}
+	if body.TopK <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid_top_k")
+		return body, false
+	}
+	if body.TopK > maxSearchTopK {
+		body.TopK = maxSearchTopK
+	}
+	return body, true
+}
+
 // handleSearch serves POST /v1/search. It validates the body, runs the
 // pgvector cosine-distance KNN under the scoped tx, and returns the
 // result rows ordered by ascending distance (closest first).
@@ -84,23 +145,9 @@ func handleSearch(r scopedRunner) http.Handler {
 			return
 		}
 
-		var body searchRequest
-		dec := json.NewDecoder(req.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-			writeError(w, http.StatusBadRequest, "invalid_body")
+		body, ok := parseSearchRequest(w, req)
+		if !ok {
 			return
-		}
-		if len(body.Embedding) == 0 {
-			writeError(w, http.StatusBadRequest, "missing_embedding")
-			return
-		}
-		if body.TopK <= 0 {
-			writeError(w, http.StatusBadRequest, "invalid_top_k")
-			return
-		}
-		if body.TopK > maxSearchTopK {
-			body.TopK = maxSearchTopK
 		}
 
 		vec := embeddingToVector(body.Embedding)
@@ -322,9 +369,34 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 // writeError emits a {"error":"<code>"} envelope. It shares the shape
 // used by writeAuthError but lets read-path handlers surface their own
-// semantic codes.
+// semantic codes. Callers must pass stable string literals as code — no
+// JSON escaping is performed on the value.
 func writeError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = io.WriteString(w, `{"error":"`+code+`"}`)
+}
+
+// writeErrorReason emits a {"error":"<code>","reason":"<reason>"}
+// envelope for the richer error shape used by the input-validation
+// rejections (oversized body, wrong Content-Type). Callers must pass
+// stable string literals for code and reason.
+func writeErrorReason(w http.ResponseWriter, status int, code, reason string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, `{"error":"`+code+`","reason":"`+reason+`"}`)
+}
+
+// isJSONContentType reports whether the given Content-Type header value
+// is application/json (charset parameter allowed). A missing or
+// malformed header is treated as a mismatch.
+func isJSONContentType(ct string) bool {
+	if ct == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	return mediaType == "application/json"
 }

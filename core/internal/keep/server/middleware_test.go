@@ -165,6 +165,44 @@ func TestAuthMiddleware_BadSignature(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_BadIssuer(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC) }
+
+	// Issuer uses a different `iss` string than the verifier to trigger
+	// ErrBadIssuer. This exercises the middleware's reasonFor mapping to
+	// the `bad_issuer` wire code, which is otherwise only covered at the
+	// auth-package level.
+	ti, err := auth.NewTestIssuer(mwSigningKey, "other-iss", now)
+	if err != nil {
+		t.Fatalf("NewTestIssuer: %v", err)
+	}
+	v, err := auth.NewHMACVerifier(mwSigningKey, "keep-test", now)
+	if err != nil {
+		t.Fatalf("NewHMACVerifier: %v", err)
+	}
+
+	tok, err := ti.Issue(auth.Claim{Subject: "u", Scope: "org"}, time.Minute)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/whatever", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+
+	server.AuthMiddleware(v)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("downstream should not run on bad issuer")
+	})).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+	_, reason := readErrorBody(t, rec)
+	if reason != "bad_issuer" {
+		t.Errorf("reason = %q, want bad_issuer", reason)
+	}
+}
+
 func TestAuthMiddleware_Expired(t *testing.T) {
 	issueAt := time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC)
 	verifyAt := issueAt.Add(10 * time.Minute)

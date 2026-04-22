@@ -144,6 +144,113 @@ func TestSearch_MalformedJSON(t *testing.T) {
 	}
 }
 
+// TestSearch_OversizedBodyRejects asserts that bodies larger than the
+// 1 MiB cap are rejected with 413 request_too_large before the handler
+// attempts to allocate the full payload. The guard closes the DoS
+// surface flagged in the Phase 4 review.
+func TestSearch_OversizedBodyRejects(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC) }
+	h, ti := newRouterForTest(t, now)
+	tok := mustMintToken(t, ti, "org")
+
+	// Build a payload that exceeds the 1 MiB cap. We embed the excess
+	// bytes as a long JSON string inside an otherwise-valid shape so the
+	// decoder would happily parse it if the cap were absent.
+	pad := strings.Repeat("a", (1<<20)+1024)
+	body := `{"embedding":[0.1,0.2],"top_k":5,"pad":"` + pad + `"}`
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/search",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "request_too_large" || env.Reason != "body_too_large" {
+		t.Errorf("body = %q, want error=request_too_large reason=body_too_large", rec.Body.String())
+	}
+}
+
+// TestSearch_OversizedEmbeddingRejects asserts that an embedding slice
+// longer than maxEmbeddingDim (4096) is rejected with 400
+// invalid_embedding. Without this bound a caller could pin gigabytes of
+// []float32 inside a sub-1 MiB JSON body using dense numeric formatting.
+func TestSearch_OversizedEmbeddingRejects(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC) }
+	h, ti := newRouterForTest(t, now)
+	tok := mustMintToken(t, ti, "org")
+
+	// 4097 zero entries — still well under the 1 MiB body cap.
+	var sb strings.Builder
+	sb.WriteString(`{"embedding":[`)
+	for i := 0; i < 4097; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteByte('0')
+	}
+	sb.WriteString(`],"top_k":5}`)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/search",
+		strings.NewReader(sb.String()))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "invalid_embedding" {
+		t.Errorf("error = %q, want invalid_embedding", env.Error)
+	}
+}
+
+// TestSearch_UnsupportedMediaType asserts that a non-JSON Content-Type
+// is rejected with 415 before the body is read.
+func TestSearch_UnsupportedMediaType(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC) }
+	h, ti := newRouterForTest(t, now)
+	tok := mustMintToken(t, ti, "org")
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/search",
+		strings.NewReader(`{"embedding":[0.1,0.2],"top_k":5}`))
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("status = %d, want 415 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "unsupported_media_type" || env.Reason != "expected_application_json" {
+		t.Errorf("body = %q, want error=unsupported_media_type reason=expected_application_json", rec.Body.String())
+	}
+}
+
 // TestLogTail_InvalidLimit enforces Edge: limit=0 -> 400.
 func TestLogTail_InvalidLimit(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC) }
