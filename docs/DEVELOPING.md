@@ -144,6 +144,97 @@ worker. The scoped tables (`watch_order`, `knowledge_chunk`) carry a `scope`
 column and run under FORCE ROW LEVEL SECURITY; policies evaluate
 `current_setting('watchkeeper.scope', true)`.
 
+## Keep service
+
+`core/cmd/keep` is the Keep HTTP service process introduced in M2.7.a. It
+loads config from env vars, opens a `pgxpool.Pool` against
+`KEEP_DATABASE_URL`, and exposes `GET /health` until it receives
+`SIGINT` / `SIGTERM`, at which point it drains in-flight requests with a
+configurable timeout and closes the pool.
+
+### Protocol choice: HTTP over gRPC
+
+M2.7.a records the Keep protocol decision that
+[LESSON M2.1.a](LESSONS.md) left open ("protocol choice open"). We chose
+**HTTP + JSON** for Phase 1 because:
+
+- **Zero extra runtime deps for Phase 1.** The stdlib `net/http` mux is
+  enough for `/health` and the handful of endpoints that land in
+  M2.7.c–e (`search`, `store`, `subscribe`, `log_*`, `*_manifest`).
+  gRPC would add a protobuf toolchain and a second wire format without
+  a Phase 1 consumer asking for it.
+- **Protocol-neutral DDL already in place.** M2.1.a intentionally
+  shipped portable column types (`uuid`, `text`, `timestamptz`, `jsonb`)
+  so either protocol could land later. HTTP lets us honour that
+  openness without blocking on gRPC tooling.
+- **Ops parity.** Watchkeeper operators are expected to curl, trace,
+  and port-forward Keep during rollout. HTTP is inspectable without a
+  bespoke client.
+- **Reversible.** If a gRPC requirement shows up later (e.g. typed
+  streaming manifests), we can co-host a gRPC server on a second
+  listener; the `pgxpool.Pool` + config surface do not care.
+
+When the trade-off flips (schema-owned streaming, aggressive cross-service
+typing), revisit and either add gRPC alongside HTTP or migrate. Any change
+goes back through the `rdd` loop with a new LESSON entry.
+
+### Env vars
+
+| Variable                | Required | Default | Notes                                                             |
+| ----------------------- | -------- | ------- | ----------------------------------------------------------------- |
+| `KEEP_DATABASE_URL`     | yes      | —       | pgx-compatible Postgres DSN. Boot exits non-zero if unset or bad. |
+| `KEEP_HTTP_ADDR`        | no       | `:8080` | Listen address passed to `http.Server`.                           |
+| `KEEP_SHUTDOWN_TIMEOUT` | no       | `10s`   | Go duration; bounds `http.Server.Shutdown` on SIGINT / SIGTERM.   |
+
+### Build and run locally
+
+```sh
+# Compile into ./bin/keep
+make keep-build
+
+# Run against a local Postgres (migrations applied via `make migrate-up`).
+export KEEP_DATABASE_URL='postgres://watchkeeper:<password>@localhost:5432/watchkeeper?sslmode=disable'
+make keep-run
+```
+
+`make keep-run` passes `KEEP_*` through per-target `export` (see
+LESSON M2.6) so user-supplied values reach the shell as env literals, never
+as Makefile variable expansions. In another terminal:
+
+```sh
+curl -fsS http://localhost:8080/health
+# {"status":"ok"}
+```
+
+Send `SIGTERM` (or hit `Ctrl+C`) to trigger graceful shutdown.
+
+### Docker image
+
+```sh
+docker build -f deploy/Dockerfile.keep -t keep:local .
+docker run --rm -p 8080:8080 \
+  -e KEEP_DATABASE_URL='postgres://postgres:postgres@host.docker.internal:5432/postgres?sslmode=disable' \
+  keep:local
+```
+
+The image is multi-stage
+(`golang:1.26-alpine` → `gcr.io/distroless/static-debian12:nonroot`),
+runs as `nonroot:nonroot`, and is covered by the same hadolint and
+license-scan CI gates as `deploy/Dockerfile`.
+
+### Integration tests
+
+The binary-boot suite lives in `core/cmd/keep/integration_test.go`
+(build tag `integration`) and requires a reachable Postgres 16 in
+`KEEP_INTEGRATION_DB_URL`:
+
+```sh
+KEEP_INTEGRATION_DB_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable' \
+  go test -tags=integration -race -v ./core/cmd/keep/...
+```
+
+CI runs this automatically under the `Keep Integration CI` job.
+
 ## Pre-commit hooks
 
 `lefthook` runs a subset of the above on staged files only, so local feedback
