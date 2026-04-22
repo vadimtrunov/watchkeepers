@@ -22,7 +22,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 | #   | Milestone                         | Status | Magnitude | Notes                        |
 | --- | --------------------------------- | ------ | --------- | ---------------------------- |
-| M1  | Foundation                        | ⬜     | 3–5d      |                              |
+| M1  | Foundation                        | ✅     | 3–5d      |                              |
 | M2  | Keep service                      | ⬜     | 4–6d      |                              |
 | M2b | Notebook library                  | ⬜     | 3–5d      |                              |
 | M3  | Go core services                  | ⬜     | 5–8d      |                              |
@@ -101,41 +101,41 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 ## 4. Milestones
 
-### M1 — Foundation [ ]
+### M1 — Foundation [x]
 
 **Goal**: Repo skeleton and a quality toolchain that forces LLM-authored and human-authored code to the same bar.
 
 **Scope**
 
-- [ ] **M1.1** **Layout**: monorepo — `/core` (Go), `/harness` (TS), `/tools-builtin` (TS, vendored tools), `/cli` (Go), `/deploy` (docker-compose), `/docs`, `/scripts`.
-- [ ] **M1.2** **Build systems**: Go module, pnpm workspace for TS, Dockerfiles per service, docker-compose skeleton with Postgres + Grafana stubs.
-- [ ] **M1.3** **Makefile as the only supported entry point** — every operational and dev action exposed as a `make <target>`; `make help` lists them all. Targets include at minimum: `up`, `down`, `test`, `lint`, `fmt`, `build`, `ci`, `secrets-scan`, `deps-scan`, `smoke`, `tools-sync`, `spawn-dev-bot`, `wk`.
-- [ ] **M1.4** **Go quality stack**:
+- [x] **M1.1** **Layout**: monorepo — `/core` (Go), `/harness` (TS), `/tools-builtin` (TS, vendored tools), `/cli` (Go), `/deploy` (docker-compose), `/docs`, `/scripts`.
+- [x] **M1.2** **Build systems**: Go module, pnpm workspace for TS, Dockerfiles per service, docker-compose skeleton with Postgres + Grafana stubs.
+- [x] **M1.3** **Makefile as the only supported entry point** — every operational and dev action exposed as a `make <target>`; `make help` lists them all. Targets include at minimum: `up`, `down`, `test`, `lint`, `fmt`, `build`, `ci`, `secrets-scan`, `deps-scan`, `smoke`, `tools-sync`, `spawn-dev-bot`, `wk`.
+- [x] **M1.4** **Go quality stack**:
   - `golangci-lint` with aggressive preset: `staticcheck`, `revive`, `gosec`, `errcheck`, `gofumpt`, `gocyclo`, `ineffassign`, `unused`, `depguard`, `bodyclose`, `noctx`, `contextcheck`.
   - `go test -race -cover` with coverage threshold (start at 60%, ratchet up).
   - `govulncheck` on every CI run.
-- [ ] **M1.5** **TypeScript quality stack**:
+- [x] **M1.5** **TypeScript quality stack**:
   - `tsc` with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`.
   - `eslint` with `typescript-eslint` strict preset + `no-floating-promises`, import sorting, `no-restricted-imports` gating undeclared network/fs.
   - `prettier` for formatting.
   - `vitest` with coverage threshold.
   - `osv-scanner` or `npm audit` on every CI run.
-- [ ] **M1.6** **Cross-cutting linters**: `sqlfluff` (migrations), `shellcheck` (scripts), `hadolint` (Dockerfiles), `markdownlint` (docs), `yamllint` (configs).
-- [ ] **M1.7** **Secret scanning**: `gitleaks` in pre-commit and CI.
-- [ ] **M1.8** **Pre-commit framework**: `lefthook` running format + lint + secret scan on staged files.
-- [ ] **M1.9** **Commit quality**: `commitlint` with conventional-commits config; CI blocks non-conforming titles on PR.
-- [ ] **M1.10** **Dependency hygiene**: Renovate (preferred) or Dependabot config; license checker (allowlist policy).
-- [ ] **M1.11** **CI pipeline**: GitHub Actions (or equivalent) with parallel jobs — `go-ci`, `ts-ci`, `sql-ci`, `security-ci`, `docker-ci`; cached deps; required status checks on main.
-- [ ] **M1.12** **Developer bootstrap doc**: `docs/DEVELOPING.md` — prerequisites, `make bootstrap`, run the smoke path.
+- [x] **M1.6** **Cross-cutting linters**: `sqlfluff` (migrations), `shellcheck` (scripts), `hadolint` (Dockerfiles), `markdownlint` (docs), `yamllint` (configs).
+- [x] **M1.7** **Secret scanning**: `gitleaks` in pre-commit and CI.
+- [x] **M1.8** **Pre-commit framework**: `lefthook` running format + lint + secret scan on staged files.
+- [x] **M1.9** **Commit quality**: `commitlint` with conventional-commits config; CI blocks non-conforming titles on PR.
+- [x] **M1.10** **Dependency hygiene**: Renovate (preferred) or Dependabot config; license checker (allowlist policy).
+- [x] **M1.11** **CI pipeline**: GitHub Actions (or equivalent) with parallel jobs — `go-ci`, `ts-ci`, `sql-ci`, `security-ci`, `docker-ci`; cached deps; required status checks on main.
+- [x] **M1.12** **Developer bootstrap doc**: `docs/DEVELOPING.md` — prerequisites, `make bootstrap`, run the smoke path.
 
 **Artifacts**: repo skeleton, Makefile, all lint/test configs, CI workflows, pre-commit config, developer bootstrap doc.
 
 **Verification**
 
-- [ ] `make ci` locally reproduces the full CI matrix and passes.
-- [ ] `make help` lists every supported action.
-- [ ] `gitleaks` in pre-commit blocks a test-planted secret.
-- [ ] A PR with a convention-breaking commit title is blocked by CI.
+- [x] `make ci` locally reproduces the full CI matrix and passes.
+- [x] `make help` lists every supported action.
+- [x] `gitleaks` in pre-commit blocks a test-planted secret.
+- [x] A PR with a convention-breaking commit title is blocked by CI.
 
 **Dependencies**: none.
 **Magnitude**: 3–5 days.
