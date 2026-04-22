@@ -52,11 +52,20 @@ type Server struct {
 // accepts the *pgxpool.Pool so future routes can capture it via closure, but
 // M2.7.a has no DB-backed endpoints yet so the pool parameter is currently
 // unused at the handler layer (boot-time Ping happens in main).
-func New(cfg config.Config, _ *pgxpool.Pool) *Server {
+func New(cfg config.Config, pool *pgxpool.Pool) *Server {
+	return NewWithHandler(cfg, pool, NewRouter())
+}
+
+// NewWithHandler builds a Server with a caller-supplied http.Handler. The
+// default main.go path uses New (which delegates here with NewRouter); tests
+// and future composition can pass a custom mux — useful for exercising
+// graceful-shutdown edge cases against a slow handler without making the
+// production router aware of them.
+func NewWithHandler(cfg config.Config, _ *pgxpool.Pool, h http.Handler) *Server {
 	return &Server{
 		httpSrv: &http.Server{
 			Addr:              cfg.HTTPAddr,
-			Handler:           NewRouter(),
+			Handler:           h,
 			ReadHeaderTimeout: 5 * time.Second,
 		},
 		shutdownTimeout: cfg.ShutdownTimeout,
