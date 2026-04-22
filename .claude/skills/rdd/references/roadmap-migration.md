@@ -14,16 +14,24 @@ migration at Gate 1 and applies it only after the operator approves.
 Before Phase 1 can produce a candidate list, the orchestrator checks whether
 the ROADMAP already has markers.
 
-Detection heuristic:
+Detection heuristic (runs per file, then aggregates):
 
 ```bash
-# count milestone headings with checkbox markers
-marked=$(grep -cE '^### M[0-9]+.*\[( |x)\]\s*$' docs/ROADMAP-*.md)
-total=$(grep -cE '^### M[0-9]+' docs/ROADMAP-*.md)
+# count milestone headings with checkbox markers, portable across GNU/BSD grep
+for f in docs/ROADMAP-*.md; do
+  marked=$(grep -cE '^### M[0-9]+.*\[( |x)\][[:space:]]*$' "$f")
+  total=$(grep -cE '^### M[0-9]+' "$f")
+  if [ "$total" -gt 0 ] && [ "$marked" -ne "$total" ]; then
+    echo "$f needs migration ($marked/$total marked)"
+  fi
+done
 ```
 
-- If `marked > 0 and marked == total` — migration is not needed.
-- Otherwise — propose migration.
+- If no file prints a "needs migration" line — migration is not needed.
+- Otherwise — propose migration for each flagged file.
+
+Note: `[[:space:]]` is used instead of `\s` because `\s` is not POSIX ERE;
+BSD grep (macOS default) does not treat it reliably as a whitespace class.
 
 ## Transformation rules
 
