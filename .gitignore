@@ -44,5 +44,5 @@ coverage/
 # Docker
 .docker/
 
-# rdd skill: TASK files are ephemeral, never committed to main
-TASK-*.md
+# rdd skill: root-level TASK-*.md scratch files are ephemeral, never committed
+/TASK-*.md
