@@ -74,14 +74,32 @@ Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
    root (`.claude/skills/rdd/`) — i.e. starts with `references/`. When
    writing or editing any file under this skill, preserve that convention.
 10. NEVER end the orchestrator's turn immediately after an `Agent` tool
-    result. Every `Agent` call MUST be followed, in the same reply, by at
-    least one line of user-facing text before the turn ends. The follow-up
-    text states, at minimum: (a) the agent's verdict in ≤ 2 lines,
-    (b) the next step (next phase, gate prompt, or clarifying question).
-    A Gate prompt counts as the follow-up text. Silent-exit after an
-    agent result makes the orchestrator look stalled to the operator
-    even when it isn't; this rule exists to make that failure mode
-    impossible.
+    result. **The Agent's returned report is NOT your follow-up text** —
+    the Agent-tool content block is a tool result, not an orchestrator
+    message; the operator may not see it at all. Every `Agent` call MUST
+    be followed, in the same reply, by an orchestrator-authored text
+    block before the turn ends.
+
+    **Minimum follow-up template** (two lines, non-negotiable):
+
+    > **Verdict**: `<agent outcome in ≤ 2 lines — pass/fail, key counts>`.
+    > **Next**: `<immediate next action — next phase, gate prompt, or clarifying question>`.
+
+    A full Gate prompt counts as the follow-up text. Re-posting or
+    quoting the agent's raw report without an orchestrator-authored
+    sentence does NOT count.
+
+    **Self-check before ending the turn** (run every time, no exceptions):
+    is the last content block of this reply an orchestrator-authored
+    text message (not a tool-use, not a tool-result)? If not, append
+    the two-line template above and only then end the turn.
+
+    Silent-exit after an agent result makes the orchestrator look
+    stalled to the operator even when it isn't; this rule exists to
+    make that failure mode impossible. Prior runs have logged
+    silent-exit incidents repeatedly (see `FEEDBACK.md`) — that
+    history is the reason this rule is prescriptive rather than
+    advisory.
 
 ## Dispatching agents
 
