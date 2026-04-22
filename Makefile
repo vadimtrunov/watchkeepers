@@ -226,6 +226,11 @@ migrate-round-trip: ## Up -> down-to-0 -> up; assert schema dump is identical (A
 	$(require_db_url)
 	@scripts/migrate-round-trip.sh
 
+.PHONY: migrate-test
+migrate-test: migrate-up ## Run schema smoke assertions against the migrated database
+	$(require_db_url)
+	@scripts/migrate-schema-test.sh
+
 # ---------------------------------------------------------------------------
 # Security / commit quality / dependencies
 # ---------------------------------------------------------------------------
