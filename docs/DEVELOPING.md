@@ -76,10 +76,12 @@ pinned via `GOOSE_VERSION` in the `Makefile` (currently `v3.27.0`). The tool
 is invoked through `go run github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)`,
 so no global install is required — the pinned version is the source of truth.
 
-Every target reads the connection string from a single env var,
-`WATCHKEEPER_DB_URL`, and errors out with a helpful message when it is
-unset. Never hard-code credentials in the repo; set it from your shell or
-a local `.envrc` (git-ignored):
+Targets that connect to Postgres (`migrate-up`, `migrate-down`,
+`migrate-status`, and `migrate-round-trip`) read the connection string from a
+single env var, `WATCHKEEPER_DB_URL`, and error out with a helpful message when
+it is unset. `migrate-create` only scaffolds a file and does not require a
+database connection. Never hard-code credentials in the repo; set the URL from
+your shell or a local `.envrc` (git-ignored):
 
 ```sh
 export WATCHKEEPER_DB_URL='postgres://watchkeeper:<password>@localhost:5432/watchkeeper?sslmode=disable'
