@@ -37,6 +37,10 @@ pre-commit:
       glob:
         - "deploy/migrations/*.sql"
       run: sqlfluff lint {staged_files}
+      # No pre-commit hook for the `migrate-*` make targets: they need a
+      # reachable Postgres and therefore live only in the Migrate CI
+      # workflow job and `make migrate-*` invoked by hand. See the
+      # "Migrations" section of docs/DEVELOPING.md.
 
     # Same-file tools run sequentially inside one job so the formatter's writes
     # and the linter's --fix don't race on git's index lock or overwrite each
