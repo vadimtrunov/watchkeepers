@@ -313,20 +313,35 @@ echo "OK: HNSW index chosen for KNN plan (knowledge_chunk_embedding_hnsw_idx)"
 # M2.1.d — RLS assertions
 #
 # The `(e)` block above left 100 `scope='org'` rows in `knowledge_chunk`. We
-# add two more rows under distinct `agent:<uuid>` scopes so the visibility
-# tests below have something to discriminate on. Each test opens its own psql
-# transaction because `SET LOCAL` is scoped to a transaction.
+# seed three RLS-specific rows (tagged `subject LIKE 'rls-%'`) so the
+# visibility tests below have something to discriminate on: one extra `'org'`
+# row plus two rows under distinct `agent:<uuid>` scopes. The seeding block
+# is hermetic — it deletes any prior `rls-%` rows first so re-running the
+# script (without `migrate-down`) between the (e) block and here keeps the
+# RLS row counts deterministic. Each test opens its own psql transaction
+# because `SET LOCAL` is scoped to a transaction.
 # ---------------------------------------------------------------------------
 "${PSQL[@]}" >/dev/null <<'SQL'
 BEGIN;
-INSERT INTO watchkeeper.knowledge_chunk (scope, content, embedding) VALUES
+-- Hermetic reseed: remove any stale RLS-tagged rows before inserting fresh
+-- ones so repeated script runs (or partial failures) don't drift counts.
+DELETE FROM watchkeeper.knowledge_chunk WHERE subject LIKE 'rls-%';
+INSERT INTO watchkeeper.knowledge_chunk (scope, subject, content, embedding) VALUES
+  (
+    'org',
+    'rls-org',
+    'rls org row',
+    ('[' || repeat('0,', 1535) || '0]')::vector
+  ),
   (
     'agent:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'rls-agent-a',
     'agent-A row',
     ('[' || repeat('0,', 1535) || '0]')::vector
   ),
   (
     'agent:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    'rls-agent-b',
     'agent-B row',
     ('[' || repeat('0,', 1535) || '0]')::vector
   );
@@ -346,11 +361,11 @@ ROLLBACK;
 SQL
 )
 
-# Expect: visible = 100 'org' rows + 1 matching agent:aaaa row = 101; bbbb = 0.
-if [[ "${rls_select_counts}" != "101,0" ]]; then
-  fail "RLS cross-scope SELECT expected '101,0' (visible, bbbb-visible); got '${rls_select_counts}'"
+# Expect: visible = 100 HNSW 'org' + 1 rls-org + 1 rls-agent-a = 102; bbbb = 0.
+if [[ "${rls_select_counts}" != "102,0" ]]; then
+  fail "RLS cross-scope SELECT expected '102,0' (visible, bbbb-visible); got '${rls_select_counts}'"
 fi
-echo "OK: RLS hides out-of-scope rows (visible=101, bbbb-visible=0)"
+echo "OK: RLS hides out-of-scope rows (visible=102, bbbb-visible=0)"
 
 echo ">> migrate-schema-test: (g) RLS WITH CHECK on INSERT"
 rls_insert_output=$("${PSQL[@]}" <<'SQL' 2>&1 || true
@@ -380,7 +395,8 @@ echo "OK: RLS INSERT rejected by WITH CHECK"
 echo ">> migrate-schema-test: (h) RLS empty session setting"
 # No `SET LOCAL watchkeeper.scope` — current_setting(…, true) returns empty
 # string, so `scope = current_setting(…, true)` is false and only the
-# `scope = 'org'` branch of USING holds. Expect 100 rows visible.
+# `scope = 'org'` branch of USING holds. Expect 101 rows visible:
+# 100 HNSW-seeded 'org' rows + 1 RLS-seeded `rls-org` row.
 rls_empty_count=$("${PSQL[@]}" -tA <<'SQL'
 BEGIN;
 SET ROLE wk_agent_role;
@@ -390,10 +406,10 @@ ROLLBACK;
 SQL
 )
 
-if [[ "${rls_empty_count}" != "100" ]]; then
-  fail "RLS empty-scope visibility expected 100 (org rows only); got '${rls_empty_count}'"
+if [[ "${rls_empty_count}" != "101" ]]; then
+  fail "RLS empty-scope visibility expected 101 (org rows only); got '${rls_empty_count}'"
 fi
-echo "OK: RLS with unset scope sees only scope='org' rows (count=100)"
+echo "OK: RLS with unset scope sees only scope='org' rows (count=101)"
 
 echo ">> migrate-schema-test: (i) outbox happy path + partial-index presence"
 "${PSQL[@]}" >/dev/null <<'SQL'
