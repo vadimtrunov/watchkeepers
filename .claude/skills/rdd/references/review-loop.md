@@ -5,28 +5,13 @@ before the PR is opened. Alternates `code-reviewer` (per
 `references/agent-briefs/code-reviewer.md`) and `executor` in fixer mode (per
 `references/agent-briefs/executor.md`).
 
-## Severity contract (duplicated here for the reviewer brief)
+## Severity contract
 
-The `code-reviewer` agent must return a JSON object with three arrays:
-
-```json
-{
-  "blocker":   [ { "file": "...", "line": 0, "rationale": "...", "suggested_fix": "..." } ],
-  "important": [ { "file": "...", "line": 0, "rationale": "...", "suggested_fix": "..." } ],
-  "nit":       [ { "file": "...", "line": 0, "rationale": "...", "suggested_fix": "..." } ]
-}
-```
-
-Definitions:
-- **blocker** — violates an acceptance criterion, breaks tests, contains a
-  security issue, or leaks a declared capability.
-- **important** — real logic defect, violates an architecture decision
-  recorded in ROADMAP §2, or is missing a test case from the approved test
-  plan.
-- **nit** — style, naming, minor readability, comment typos.
-
-The orchestrator treats `blocker` and `important` as loop-blocking; `nit` is
-moved to the TASK's `## Follow-up` section and never fixed in this loop.
+The `code-reviewer` agent returns `{blocker, important, nit}` per its brief in
+`references/agent-briefs/code-reviewer.md` (JSON shape + severity
+definitions). The loop treats `blocker` and `important` as loop-blocking;
+`nit` is moved to the TASK's `## Follow-up` section and never fixed in this
+loop.
 
 ## Pseudocode
 
