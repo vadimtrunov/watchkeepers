@@ -58,8 +58,10 @@ Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
    checkbox toggles.
 2. NEVER skip a gate. If the operator is unreachable, halt.
 3. NEVER merge without explicit operator confirmation at Gate 3.
-4. NEVER modify `SKILL.md`, `references/*`, or any file under `agent-briefs/`.
-   `FEEDBACK.md` is the only self-referential file you may append to.
+4. NEVER modify `SKILL.md` or anything under `references/` (including
+   `agent-briefs/`) from the orchestrator. `FEEDBACK.md` is appended ONLY
+   via the `writer` agent at Phase 7; the orchestrator never writes it
+   directly.
 5. NEVER resolve review comments on behalf of the reviewer. The `executor`
    (fixer mode) may post a `fixed in <sha>` reply; the "Resolve" click stays
    with a human.
@@ -85,10 +87,12 @@ Preferred agent types (resolve via the `subagent_type` parameter):
 |------|---------------------------|----------|
 | planner | `oh-my-claudecode:planner` | `general-purpose` |
 | explore | `oh-my-claudecode:explore` | `Explore` |
-| executor | `oh-my-claudecode:executor` (`model: opus` for complex TASKs) | `general-purpose` |
+| executor | `oh-my-claudecode:executor` | `general-purpose` |
 | code-reviewer | `oh-my-claudecode:code-reviewer` | `superpowers:code-reviewer` |
 | git-master | `oh-my-claudecode:git-master` | `general-purpose` |
 | writer | `oh-my-claudecode:writer` | `general-purpose` |
+
+_Executor model override: pass `model: opus` for complex TASKs (operator judgement at Gate 2, or when the TASK lists ≥ 6 acceptance criteria)._
 
 ## State recovery
 
