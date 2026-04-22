@@ -130,21 +130,19 @@ must be added to the required-checks list (see **Branch protection** below).
 
 ### Schema overview
 
-After `002_core_business_tables.sql` the `watchkeeper` schema holds six core
-tables that model the Watchkeeper business domain. `organization` is the
-single-tenant customer container; `human` rows are members of an organization
-and fill "lead" roles relationally (there is no `role` column). A `manifest`
-is the role/identity definition for a Watchkeeper and owns one-or-more
-`manifest_version` rows — immutable snapshots carrying `system_prompt`,
-`tools`, `authority_matrix`, `knowledge_sources`, and the optional
-`personality` and `language`, uniquely keyed on `(manifest_id, version_no)`.
-A `watchkeeper` is the runtime agent row tied to a manifest, a lead human,
-and (once spawned) an active `manifest_version`; pre-approval state leaves
-`active_manifest_version_id` NULL and `status='pending'`. A `watch_order` is
-a task a lead issues to a watchkeeper with a `priority` and lifecycle
-`status`. Later milestones add `keepers_log`, `knowledge_chunk`, and
-`outbox` tables alongside the RLS `scope` column — none of those live here
-yet.
+The `watchkeeper` schema holds the Phase 1 Keep foundation. `organization`
+is the tenant container; `human` rows are members and fill "lead" roles
+relationally. A `manifest` owns `manifest_version` snapshots (`system_prompt`,
+`tools`, `authority_matrix`, `knowledge_sources`, `personality`, `language`,
+uniquely keyed on `(manifest_id, version_no)`). A `watchkeeper` is the
+runtime agent tied to a manifest, a lead human, and an active
+`manifest_version`. A `watch_order` is a task with `priority` and lifecycle
+`status`. `keepers_log` is the append-only audit log (trigger-enforced).
+`knowledge_chunk` stores `vector(1536)` embeddings behind an HNSW
+`vector_cosine_ops` index. `outbox` stages events for the future publisher
+worker. The scoped tables (`watch_order`, `knowledge_chunk`) carry a `scope`
+column and run under FORCE ROW LEVEL SECURITY; policies evaluate
+`current_setting('watchkeeper.scope', true)`.
 
 ## Pre-commit hooks
 
