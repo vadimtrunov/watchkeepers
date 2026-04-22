@@ -98,10 +98,9 @@ previous_fp = null
 
 for i in 0..MAX_ITERATIONS-1:
     wait_until_checks_report_or_timeout(CHECK_TIMEOUT_MINUTES)
-        # poll `gh pr checks` every 30s from the last push sha;
-        # any non-terminal status (queued, pending, in_progress, waiting,
-        # requested) after the timeout -> escalate immediately with
-        # reason="pr-fix CI timeout: <check-name> (<status>)"
+        # See §Polling mechanism for the concrete bash template.
+        # On timeout, escalate immediately with
+        # reason="pr-fix CI timeout: <check-name> (<status>)".
 
     checks  = gh pr checks <pr> --json name,status,conclusion,link
         # `link` points to .../actions/runs/<run-id>/job/<job-id>;
@@ -145,6 +144,48 @@ for i in 0..MAX_ITERATIONS-1:
 escalate("pr-fix exhausted 5 iterations without converging",
          failing, blockers)
 ```
+
+## Polling mechanism (Phase 6)
+
+`wait_until_checks_report_or_timeout` cannot be implemented as
+`sleep 30 && gh pr checks` — the Claude Code sandbox blocks long
+leading sleeps, and chaining shorter sleeps keeps the orchestrator
+frozen (bash-tool cap is 10 min, Anthropic prompt cache TTL is 5
+min). Use `run_in_background: true` plus `Monitor` instead.
+
+Dispatch the poller once per Phase 6 iteration:
+
+```bash
+# Bash tool call with run_in_background: true
+bash -c '
+  end=$(( $(date +%s) + 30*60 ))
+  while :; do
+    out=$(gh pr checks <pr> --json name,status,conclusion 2>/dev/null)
+    pending=$(echo "$out" | jq "[.[] | select(.status != \"COMPLETED\")] | length")
+    if [ "$pending" = "0" ]; then
+      echo "CHECKS_COMPLETE:$out"; exit 0
+    fi
+    if [ "$(date +%s)" -ge "$end" ]; then
+      echo "CHECKS_TIMEOUT:$out"; exit 2
+    fi
+    echo "POLL:pending=$pending"
+    sleep 30
+  done
+'
+```
+
+Attach `Monitor` to the returned PID. Event semantics:
+
+- `POLL:pending=N` — heartbeat, no action; between heartbeats the
+  orchestrator may read files, update the TASK progress log, or
+  answer the operator without losing the prompt cache.
+- `CHECKS_COMPLETE:<json>` — proceed to the iteration body
+  (fetch threads, compute fingerprint, dispatch fixer or converge).
+- `CHECKS_TIMEOUT:<json>` — escalate with
+  reason="pr-fix CI timeout: <failing-check> (<status>)".
+
+On escalate/abort, kill the background process with `Bash kill <PID>`
+before exiting the iteration — do not leave orphan pollers.
 
 ## Signal source — Phase 6 review threads
 
