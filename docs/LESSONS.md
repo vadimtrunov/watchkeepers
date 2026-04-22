@@ -6,6 +6,41 @@ Appended by the `rdd` skill after each merged TASK (one section per TASK).
 Read by the `rdd` skill at the start of Phase 2 to seed brainstorming with
 prior context. Read by humans whenever.
 
+## 2026-04-22 — M2.1: Complete Keep schema foundation (knowledge_chunk + RLS + outbox)
+
+**PR**: [#7](https://github.com/vadimtrunov/watchkeepers/pull/7)
+**Merged**: 2026-04-22
+
+### Context
+
+Bundled M2.1.c (knowledge_chunk table + pgvector setup), M2.1.d (RLS policy + FORCE
+semantics), and M2.1.e (outbox event table + per-FK indexes) into a single 8-commit PR.
+Established the full Keep schema scaffold with vector embeddings, row-level security,
+and event-sourcing outbox for downstream Keep mutations.
+
+### Pattern
+
+**pgvector + HNSW recipe for first use**: Created extension via `CREATE EXTENSION IF NOT
+EXISTS vector;` at the migration top level (not in `001_init`). HNSW index uses
+`vector_cosine_ops` with `m=16, ef_construction=64` tuning parameters. Test requires
+≥100 rows + `ANALYZE` + plan-text grep to verify index selection. Deterministic test
+seed uses `random() + 0.001` to guarantee non-zero vector components (cosine safety).
+
+**FORCE RLS owner-baseline assertion pattern**: `ENABLE ROW LEVEL SECURITY` alone does not
+restrict the table owner. Setting `FORCE ROW LEVEL SECURITY` forces all roles — including
+the owner — into policy checks. Correct test pattern: assert owner-baseline (no policy
+filters, owner sees all rows), then assert policy-subject assertions (filtered rows visible
+via SET ROLE). Naive test of SET ROLE without owner-baseline misses a semantic gap.
+
+**Per-FK index coverage bundled with RLS**: M2.1.a flagged "defer per-FK indexing until
+before RLS"; this bundle bakes all per-FK indexes into the RLS migration. Pattern: review
+FK coverage in the same migration you add RLS to keep the dependency implicit.
+
+### References
+
+- Files: `deploy/migrations/005_knowledge_chunk.sql`, `006_rls_and_outbox.sql`
+- Docs: `docs/ROADMAP-phase1.md` §M2.1
+
 ---
 
 ## 2026-04-22 — M2.1.b: keepers_log table DDL + append-only trigger
