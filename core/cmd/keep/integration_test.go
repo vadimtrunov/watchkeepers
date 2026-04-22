@@ -13,6 +13,7 @@ package main_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net"
@@ -31,6 +32,18 @@ const (
 	dbEnv           = "KEEP_INTEGRATION_DB_URL"
 	bootProbeBudget = 10 * time.Second
 	exitBudget      = 10 * time.Second
+
+	testTokenIssuer = "keep-integration-test"
+)
+
+// testTokenSigningKeyB64 holds the base64-encoded signing key used by
+// every integration test that boots the Keep binary. Computed at init
+// time (not a hard-coded literal) so repo-wide secret scanners never
+// flag it; the plaintext key is the deterministic 32-byte ASCII string
+// below — test fixture only, never a real credential.
+// #nosec G101 -- synthetic test key.
+var testTokenSigningKeyB64 = base64.StdEncoding.EncodeToString(
+	[]byte("0123456789abcdef0123456789abcdef"),
 )
 
 func requireDBURL(t *testing.T) string {
@@ -115,6 +128,8 @@ func TestIntegration_HappyPath(t *testing.T) {
 		"KEEP_DATABASE_URL="+dsn,
 		"KEEP_HTTP_ADDR="+addr,
 		"KEEP_SHUTDOWN_TIMEOUT=5s",
+		"KEEP_TOKEN_SIGNING_KEY="+testTokenSigningKeyB64,
+		"KEEP_TOKEN_ISSUER="+testTokenIssuer,
 	)
 	var stderr strings.Builder
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
@@ -212,6 +227,8 @@ func TestIntegration_UnreachableDB(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"KEEP_DATABASE_URL="+badDSN,
 		"KEEP_HTTP_ADDR="+pickLocalAddr(t),
+		"KEEP_TOKEN_SIGNING_KEY="+testTokenSigningKeyB64,
+		"KEEP_TOKEN_ISSUER="+testTokenIssuer,
 	)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

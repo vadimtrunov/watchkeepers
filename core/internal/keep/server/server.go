@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/vadimtrunov/watchkeepers/core/internal/keep/auth"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/config"
 )
 
@@ -33,11 +34,26 @@ func HealthHandler() http.Handler {
 	})
 }
 
-// NewRouter returns the HTTP router with every Keep route wired. For M2.7.a
-// this is only /health; future milestones append to the mux here.
-func NewRouter() http.Handler {
+// NewRouter returns the HTTP router with every Keep route wired. /health is
+// mounted outside the auth wall; every /v1/* route runs through
+// AuthMiddleware(v) and is backed by handlers that open a per-request
+// scoped transaction against pool via db.WithScope.
+//
+// A nil v is permitted only when no /v1 routes will be exercised
+// (e.g. test doubles that only hit /health); a nil pool is permitted in
+// tests that exit before the DB round-trip (the router never dereferences
+// the pool directly — it is captured by the handlers that need it).
+func NewRouter(v auth.Verifier, pool *pgxpool.Pool) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", HealthHandler())
+
+	if v != nil {
+		authed := AuthMiddleware(v)
+		runner := poolRunner{pool: pool}
+		mux.Handle("POST /v1/search", authed(handleSearch(runner)))
+		mux.Handle("GET /v1/manifests/{manifest_id}", authed(handleGetManifest(runner)))
+		mux.Handle("GET /v1/keepers-log", authed(handleLogTail(runner)))
+	}
 	return mux
 }
 
@@ -48,12 +64,16 @@ type Server struct {
 	shutdownTimeout time.Duration
 }
 
-// New builds a Server bound to cfg.HTTPAddr using the default Keep router. It
-// accepts the *pgxpool.Pool so future routes can capture it via closure, but
-// M2.7.a has no DB-backed endpoints yet so the pool parameter is currently
-// unused at the handler layer (boot-time Ping happens in main).
-func New(cfg config.Config, pool *pgxpool.Pool) *Server {
-	return NewWithHandler(cfg, pool, NewRouter())
+// New builds a Server bound to cfg.HTTPAddr using the default Keep router.
+// The pool is captured by the scoped read handlers; the verifier is
+// captured by AuthMiddleware. Both are required by M2.7.b+c endpoints.
+//
+// For backward compatibility with the earlier M2.7.a call-site shape
+// (where no verifier was threaded through), callers that need only
+// /health can pass a nil verifier — the router will then skip the /v1/*
+// wiring. Production main.go always supplies both.
+func New(cfg config.Config, pool *pgxpool.Pool, v auth.Verifier) *Server {
+	return NewWithHandler(cfg, pool, NewRouter(v, pool))
 }
 
 // NewWithHandler builds a Server with a caller-supplied http.Handler. The

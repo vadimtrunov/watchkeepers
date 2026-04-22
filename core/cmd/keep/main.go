@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/vadimtrunov/watchkeepers/core/internal/keep/auth"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/config"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/server"
 )
@@ -63,7 +64,13 @@ func run(_ []string, _ io.Writer, stderr io.Writer) int {
 		return 1
 	}
 
-	srv := server.New(cfg, pool)
+	verifier, err := auth.NewHMACVerifier(cfg.TokenSigningKey, cfg.TokenIssuer, time.Now)
+	if err != nil {
+		fmt.Fprintf(stderr, "keep: auth: %v\n", err)
+		return 1
+	}
+
+	srv := server.New(cfg, pool, verifier)
 	if err := srv.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(stderr, "keep: server: %v\n", err)
 		return 1
