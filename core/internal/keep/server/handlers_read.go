@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -121,6 +122,16 @@ func handleSearch(r scopedRunner) http.Handler {
 				var rec searchResult
 				if err := rows.Scan(&rec.ID, &rec.Subject, &rec.Content, &rec.CreatedAt, &rec.Distance); err != nil {
 					return fmt.Errorf("search scan: %w", err)
+				}
+				// pgvector cosine distance between two zero vectors is
+				// undefined (0/0) and comes back as NaN; the Go JSON
+				// encoder rejects NaN mid-stream, truncating the response
+				// after status + headers have flushed. Snap NaN/±Inf to
+				// the max cosine distance (2.0 for vector_cosine_ops) so
+				// the client gets a serialisable number and these rows
+				// sort last.
+				if math.IsNaN(rec.Distance) || math.IsInf(rec.Distance, 0) {
+					rec.Distance = 2.0
 				}
 				out = append(out, rec)
 			}

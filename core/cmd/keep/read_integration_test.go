@@ -229,7 +229,12 @@ func (e *testEnv) seed(ctx context.Context, tx pgx.Tx) error {
 		return fmt.Errorf("watchkeeper: %w", err)
 	}
 
-	zeroVec := "[" + strings.Repeat("0,", 1535) + "0]"
+	// pgvector cosine distance against a pure-zero vector is undefined
+	// (division by zero) and surfaces as NaN through pgx, which the Go
+	// json encoder then rejects. Use a small non-zero component so every
+	// fixture row has a finite cosine distance regardless of the query
+	// vector shape (see lesson from M2.1 seeding pattern).
+	onesVec := "[" + strings.Repeat("0.1,", 1535) + "0.1]"
 	chunks := []struct{ scope, subject string }{
 		{"org", e.subjectTag + "-org"},
 		{e.userScope, e.subjectTag + "-user"},
@@ -239,7 +244,7 @@ func (e *testEnv) seed(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
             INSERT INTO watchkeeper.knowledge_chunk (scope, subject, content, embedding)
             VALUES ($1, $2, $3, $4::vector)
-        `, c.scope, c.subject, "content for "+c.subject, zeroVec); err != nil {
+        `, c.scope, c.subject, "content for "+c.subject, onesVec); err != nil {
 			return fmt.Errorf("chunk %s: %w", c.scope, err)
 		}
 	}
@@ -364,10 +369,18 @@ type searchResponse struct {
 	} `json:"results"`
 }
 
-// zeroVec1536 matches the fixture embedding so every seeded row comes
-// back with distance = 0 (HNSW chooses first by distance + tiebreak).
-func zeroVec1536() []float32 {
-	return make([]float32, 1536)
+// queryVec1536 builds a 1536-wide query embedding with the same non-zero
+// component as the fixture rows. The cosine distance between two parallel
+// vectors is 0, so every seeded row ends up with `distance = 0` — this is
+// finite and JSON-serializable (a pure-zero vector would cause pgvector to
+// return NaN, which encoding/json rejects mid-stream and silently
+// truncates the response).
+func queryVec1536() []float32 {
+	out := make([]float32, 1536)
+	for i := range out {
+		out[i] = 0.1
+	}
+	return out
 }
 
 // -----------------------------------------------------------------------
@@ -383,7 +396,7 @@ func TestReadAPI_Search_AgentScope(t *testing.T) {
 	tok := mintToken(t, ti, env.agentScope)
 
 	status, body := doJSON(t, http.MethodPost, "http://"+addr+"/v1/search", tok, searchBody{
-		Embedding: zeroVec1536(),
+		Embedding: queryVec1536(),
 		TopK:      10,
 	})
 	if status != http.StatusOK {
@@ -420,7 +433,7 @@ func TestReadAPI_Search_UserScope(t *testing.T) {
 	tok := mintToken(t, ti, env.userScope)
 
 	status, body := doJSON(t, http.MethodPost, "http://"+addr+"/v1/search", tok, searchBody{
-		Embedding: zeroVec1536(),
+		Embedding: queryVec1536(),
 		TopK:      10,
 	})
 	if status != http.StatusOK {
@@ -724,7 +737,7 @@ func TestReadAPI_ScopeIsTokenBound(t *testing.T) {
 	// Build a URL with a scope= query that would, if honoured, elevate
 	// visibility to user rows. The handlers never read req.URL query
 	// for scope, so the response must match the agent contract.
-	reqBody := searchBody{Embedding: zeroVec1536(), TopK: 10}
+	reqBody := searchBody{Embedding: queryVec1536(), TopK: 10}
 	status, body := doJSON(t, http.MethodPost,
 		"http://"+addr+"/v1/search?scope=user:"+env.humanID, tok, reqBody)
 	if status != http.StatusOK {
@@ -761,7 +774,7 @@ func TestReadAPI_ConcurrentScopeIsolation(t *testing.T) {
 	run := func(tok, mustNotSee string) {
 		defer wg.Done()
 		status, body := doJSON(t, http.MethodPost,
-			"http://"+addr+"/v1/search", tok, searchBody{Embedding: zeroVec1536(), TopK: 10})
+			"http://"+addr+"/v1/search", tok, searchBody{Embedding: queryVec1536(), TopK: 10})
 		if status != http.StatusOK {
 			errs <- fmt.Errorf("status = %d body = %s", status, body)
 			return
