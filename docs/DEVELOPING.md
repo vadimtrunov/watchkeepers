@@ -180,17 +180,24 @@ goes back through the `rdd` loop with a new LESSON entry.
 
 ### Env vars
 
-| Variable                | Required | Default | Notes                                                             |
-| ----------------------- | -------- | ------- | ----------------------------------------------------------------- |
-| `KEEP_DATABASE_URL`     | yes      | —       | pgx-compatible Postgres DSN. Boot exits non-zero if unset or bad. |
-| `KEEP_HTTP_ADDR`        | no       | `:8080` | Listen address passed to `http.Server`.                           |
-| `KEEP_SHUTDOWN_TIMEOUT` | no       | `10s`   | Go duration; bounds `http.Server.Shutdown` on SIGINT / SIGTERM.   |
+| Variable                 | Required | Default | Notes                                                                  |
+| ------------------------ | -------- | ------- | ---------------------------------------------------------------------- |
+| `KEEP_DATABASE_URL`      | yes      | —       | pgx-compatible Postgres DSN. Boot exits non-zero if unset or bad.      |
+| `KEEP_HTTP_ADDR`         | no       | `:8080` | Listen address passed to `http.Server`.                                |
+| `KEEP_SHUTDOWN_TIMEOUT`  | no       | `10s`   | Go duration; bounds `http.Server.Shutdown` on SIGINT / SIGTERM.        |
+| `KEEP_TOKEN_SIGNING_KEY` | yes      | —       | Base64-encoded HMAC-SHA256 key. Decoded bytes must be ≥ 32 bytes long. |
+| `KEEP_TOKEN_ISSUER`      | yes      | —       | Expected `iss` claim on every verified capability token.               |
 
 ### Build and run locally
 
 ```sh
 # Compile into ./bin/keep
 make keep-build
+
+# Generate a 32-byte random signing key (one-shot; rotate by replacing the
+# env var and restarting the binary — no mid-flight rotation yet).
+export KEEP_TOKEN_SIGNING_KEY="$(openssl rand -base64 32)"
+export KEEP_TOKEN_ISSUER='keep-dev'
 
 # Run against a local Postgres (migrations applied via `make migrate-up`).
 export KEEP_DATABASE_URL='postgres://watchkeeper:<password>@localhost:5432/watchkeeper?sslmode=disable'
@@ -208,6 +215,80 @@ curl -fsS http://localhost:8080/health
 
 Send `SIGTERM` (or hit `Ctrl+C`) to trigger graceful shutdown.
 
+### Capability-token contract
+
+Every `/v1/*` route requires `Authorization: Bearer <token>`; `/health`
+stays open. Tokens are compact JWT-like strings signed with HS256:
+
+```text
+base64url(header) . base64url(payload) . base64url(hmac-sha256(key, header+"."+payload))
+```
+
+Fixed header: `{"alg":"HS256","typ":"JWT"}`. Payload is the verified
+`auth.Claim` plus standard `exp` / `iat`:
+
+```json
+{
+  "sub": "watchkeeper-or-human-uuid",
+  "scope": "org | user:<uuid> | agent:<uuid>",
+  "iss": "<matches KEEP_TOKEN_ISSUER>",
+  "exp": 1714000000,
+  "iat": 1713999700
+}
+```
+
+The `scope` claim drives the RLS role switch. `org` uses `wk_org_role`;
+the `user:` and `agent:` prefixes route to `wk_user_role` and
+`wk_agent_role` respectively. Any other shape returns
+`401 {"error":"unauthorized","reason":"bad_scope"}`.
+
+Tokens are minted by the core capability broker (M3.5). For local
+development and tests, `core/internal/keep/auth.TestIssuer` issues tokens
+against the same signing key — never use it outside tests.
+
+To rotate the signing key, replace `KEEP_TOKEN_SIGNING_KEY` and restart
+the process; existing tokens will fail signature verification immediately.
+
+### Endpoint contracts
+
+All three read endpoints share the same auth envelope. Errors are always
+JSON. Responses mirror the column names from the `watchkeeper` schema.
+
+#### `POST /v1/search`
+
+Cosine-distance KNN over `watchkeeper.knowledge_chunk`. Row visibility is
+RLS-filtered by the token's scope.
+
+```sh
+curl -fsS -X POST http://localhost:8080/v1/search \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"embedding": [0.1, 0.2, ...], "top_k": 10}'
+```
+
+`top_k` is clamped to `[1, 50]`; zero or negative values return `400`.
+
+#### `GET /v1/manifests/{manifest_id}`
+
+Returns the `manifest_version` row with the highest `version_no`. `404`
+with body `{"error":"not_found"}` when no version exists.
+
+```sh
+curl -fsS -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/v1/manifests/<manifest-uuid>
+```
+
+#### `GET /v1/keepers-log?limit=<n>`
+
+Tail the append-only audit log in `created_at DESC` order. `limit`
+defaults to `50` and is capped at `200`; zero or non-numeric values
+return `400`.
+
+```sh
+curl -fsS -H "Authorization: Bearer $TOKEN" \
+  'http://localhost:8080/v1/keepers-log?limit=100'
+```
+
 ### Docker image
 
 ```sh
@@ -224,16 +305,21 @@ license-scan CI gates as `deploy/Dockerfile`.
 
 ### Integration tests
 
-The binary-boot suite lives in `core/cmd/keep/integration_test.go`
-(build tag `integration`) and requires a reachable Postgres 16 in
-`KEEP_INTEGRATION_DB_URL`:
+The binary-boot suite lives in `core/cmd/keep/integration_test.go` plus
+`core/cmd/keep/read_integration_test.go` (both build tag `integration`)
+and requires a reachable Postgres 16 with every migration (001..007)
+applied. Use `make keep-integration-test`:
 
 ```sh
-KEEP_INTEGRATION_DB_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable' \
-  go test -tags=integration -race -v ./core/cmd/keep/...
+export KEEP_INTEGRATION_DB_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable'
+make migrate-up
+make keep-integration-test
 ```
 
-CI runs this automatically under the `Keep Integration CI` job.
+The Make target enforces the env guard before invoking
+`go test -tags=integration -race -v ./core/cmd/keep/...` so a mistyped
+DSN fails loudly. CI runs the same target under the `Keep Integration
+CI` job.
 
 ## Pre-commit hooks
 
