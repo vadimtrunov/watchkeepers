@@ -53,7 +53,14 @@ pre-commit:
       run: |
         set -euo pipefail
         go run mvdan.cc/gofumpt@latest -l -w {staged_files}
-        golangci-lint run --new-from-rev HEAD --fix {staged_files}
+        # Lint per *package* of each staged file — golangci-lint's
+        # typechecker needs the full package to resolve symbols shared
+        # with sibling files (e.g. integration-tag helpers in
+        # core/cmd/keep/). `--build-tags=integration` keeps the
+        # integration suite in scope. Directory de-duplication via sort
+        # -u avoids linting the same package twice per commit.
+        pkg_dirs=$(for f in {staged_files}; do dirname "$f"; done | sort -u)
+        golangci-lint run --build-tags=integration --new-from-rev HEAD --fix $pkg_dirs
       stage_fixed: true
 
     - name: ts-fmt-lint
