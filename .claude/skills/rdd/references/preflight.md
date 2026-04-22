@@ -23,17 +23,24 @@ Pass: at least one workflow file printed.
 Fail: empty output. Stop with:
 > `rdd` preflight failed: no CI workflow in `.github/workflows/`. CI is a hard prerequisite — set up CI before running `rdd`.
 
-## Check 3 — `gh` active account matches `origin` owner
+## Check 3 — `gh` active account has write access to `origin`
+
+Identity equality (`owner == active`) is too strict for organization
+repositories where the owner is an org and the active user is a member with
+sufficient rights. Check the active user's permission level instead.
 
 Commands:
 ```bash
-owner=$(git remote get-url origin | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$#\1#')
+url=$(git remote get-url origin)
+owner=$(echo "$url" | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$#\1#')
+repo=$(echo  "$url" | sed -E 's#.*[:/][^/]+/([^/]+?)(\.git)?$#\1#')
 active=$(gh api user --jq .login 2>/dev/null)
-echo "owner=$owner active=$active"
+perm=$(gh api "repos/$owner/$repo/collaborators/$active/permission" --jq .permission 2>/dev/null)
+echo "owner=$owner repo=$repo active=$active perm=$perm"
 ```
-Pass: `$owner == $active`.
-Fail (or `active` empty): stop with:
-> `rdd` preflight failed: active `gh` account (`<active>`) is not the owner of `origin` (`<owner>`). Switch with: `gh auth switch --user <owner>`
+Pass: `$perm` is one of `admin`, `maintain`, or `write`.
+Fail (or `active` / `perm` empty): stop with:
+> `rdd` preflight failed: active `gh` account (`<active>`) does not have write access to `<owner>/<repo>` (permission: `<perm>`). Switch with: `gh auth switch --user <user-with-write>`
 
 ## Check 4 — Working tree is clean
 

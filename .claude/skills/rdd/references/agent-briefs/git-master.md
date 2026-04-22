@@ -60,6 +60,9 @@ Hard rules:
 
 Input:
 - **PR number**.
+- **Feature branch name** (`rdd/<slug>`). If not supplied, derive it
+  from the PR head ref via `gh pr view <pr> --json headRefName --jq
+  .headRefName` and use that as the branch to delete in step 3.
 - **Merge method**: default `squash`; use the repo default if configurable
   via `.github/settings.yml` or `gh api repos/:owner/:repo`.
 - **Leaf roadmap id** (e.g. `M1.9.a`) — the one to mark `[x]`.

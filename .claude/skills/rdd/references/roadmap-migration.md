@@ -53,10 +53,13 @@ external dependency notes) stay unchanged.
 
 Show the operator the proposed diff (unified `diff` format). Ask:
 
-> `docs/ROADMAP-phase1.md` has no progress markers. I propose the migration
+> `<roadmap-path>` has no progress markers. I propose the migration
 > above: `[ ]` on each milestone, and numbered `- [ ] **M#.k**` bullets for
 > each atomic sub-item. This will be committed to `main` as one commit
 > titled `docs(roadmap): add hierarchical progress checkboxes`. Apply?
+
+(Substitute `<roadmap-path>` with each file flagged by the detection
+heuristic above, e.g. `docs/ROADMAP-phase1.md`, `docs/ROADMAP-phase2.md`.)
 
 Only apply on explicit "yes". On "no", stop the skill and tell the operator
 the migration is required before any TASK can be picked.

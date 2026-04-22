@@ -11,16 +11,35 @@ fix.
    A check is failing if `status == "completed"` and
    `conclusion in {failure, cancelled, timed_out}`.
 
-2. **Unresolved comments** — from
-   `gh pr view <pr-number> --json comments,reviews --jq '...'`.
-   A comment is treated as:
-   - `blocker` if its body begins with `BLOCKER:` or
-     `[blocker]`, or the reviewer left a `CHANGES_REQUESTED` review;
-   - `important` if the body begins with `IMPORTANT:` or `[important]`;
+2. **Unresolved comments** — thread-level resolution state is not exposed
+   by `gh pr view --json comments,reviews`. Query it via GraphQL:
+
+   ```bash
+   gh api graphql -F owner='<owner>' -F repo='<repo>' -F pr=<pr-number> -f query='
+     query($owner:String!,$repo:String!,$pr:Int!){
+       repository(owner:$owner,name:$repo){
+         pullRequest(number:$pr){
+           reviewThreads(first:100){
+             pageInfo{hasNextPage,endCursor}
+             nodes{
+               isResolved
+               comments(first:1){nodes{id,body,author{login}}}
+             }
+           }
+         }
+       }
+     }'
+   ```
+
+   Paginate with `after:"<endCursor>"` while `hasNextPage == true`.
+
+   Each thread is classified by the body of its first comment:
+   - `blocker` if body begins with `BLOCKER:` or `[blocker]`, or the
+     reviewer left a `CHANGES_REQUESTED` review;
+   - `important` if body begins with `IMPORTANT:` or `[important]`;
    - otherwise `nit` (including bot comments from standard linters).
 
-   `resolved` is true if the comment thread is marked resolved by any human
-   or the commenter has since approved.
+   `resolved` is `isResolved == true` on the thread node.
 
    Only `blocker` and `important` are loop-blocking.
 
@@ -34,15 +53,19 @@ previous_fingerprint = null
 for i in 0..MAX_ITERATIONS-1:
     wait_until_checks_report_or_timeout(CHECK_TIMEOUT_MINUTES)
         # polls `gh pr checks` every 30s; timer starts from the last push sha
-        # if a check is still "in_progress" after 30 min, escalate immediately
-        # with reason="pr-fix CI timeout: <check-name>"
+        # if any check is still in a non-terminal state (anything other than
+        # `completed` — e.g. `queued`, `pending`, `in_progress`, `waiting`,
+        # `requested`) after 30 min, escalate immediately with
+        # reason="pr-fix CI timeout: <check-name> (<status>)"
 
-    checks   = gh pr checks <pr> --json name,status,conclusion
-    comments = gh pr view <pr> --json comments,reviews
+    checks   = gh pr checks <pr> --json name,status,conclusion,link
+        # `link` points to .../actions/runs/<run-id>/job/<job-id>; extract
+        # <run-id> to feed `gh run view --log-failed` for each failing check
+    threads  = gh api graphql ... reviewThreads(first:100){isResolved, comments}  # see §Loop signals
     failing  = [c for c in checks if failing(c)]
-    unresolved_blockers = [c for c in comments
-                           if severity(c) in {blocker, important}
-                           and not resolved(c)]
+    unresolved_blockers = [t for t in threads
+                           if severity(t) in {blocker, important}
+                           and not t.isResolved]
 
     if failing == [] and unresolved_blockers == []:
         append progress log entry: "Phase 6 converged at iteration i"
@@ -57,10 +80,13 @@ for i in 0..MAX_ITERATIONS-1:
         escalate(reason="pr-fix diverging: failure count growing",
                  failing=failing, unresolved=unresolved_blockers)
 
+    # For each failing check, parse the run id out of its `link` field
+    # (https://github.com/.../actions/runs/<RUN_ID>/job/<JOB_ID>) and fetch
+    # log snippets via `gh run view <RUN_ID> --log-failed`.
     dispatch(executor, mode=pr-fixer, brief={
         task_path: TASK_PATH,
         pr_number: <n>,
-        failing_checks: failing + <log snippets via `gh run view --log-failed`>,
+        failing_checks: failing + <log snippets via `gh run view <run-id> --log-failed` per check>,
         unresolved_blockers: unresolved_blockers,
         instruction: "apply minimal patches; push to rdd/<slug>; for each
                       comment you addressed, post `gh pr comment <pr> --body

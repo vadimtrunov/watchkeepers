@@ -12,7 +12,7 @@ write any files or run any mutating commands.
 
 - **TASK scope paragraph** (just the Scope section from the in-progress
   TASK file).
-- **Explicit question(s)** the orchestrator wants answered, e.g.:
+- **Explicit question(s)** the orchestrator wants to be answered, e.g.:
   - "Where are Go module boundaries currently defined?"
   - "Does any existing file already configure golangci-lint?"
   - "Which files in the repo import from `pgvector`?"

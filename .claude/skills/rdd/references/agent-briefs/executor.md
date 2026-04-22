@@ -30,7 +30,10 @@ judgement) or when the acceptance criteria list ≥ 6 items.
      `.claude/skills/rdd/` (the skill itself). Those are orchestrator-only.
   5. Never mark an AC checkbox in the TASK file yourself — the orchestrator
      reads git diff to infer progress.
-  6. Do not open a PR; do not push. Phase 5's `git-master` owns that.
+  6. Do not open a PR. Do not push in **build** or **fixer** modes —
+     Phase 5's `git-master` owns the first push. **pr-fixer** mode is
+     the one exception: it pushes fix commits to the existing PR branch
+     (the PR is already open; git-master does not re-enter after Phase 5).
 
 ## Mode — build (Phase 3)
 
