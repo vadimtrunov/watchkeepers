@@ -211,6 +211,98 @@ func TestPutManifestVersion_Happy(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// Happy path — 201 + id envelope
+// -----------------------------------------------------------------------
+
+const fakeUUID = "11111111-1111-4111-8111-111111111111"
+
+// TestStore_Happy_201 asserts that POST /v1/knowledge-chunks returns
+// 201 and a JSON body of {"id":"<uuid>"} when the runner succeeds.
+// FakeID drives a fakeTx whose QueryRow.Scan writes the id into the
+// handler's `var id string`, exercising the full 201 response path.
+func TestStore_Happy_201(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: fakeUUID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
+	rec := writeDo(t, h, http.MethodPost, "/v1/knowledge-chunks", tok, map[string]any{
+		"subject":   "hello",
+		"content":   "world",
+		"embedding": []float32{0.1, 0.2, 0.3},
+	}, "")
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.ID != fakeUUID {
+		t.Errorf("id = %q, want %q", env.ID, fakeUUID)
+	}
+}
+
+// TestLogAppend_Happy_201 asserts that POST /v1/keepers-log returns
+// 201 and {"id":"<uuid>"} when the runner succeeds (org scope so both
+// actor columns are NULL — the simplest variant that confirms the full
+// response envelope without duplicating the actor-extraction coverage
+// already in TestLogAppend_ActorFrom* tests).
+func TestLogAppend_Happy_201(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: fakeUUID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPost, "/v1/keepers-log", tok, map[string]any{
+		"event_type": "org_event",
+	}, "")
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.ID != fakeUUID {
+		t.Errorf("id = %q, want %q", env.ID, fakeUUID)
+	}
+}
+
+// TestPutManifestVersion_Happy_201 asserts that
+// PUT /v1/manifests/{id}/versions returns 201 and {"id":"<uuid>"} when
+// the runner succeeds, exercising the full success envelope.
+func TestPutManifestVersion_Happy_201(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: fakeUUID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/cccccccc-cccc-4ccc-8ccc-cccccccccccc/versions",
+		tok, map[string]any{
+			"version_no":    3,
+			"system_prompt": "you are a watchkeeper",
+		}, "")
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.ID != fakeUUID {
+		t.Errorf("id = %q, want %q", env.ID, fakeUUID)
+	}
+}
+
+// -----------------------------------------------------------------------
 // Edge: Content-Type / body size / unknown fields / field validation
 // -----------------------------------------------------------------------
 
