@@ -44,6 +44,16 @@ type Registry struct {
 	nextID uint64
 	subs   map[uint64]*subscription
 	closed bool
+	// done is closed exactly once by Close() so every per-subscription
+	// watchdog goroutine can exit even when the caller's ctx never fires
+	// (e.g. unit tests pass context.Background()). Reads are lock-free
+	// via a select inside the watchdog; the close happens under mu so it
+	// is serialised with the `closed = true` flip.
+	done chan struct{}
+	// watchdogs counts the live per-subscription watchdog goroutines so
+	// tests can assert "Close releases all watchdogs". Decremented when
+	// the watchdog exits, incremented under mu in Subscribe.
+	watchdogs sync.WaitGroup
 }
 
 // NewRegistry constructs a Registry with the given per-subscriber buffer
@@ -60,6 +70,7 @@ func NewRegistry(bufSize int, _ /* heartbeat */ time.Duration) *Registry {
 	return &Registry{
 		bufSize: bufSize,
 		subs:    make(map[uint64]*subscription),
+		done:    make(chan struct{}),
 	}
 }
 
@@ -87,6 +98,8 @@ func (r *Registry) Subscribe(ctx context.Context, claim auth.Claim) (<-chan Even
 		ch:    make(chan Event, r.bufSize),
 	}
 	r.subs[id] = sub
+	r.watchdogs.Add(1)
+	done := r.done
 	r.mu.Unlock()
 
 	var once sync.Once
@@ -94,11 +107,19 @@ func (r *Registry) Subscribe(ctx context.Context, claim auth.Claim) (<-chan Even
 		once.Do(func() { r.removeAndClose(id) })
 	}
 
-	// Per-subscription watchdog: ctx cancellation removes the subscriber
-	// without the caller having to call unsub explicitly. Safe even when
-	// ctx has no deadline: a background ctx simply never fires.
+	// Per-subscription watchdog: ctx cancellation OR Registry.Close()
+	// removes the subscriber without the caller having to call unsub
+	// explicitly. Selecting on r.done as well as ctx.Done() means Close
+	// frees every parked watchdog immediately, so callers that pass a
+	// context.Background() (typical in unit tests with t.Cleanup(Close))
+	// do not leak a goroutine per Subscribe for the duration of the
+	// process.
 	go func() {
-		<-ctx.Done()
+		defer r.watchdogs.Done()
+		select {
+		case <-ctx.Done():
+		case <-done:
+		}
 		unsub()
 	}()
 
@@ -151,17 +172,24 @@ func (r *Registry) Publish(ctx context.Context, ev Event) error {
 // idempotent: a second call is a no-op and never panics. Server.Run
 // calls Close before httpSrv.Shutdown to make in-flight SSE handlers
 // return promptly (AC6).
+//
+// Close also releases every per-subscription watchdog goroutine by
+// closing r.done. Watchdogs that were parked on <-ctx.Done() with no
+// caller-side cancellation (e.g. tests that pass context.Background())
+// unblock on the r.done branch and exit without the caller needing to
+// cancel their ctx first.
 func (r *Registry) Close() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if r.closed {
+		r.mu.Unlock()
 		return
 	}
 	r.closed = true
+	close(r.done)
 	for id := range r.subs {
 		r.closeLocked(id)
 	}
+	r.mu.Unlock()
 }
 
 // closeLocked closes one subscription's channel and removes it from the

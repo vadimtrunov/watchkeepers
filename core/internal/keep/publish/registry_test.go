@@ -249,6 +249,44 @@ func TestRegistry_CloseBroadcasts(t *testing.T) {
 	}
 }
 
+// TestRegistry_CloseReleasesWatchdogs is the regression guard for the
+// per-subscription watchdog leak: Subscribe spawns a goroutine that used
+// to park on `<-ctx.Done()`, so callers that passed context.Background()
+// (including every test above that relies on t.Cleanup(reg.Close)) left
+// one parked goroutine per Subscribe. Close must now release every
+// watchdog immediately via the internal done channel.
+//
+// We use the package-internal WaitWatchdogs (export_test.go) rather than
+// a full goleak dependency because adding a new module dependency just
+// to satisfy this assertion was judged heavier than a tiny test seam.
+func TestRegistry_CloseReleasesWatchdogs(t *testing.T) {
+	reg := publish.NewRegistry(4, time.Hour)
+
+	// Several subscribers, all with a context that will never fire so the
+	// only way their watchdogs can exit is via Close().
+	const subscribers = 5
+	for i := 0; i < subscribers; i++ {
+		_, _ = reg.Subscribe(context.Background(), auth.Claim{Scope: "org"})
+	}
+
+	reg.Close()
+
+	// WaitWatchdogs blocks until the internal WaitGroup drains. Run it in
+	// a goroutine so the test can enforce a wall-clock budget (200ms is
+	// comfortably above scheduler jitter but far below the old "forever"
+	// failure mode).
+	exited := make(chan struct{})
+	go func() {
+		reg.WaitWatchdogs()
+		close(exited)
+	}()
+	select {
+	case <-exited:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Close() did not release watchdogs within 200ms")
+	}
+}
+
 // TestRegistry_UnsubscribeRemoves guards the lifecycle: calling the
 // unsubscribe func closes the channel and a subsequent Publish skips the
 // subscriber (non-blocking send would otherwise panic on a closed chan).
