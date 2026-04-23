@@ -180,13 +180,15 @@ goes back through the `rdd` loop with a new LESSON entry.
 
 ### Env vars
 
-| Variable                 | Required | Default | Notes                                                                  |
-| ------------------------ | -------- | ------- | ---------------------------------------------------------------------- |
-| `KEEP_DATABASE_URL`      | yes      | —       | pgx-compatible Postgres DSN. Boot exits non-zero if unset or bad.      |
-| `KEEP_HTTP_ADDR`         | no       | `:8080` | Listen address passed to `http.Server`.                                |
-| `KEEP_SHUTDOWN_TIMEOUT`  | no       | `10s`   | Go duration; bounds `http.Server.Shutdown` on SIGINT / SIGTERM.        |
-| `KEEP_TOKEN_SIGNING_KEY` | yes      | —       | Base64-encoded HMAC-SHA256 key. Decoded bytes must be ≥ 32 bytes long. |
-| `KEEP_TOKEN_ISSUER`      | yes      | —       | Expected `iss` claim on every verified capability token.               |
+| Variable                   | Required | Default | Notes                                                                  |
+| -------------------------- | -------- | ------- | ---------------------------------------------------------------------- |
+| `KEEP_DATABASE_URL`        | yes      | —       | pgx-compatible Postgres DSN. Boot exits non-zero if unset or bad.      |
+| `KEEP_HTTP_ADDR`           | no       | `:8080` | Listen address passed to `http.Server`.                                |
+| `KEEP_SHUTDOWN_TIMEOUT`    | no       | `10s`   | Go duration; bounds `http.Server.Shutdown` on SIGINT / SIGTERM.        |
+| `KEEP_TOKEN_SIGNING_KEY`   | yes      | —       | Base64-encoded HMAC-SHA256 key. Decoded bytes must be ≥ 32 bytes long. |
+| `KEEP_TOKEN_ISSUER`        | yes      | —       | Expected `iss` claim on every verified capability token.               |
+| `KEEP_SUBSCRIBE_BUFFER`    | no       | `64`    | Per-subscriber event channel capacity for `GET /v1/subscribe`.         |
+| `KEEP_SUBSCRIBE_HEARTBEAT` | no       | `15s`   | Interval between SSE heartbeat comments on an idle subscribe stream.   |
 
 ### Build and run locally
 
@@ -360,6 +362,55 @@ Status codes: `201` on insert, `400` with `missing_manifest_id` /
 version_conflict`, `413 request_too_large`, `415 unsupported_media_type`,
 `500 put_manifest_version_failed`.
 
+#### `GET /v1/subscribe`
+
+Server-Sent Events stream of capability-scoped events. The endpoint runs
+under the same `AuthMiddleware` as the rest of `/v1/*`; missing or
+invalid tokens return `401` with the stable reason codes documented
+above, and non-`GET` methods return `405`.
+
+Response headers on a successful stream:
+
+- `Content-Type: text/event-stream`
+- `Cache-Control: no-cache`
+- `Connection: keep-alive`
+
+Scope semantics are **strict equality** against the token's verified
+`claim.Scope`: a subscriber with `org` receives only events whose
+`scope` is `org`; a subscriber with `user:<uuidA>` receives only events
+whose `scope` is `user:<uuidA>` (never `user:<uuidB>`, never `org`,
+never `agent:*`). No hierarchy widening.
+
+Each event is framed as
+
+```text
+id: <uuid>
+event: <event_type>
+data: <payload-json>
+
+```
+
+(blank line after `data:`). An idle stream emits an SSE comment
+heartbeat (`:\n\n`) every `KEEP_SUBSCRIBE_HEARTBEAT` (default `15s`) so
+intermediaries and the TCP keepalive engine stay honest.
+
+```sh
+curl -N -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/v1/subscribe
+```
+
+The endpoint is idempotent on reconnect: a client that drops and
+re-subscribes simply receives new events after the reconnect. A slow
+subscriber whose per-connection buffer fills is dropped (stream closed)
+so other subscribers are never held up; the standard client response is
+to reconnect.
+
+Event **producers** (the outbox worker that turns
+`watchkeeper.outbox` rows into `publish.Event` fan-outs) are out of
+scope for M2.7.e.a and land in **M2.7.e.b**. In M2.7.e.a the stream is
+driven exclusively through the in-process `publish.Publisher` API; any
+event you emit through that API is delivered to matching subscribers.
+
 ### Docker image
 
 ```sh
@@ -377,10 +428,11 @@ license-scan CI gates as `deploy/Dockerfile`.
 ### Integration tests
 
 The binary-boot suite lives in `core/cmd/keep/integration_test.go`,
-`core/cmd/keep/read_integration_test.go`, and
-`core/cmd/keep/write_integration_test.go` (all three build tag
-`integration`) and requires a reachable Postgres 16 with every migration
-(001..008) applied. Use `make keep-integration-test`:
+`core/cmd/keep/read_integration_test.go`,
+`core/cmd/keep/write_integration_test.go`, and
+`core/cmd/keep/subscribe_integration_test.go` (all four build tag
+`integration`) and requires a reachable Postgres 16 with every
+migration (001..008) applied. Use `make keep-integration-test`:
 
 ```sh
 export KEEP_INTEGRATION_DB_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable'
