@@ -14,6 +14,7 @@
 package main_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -547,6 +548,39 @@ func TestWriteAPI_Store_ScopeBodyRejected(t *testing.T) {
 	}
 }
 
+// doJSONNoFatal executes an HTTP request like doJSON but returns
+// (status, body, err) instead of calling t.Fatalf. Safe to call from
+// goroutines; callers must forward non-nil err to an error channel and
+// then call wg.Done.
+func doJSONNoFatal(method, url, authTok string, body any) (int, []byte, error) {
+	var r io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return 0, nil, fmt.Errorf("marshal body: %w", err)
+		}
+		r = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), method, url, r)
+	if err != nil {
+		return 0, nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if authTok != "" {
+		req.Header.Set("Authorization", "Bearer "+authTok)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("http do: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("read body: %w", err)
+	}
+	return resp.StatusCode, respBody, nil
+}
+
 // TestWriteAPI_ConcurrentScopeIsolation — 20 concurrent stores + logs
 // under user:A and agent:B must never cross-contaminate. Any such leak
 // would prove SET LOCAL bleeding across pooled sessions.
@@ -565,18 +599,26 @@ func TestWriteAPI_ConcurrentScopeIsolation(t *testing.T) {
 
 	storeRun := func(tok, tag string) {
 		defer wg.Done()
-		status, body := doJSON(t, http.MethodPost,
+		status, body, err := doJSONNoFatal(http.MethodPost,
 			"http://"+addr+"/v1/knowledge-chunks", tok,
 			storeRequestBody{Subject: tag, Content: "c", Embedding: queryVec1536()})
+		if err != nil {
+			errs <- fmt.Errorf("store transport error: %w", err)
+			return
+		}
 		if status != http.StatusCreated {
 			errs <- fmt.Errorf("store status = %d body = %s", status, body)
 		}
 	}
 	logRun := func(tok, tag string) {
 		defer wg.Done()
-		status, body := doJSON(t, http.MethodPost,
+		status, body, err := doJSONNoFatal(http.MethodPost,
 			"http://"+addr+"/v1/keepers-log", tok,
 			logAppendRequestBody{EventType: tag, Payload: json.RawMessage(`{"x":1}`)})
+		if err != nil {
+			errs <- fmt.Errorf("log transport error: %w", err)
+			return
+		}
 		if status != http.StatusCreated {
 			errs <- fmt.Errorf("log status = %d body = %s", status, body)
 		}
