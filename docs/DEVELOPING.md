@@ -292,6 +292,71 @@ curl -fsS -H "Authorization: Bearer $TOKEN" \
   'http://localhost:8080/v1/keepers-log?limit=100'
 ```
 
+#### `POST /v1/knowledge-chunks`
+
+Insert a `knowledge_chunk` row under the scope of the token. `scope` is
+token-bound — clients cannot override it. `subject` is optional;
+`content` and `embedding` are required. `embedding` is rejected when
+empty or longer than 4096 floats. Body is capped at 1 MiB.
+
+```sh
+curl -fsS -X POST http://localhost:8080/v1/knowledge-chunks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"subject":"doc-42","content":"agent handover notes","embedding":[0.10,0.20,0.30]}'
+# -> 201 {"id":"<uuid>"}
+```
+
+Status codes: `201` on insert, `400` with `missing_content` /
+`missing_embedding` / `invalid_embedding` / `invalid_body`, `401` as
+above, `413 request_too_large`, `415 unsupported_media_type`, `500
+store_failed`.
+
+#### `POST /v1/keepers-log`
+
+Append one event to the audit log. `event_type` is required;
+`correlation_id` and `payload` are optional. Actor columns
+(`actor_watchkeeper_id` / `actor_human_id`) are stamped server-side from
+the token's scope — `agent:<uuid>` fills `actor_watchkeeper_id`,
+`user:<uuid>` fills `actor_human_id`, `org` leaves both NULL. Unknown
+JSON fields (including `actor_*`) are rejected with 400. Body is capped
+at 1 MiB.
+
+```sh
+curl -fsS -X POST http://localhost:8080/v1/keepers-log \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"event_type":"watchkeeper_spawned","payload":{"note":"ready"}}'
+# -> 201 {"id":"<uuid>"}
+```
+
+Status codes: `201` on append, `400` with `missing_event_type` /
+`invalid_body` / `invalid_scope_uuid`, `401` as above,
+`413 request_too_large`, `415 unsupported_media_type`,
+`500 log_append_failed`.
+
+#### `PUT /v1/manifests/{manifest_id}/versions`
+
+Insert a new `manifest_version` row for the target manifest.
+`version_no` must be `> 0`; `system_prompt` is required. `tools`,
+`authority_matrix`, `knowledge_sources`, `personality`, `language` are
+optional. A duplicate `(manifest_id, version_no)` returns 409
+`version_conflict` without leaking raw Postgres text. Body is capped at
+1 MiB.
+
+```sh
+curl -fsS -X PUT "http://localhost:8080/v1/manifests/<manifest-uuid>/versions" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"version_no":3,"system_prompt":"you are a watchkeeper","personality":"curious","language":"en"}'
+# -> 201 {"id":"<uuid>"}
+```
+
+Status codes: `201` on insert, `400` with `invalid_version_no` /
+`missing_system_prompt` / `invalid_body`, `401` as above, `409
+version_conflict`, `413 request_too_large`, `415 unsupported_media_type`,
+`500 put_manifest_version_failed`.
+
 ### Docker image
 
 ```sh
@@ -308,10 +373,11 @@ license-scan CI gates as `deploy/Dockerfile`.
 
 ### Integration tests
 
-The binary-boot suite lives in `core/cmd/keep/integration_test.go` plus
-`core/cmd/keep/read_integration_test.go` (both build tag `integration`)
-and requires a reachable Postgres 16 with every migration (001..007)
-applied. Use `make keep-integration-test`:
+The binary-boot suite lives in `core/cmd/keep/integration_test.go`,
+`core/cmd/keep/read_integration_test.go`, and
+`core/cmd/keep/write_integration_test.go` (all three build tag
+`integration`) and requires a reachable Postgres 16 with every migration
+(001..008) applied. Use `make keep-integration-test`:
 
 ```sh
 export KEEP_INTEGRATION_DB_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable'
