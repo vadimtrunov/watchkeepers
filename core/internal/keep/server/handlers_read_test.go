@@ -30,7 +30,7 @@ func newRouterForTest(t *testing.T, now func() time.Time) (http.Handler, *auth.T
 	if err != nil {
 		t.Fatalf("NewTestIssuer: %v", err)
 	}
-	return server.NewRouter(v, nil), ti
+	return server.NewRouter(v, nil, nil, 0), ti
 }
 
 // mustMintToken mints a valid short-lived token with the given scope.
