@@ -158,32 +158,37 @@ func TestRegistry_DropOnFullBuffer(t *testing.T) {
 
 	slowCh, slowUnsub := reg.Subscribe(context.Background(), auth.Claim{Scope: "org"})
 	t.Cleanup(slowUnsub)
-	// Second subscriber on the SAME scope with a fresh context so the
-	// drop-on-full of `slowCh` does not affect it.
+	// Second subscriber on the SAME scope; we drain it synchronously
+	// between publishes so its 1-slot buffer never fills (otherwise the
+	// drop-on-full logic would mark it too, which is not what this test
+	// is asserting).
 	liveCh, liveUnsub := reg.Subscribe(context.Background(), auth.Claim{Scope: "org"})
 	t.Cleanup(liveUnsub)
-
-	// Drain liveCh concurrently so its buffer never fills; slowCh is
-	// deliberately never drained so the second publish tips it over.
-	liveDrained := make(chan publish.Event, 4)
-	go func() {
-		for ev := range liveCh {
-			liveDrained <- ev
-		}
-	}()
 
 	first := newEvent("org")
 	second := newEvent("org")
 
+	// Publish #1: both subscribers have empty buffers, both accept.
 	if err := reg.Publish(context.Background(), first); err != nil {
 		t.Fatalf("publish first: %v", err)
 	}
+	// Drain liveCh so publish #2 has room for the second event.
+	select {
+	case ev := <-liveCh:
+		if ev.ID != first.ID {
+			t.Errorf("liveCh[0].ID = %s, want %s", ev.ID, first.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("liveCh did not receive first event")
+	}
+
+	// Publish #2: slowCh is full (never drained) -> dropped + closed;
+	// liveCh was drained, so it accepts the event.
 	if err := reg.Publish(context.Background(), second); err != nil {
 		t.Fatalf("publish second: %v", err)
 	}
 
-	// slowCh should observe exactly one event (the first) and then EOF
-	// because the second publish dropped it.
+	// slowCh should observe exactly one event (the first) and then EOF.
 	got := make([]publish.Event, 0, 2)
 	drainTimeout := time.After(time.Second)
 slowLoop:
@@ -202,16 +207,14 @@ slowLoop:
 		t.Errorf("slow subscriber got %+v, want exactly [first]", got)
 	}
 
-	// liveCh must still see both events.
-	for i, want := range []publish.Event{first, second} {
-		select {
-		case ev := <-liveDrained:
-			if ev.ID != want.ID {
-				t.Errorf("liveCh[%d].ID = %s, want %s", i, ev.ID, want.ID)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("liveCh did not receive event #%d", i)
+	// liveCh must still see the second event.
+	select {
+	case ev := <-liveCh:
+		if ev.ID != second.ID {
+			t.Errorf("liveCh[1].ID = %s, want %s", ev.ID, second.ID)
 		}
+	case <-time.After(time.Second):
+		t.Fatal("liveCh did not receive second event")
 	}
 }
 
