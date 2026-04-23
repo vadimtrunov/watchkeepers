@@ -59,7 +59,7 @@ pre-commit:
         # core/cmd/keep/). `--build-tags=integration` keeps the
         # integration suite in scope. Directory de-duplication via sort
         # -u avoids linting the same package twice per commit.
-        pkg_dirs=$(for f in {staged_files}; do dirname "$f"; done | sort -u)
+        pkg_dirs=$(printf '%s\n' {staged_files} | xargs -n1 dirname | sort -u)
         golangci-lint run --build-tags=integration --new-from-rev HEAD --fix $pkg_dirs
       stage_fixed: true
 
