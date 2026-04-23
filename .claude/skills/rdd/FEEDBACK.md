@@ -278,3 +278,53 @@ to parse fuzzy-match; a stricter validator or a schema example in the brief woul
 - Total wall time from /rdd to merge: ~1 day
 
 ---
+
+## 2026-04-23 — M2.7.d: Keep write API — store, log_append, put_manifest_version
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/10
+**Phases with incidents**: 4, 5, 6
+
+### What worked
+
+The `handlers_read.go` → `handlers_write.go` mirror pattern (same shape for request parsing,
+error handling, JSON output) made Phase 3 deliver 4 commits with 8 files cleanly. Phase 4
+iteration 0 flagged only 1 `important` — a test-layer gap (unit happy-tests short-circuiting
+on sentinel error). Phase 4 iteration 1 fixed it with a tiny `fakeTx`/`fakeRow` seam; converged
+thereafter. Reusing `db.WithScope` for writes (RLS `WITH CHECK` on `knowledge_chunk` already
+handled) avoided a second tx helper. The `actorFromScope` helper kept scope binding in one
+place, which paid off when CodeRabbit audited for vector laundering (M2.7.d context: all
+client UUID and vector inputs got pre-validated before DB cast).
+
+### What wasted effort
+
+**(1) PR-title commitlint failure redux** (Phase 5): git-master produced `M2.7.d: Keep write API — …`
+rejected by Meta CI. The brief says "conventional-commits if ≥3 of last 10 commits" but doesn't
+mandate the PR title follow the same. TASK title shape inherited the roadmap-id-first form.
+Orchestrator manually fixed via `gh pr edit`. **(2) Phase 4 nit vs blocker classification**:
+`correlation_id` UUID prevalidation was labeled `nit` and deferred. Phase 6 CodeRabbit surfaced
+it as `Major` — a defect that returns 500 for a client-shape error is not a nit. **(3) Phase 6
+severity rule leniency**: The bounded-loop rule ("body begins with `BLOCKER:`/`IMPORTANT:`")
+gives CodeRabbit LLM findings default `nit` level even when CodeRabbit itself badges them
+`🔴 Critical` (goroutine fatalf). Orchestrator upgraded by hand; the rule as written would have
+let a real bug merge silently.
+
+### Suggested skill changes
+
+- `references/agent-briefs/git-master.md` §Mode — pr: add rule that PR title must also pass
+  `commitlint` when repo uses it (or follow conventional-commits pattern when ≥3 of last 10
+  commits on main do). Suggest deriving title from first feature commit subject.
+- `references/bounded-loop.md` §Severity (Phase 6): when a third-party automated reviewer
+  (CodeRabbit, Sourcery) attaches severity badge (`🔴 Critical`, `🟠 Major`), upgrade from
+  `nit` to `important` / `blocker` respectively, even if body lacks the prefix.
+- `references/agent-briefs/code-reviewer.md` §Severity: add caveat that a defect fix is
+  cosmetic but impact is 500 for client-valid shape = `important`, not `nit`. Follow-up items
+  must stay strictly stylistic.
+
+### Metrics
+
+- Review iterations: 2 (iter 0: 1 important + 5 nits; iter 1: converged)
+- PR-fix iterations: 2 (iter 0: title + 3 CodeRabbit threads; iter 1: converged)
+- Operator interventions outside gates: 0 (orchestrator handled title fix autonomously)
+- Total wall time from /rdd to merge: ~1 hour
+
+---

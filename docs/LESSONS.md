@@ -268,3 +268,43 @@ does NOT save you because the decoder has already buffered the full body before 
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.7 → M2.7.b + M2.7.c, `docs/DEVELOPING.md` "Keep service"
 
 ---
+
+## 2026-04-23 — M2.7.d: Keep write API — store, log_append, put_manifest_version
+
+**PR**: [#10](https://github.com/vadimtrunov/watchkeepers/pull/10)
+**Merged**: 2026-04-23
+
+### Context
+
+Added three HTTP write endpoints to the Keep service (`POST /v1/knowledge-chunks`, `POST /v1/keepers-log`,
+`PUT /v1/manifests/{id}/versions`) with the same token-bound scope isolation and input-validation discipline
+as the read side. All mutations respect RLS and per-scope role semantics established in M2.7.b+c.
+
+### Pattern
+
+**Token-bound writes and server-stamped actor columns**: Handler stamps `scope = claim.Scope`; client body
+cannot override it (`DisallowUnknownFields` rejects unknown fields). `actorFromScope(scope)` derives actor
+columns (`actor_watchkeeper_id` / `actor_human_id`) from token prefix (`agent:<uuid>` / `user:<uuid>` / `org`)
+with UUID shape validation before DB cast — malformed UUIDs return 400, not 500.
+
+**Unique-violation translation via error inspection**: Duplicate `(manifest_id, version_no)` raises
+`pgconn.PgError` with `Code == "23505"`. Use `errors.As(&pgErr)` to detect and translate to 409
+`{"error":"version_conflict"}` without surfacing raw Postgres text. Pattern applies to any future
+uniqueness-constrained write.
+
+**Exact-dimension vector check**: `knowledge_chunk.embedding` is `vector(1536)`. Hardcode a constant
+`knowledgeChunkEmbeddingDim = 1536` and reject `!= 1536` with 400 `invalid_embedding`. Checking only an
+upper bound (e.g. 4096) turns client-shape errors into 500s.
+
+### Anti-pattern
+
+Checking only a maximum bound (e.g. `len(embedding) <= 4096`) for a fixed-dimension column. Client input
+errors should be 400, not 500; enforce exact match to the schema's declared dimension.
+
+### References
+
+- Files: `core/internal/keep/server/handlers_write.go`, `core/cmd/keep/write_integration_test.go`,
+  `deploy/migrations/008_write_grants.sql`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.7 → M2.7.d, `docs/DEVELOPING.md` "Keep service"
+
+---
