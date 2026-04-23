@@ -17,6 +17,7 @@ import (
 
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/auth"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/config"
+	"github.com/vadimtrunov/watchkeepers/core/internal/keep/publish"
 )
 
 // healthBody is the exact, byte-stable payload returned by GET /health.
@@ -39,11 +40,16 @@ func HealthHandler() http.Handler {
 // AuthMiddleware(v) and is backed by handlers that open a per-request
 // scoped transaction against pool via db.WithScope.
 //
+// reg is the in-process publish Registry that drives GET /v1/subscribe. A
+// nil reg is permitted for tests that do not exercise the streaming
+// route (M2.7.a-d call sites); NewRouter will simply omit the route in
+// that case and any request to it will 404 through the default mux.
+//
 // A nil v is permitted only when no /v1 routes will be exercised
 // (e.g. test doubles that only hit /health); a nil pool is permitted in
 // tests that exit before the DB round-trip (the router never dereferences
 // the pool directly — it is captured by the handlers that need it).
-func NewRouter(v auth.Verifier, pool *pgxpool.Pool) http.Handler {
+func NewRouter(v auth.Verifier, pool *pgxpool.Pool, reg *publish.Registry, heartbeat time.Duration) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", HealthHandler())
 
@@ -56,27 +62,39 @@ func NewRouter(v auth.Verifier, pool *pgxpool.Pool) http.Handler {
 		mux.Handle("POST /v1/knowledge-chunks", authed(handleStore(runner)))
 		mux.Handle("POST /v1/keepers-log", authed(handleLogAppend(runner)))
 		mux.Handle("PUT /v1/manifests/{manifest_id}/versions", authed(handlePutManifestVersion(runner)))
+		if reg != nil {
+			mux.Handle("GET /v1/subscribe", authed(handleSubscribe(reg, heartbeat)))
+		}
 	}
 	return mux
 }
 
 // Server is the Keep HTTP server plus its owned lifecycle. It does not own
 // the pgxpool.Pool — main.go owns and closes the pool after Run returns.
+//
+// The server DOES own the publish.Registry for its lifetime: Run closes
+// the registry on shutdown so every in-flight GET /v1/subscribe stream
+// returns promptly before httpSrv.Shutdown begins its grace period
+// (AC6). Callers must not call reg.Close themselves after handing it
+// here.
 type Server struct {
 	httpSrv         *http.Server
 	shutdownTimeout time.Duration
+	reg             *publish.Registry
 }
 
 // New builds a Server bound to cfg.HTTPAddr using the default Keep router.
-// The pool is captured by the scoped read handlers; the verifier is
-// captured by AuthMiddleware. Both are required by M2.7.b+c endpoints.
+// The pool is captured by the scoped read/write handlers; the verifier is
+// captured by AuthMiddleware; reg drives GET /v1/subscribe.
 //
 // For backward compatibility with the earlier M2.7.a call-site shape
 // (where no verifier was threaded through), callers that need only
-// /health can pass a nil verifier — the router will then skip the /v1/*
-// wiring. Production main.go always supplies both.
-func New(cfg config.Config, pool *pgxpool.Pool, v auth.Verifier) *Server {
-	return NewWithHandler(cfg, pool, NewRouter(v, pool))
+// /health can pass nil for v and reg — the router will then skip the
+// /v1/* wiring. Production main.go always supplies all three.
+func New(cfg config.Config, pool *pgxpool.Pool, v auth.Verifier, reg *publish.Registry) *Server {
+	srv := NewWithHandler(cfg, pool, NewRouter(v, pool, reg, cfg.SubscribeHeartbeat))
+	srv.reg = reg
+	return srv
 }
 
 // NewWithHandler builds a Server with a caller-supplied http.Handler. The
@@ -95,9 +113,11 @@ func NewWithHandler(cfg config.Config, _ *pgxpool.Pool, h http.Handler) *Server 
 	}
 }
 
-// Run serves HTTP requests until ctx is canceled, then calls Shutdown with
-// the configured timeout. It returns nil on a clean shutdown and an error
-// otherwise. http.ErrServerClosed is treated as the success sentinel.
+// Run serves HTTP requests until ctx is canceled, then closes the publish
+// Registry (so any in-flight /v1/subscribe SSE streams return) and calls
+// Shutdown with the configured timeout. It returns nil on a clean
+// shutdown and an error otherwise. http.ErrServerClosed is treated as
+// the success sentinel.
 func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
@@ -112,6 +132,13 @@ func (s *Server) Run(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
+		// Close the registry FIRST so every active SSE handler sees its
+		// channel close and returns. Doing this before httpSrv.Shutdown
+		// means the grace period is not spent waiting for streams that
+		// by contract never end on their own.
+		if s.reg != nil {
+			s.reg.Close()
+		}
 		// Derive the shutdown deadline from a detached copy of ctx so the
 		// already-canceled parent does not abort Shutdown immediately while
 		// still letting contextcheck see an inherited lineage.

@@ -3,11 +3,29 @@ package server
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/auth"
+	"github.com/vadimtrunov/watchkeepers/core/internal/keep/publish"
 )
+
+// SubscribeHandlerForTest returns the bare /v1/subscribe handler (not
+// wrapped in AuthMiddleware) so _test files can exercise the handler's
+// own defense-in-depth branches against a context carrying a hand-made
+// Claim. Exported only through this export_test.go seam.
+func SubscribeHandlerForTest(reg *publish.Registry, heartbeat time.Duration) http.Handler {
+	return handleSubscribe(reg, heartbeat)
+}
+
+// ContextWithClaimForTest attaches a Claim to ctx using the same key the
+// middleware uses. Tests that bypass AuthMiddleware (see
+// TestSubscribe_BadScope) need this to hand the handler a Claim without
+// minting a token.
+func ContextWithClaimForTest(ctx context.Context, c auth.Claim) context.Context {
+	return context.WithValue(ctx, claimKey, c)
+}
 
 // FakeScopedRunner is a scopedRunner implementation for tests that lets
 // the caller supply a ctx/tx-consuming fn and observe the claim passed

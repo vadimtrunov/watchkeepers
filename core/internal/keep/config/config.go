@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -37,8 +38,10 @@ var (
 
 // Default values for optional environment variables (AC2).
 const (
-	DefaultHTTPAddr        = ":8080"
-	DefaultShutdownTimeout = 10 * time.Second
+	DefaultHTTPAddr           = ":8080"
+	DefaultShutdownTimeout    = 10 * time.Second
+	DefaultSubscribeBuffer    = 64
+	DefaultSubscribeHeartbeat = 15 * time.Second
 )
 
 // Config holds the Keep service runtime configuration loaded from env.
@@ -55,6 +58,15 @@ type Config struct {
 	TokenSigningKey []byte
 	// TokenIssuer is the expected `iss` claim on every verified token.
 	TokenIssuer string
+	// SubscribeBuffer is the per-subscriber event channel capacity used
+	// by the publish Registry that backs GET /v1/subscribe. A full buffer
+	// causes the slow subscriber to be dropped and its stream closed —
+	// sized to absorb short bursts without penalising fast consumers.
+	SubscribeBuffer int
+	// SubscribeHeartbeat is the interval between SSE heartbeat comments
+	// on an idle /v1/subscribe stream. Keeps proxies and the TCP
+	// keepalive engine honest without a constant torrent of traffic.
+	SubscribeHeartbeat time.Duration
 }
 
 // Load reads configuration from environment variables, applies defaults for
@@ -66,10 +78,12 @@ type Config struct {
 // a Keep process that would 401 every request at first traffic.
 func Load() (Config, error) {
 	cfg := Config{
-		DatabaseURL:     os.Getenv("KEEP_DATABASE_URL"),
-		HTTPAddr:        os.Getenv("KEEP_HTTP_ADDR"),
-		ShutdownTimeout: DefaultShutdownTimeout,
-		TokenIssuer:     os.Getenv("KEEP_TOKEN_ISSUER"),
+		DatabaseURL:        os.Getenv("KEEP_DATABASE_URL"),
+		HTTPAddr:           os.Getenv("KEEP_HTTP_ADDR"),
+		ShutdownTimeout:    DefaultShutdownTimeout,
+		TokenIssuer:        os.Getenv("KEEP_TOKEN_ISSUER"),
+		SubscribeBuffer:    DefaultSubscribeBuffer,
+		SubscribeHeartbeat: DefaultSubscribeHeartbeat,
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -86,6 +100,25 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("invalid KEEP_SHUTDOWN_TIMEOUT %q: %w", raw, err)
 		}
 		cfg.ShutdownTimeout = d
+	}
+
+	if raw := os.Getenv("KEEP_SUBSCRIBE_BUFFER"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("invalid KEEP_SUBSCRIBE_BUFFER %q: must be a positive integer", raw)
+		}
+		cfg.SubscribeBuffer = n
+	}
+
+	if raw := os.Getenv("KEEP_SUBSCRIBE_HEARTBEAT"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid KEEP_SUBSCRIBE_HEARTBEAT %q: %w", raw, err)
+		}
+		if d <= 0 {
+			return Config{}, fmt.Errorf("invalid KEEP_SUBSCRIBE_HEARTBEAT %q: must be positive", raw)
+		}
+		cfg.SubscribeHeartbeat = d
 	}
 
 	rawKey := os.Getenv("KEEP_TOKEN_SIGNING_KEY")
