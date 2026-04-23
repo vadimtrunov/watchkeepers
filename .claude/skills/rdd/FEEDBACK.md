@@ -328,3 +328,33 @@ let a real bug merge silently.
 - Total wall time from /rdd to merge: ~1 hour
 
 ---
+
+## 2026-04-24 — M2.7.e.a: Keep subscribe endpoint + in-process publish Registry
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/11
+**Phases with incidents**: 4, 6
+
+### What worked
+
+Gate 1 decomposition (M2.7.e → {M2.7.e.a, M2.7.e.b}) proved correct: planner fit check passed, operator approved, and the bundle avoided conflating the SSE transport seam with outbox-worker semantics. Phase 3 executor (opus, build) delivered all 9 AC green in 6 commits with 88.9% coverage on publish and 80.1% on server. Phase 4 iteration 1 review surfaced 3 genuine important items (watchdog-goroutine leak, missing malformed-token integration test, overly-broad EOF assertion); fixer resolved all three in 2 commits with no scope creep. Iteration 2 converged cleanly.
+
+### What wasted effort
+
+**Git-master PR-title commitlint failure (Phase 5)**: PR title `M2.7.e.a: add subscribe endpoint with publish Registry` failed Meta CI (`type-empty`, `subject-empty`). The git-master brief's formula `<roadmap-id>: <title>` is not commitlint-aware. Orchestrator renamed to `feat(keep): add subscribe endpoint + in-process publish Registry` via `gh pr edit`, then `gh pr close` + `gh pr reopen` to retrigger (repo's `ci.yml` `pull_request` trigger lacks `edited` type). One full Phase 6 iteration spent on title-only bookkeeping.
+
+**Code-reviewer iter 1 suggested_fix for malformed token lacked production context**: Review thread suggested `reason=invalid_token` as the sentinel, but production middleware emits `bad_token` (per `core/internal/keep/server/middleware.go`). Fixer caught it and asserted the production value, but reviewer citing an unreferenced string cost one round-trip of operator attention.
+
+### Suggested skill changes
+
+- `references/agent-briefs/git-master.md` §Mode — pr: when `commitlint.config.*` exists at repo root, derive PR title as `<type>(<scope>): <imperative subject>` from the TASK's recent commit style, and place the `<roadmap-id>` in the PR body instead of the title.
+- `references/bounded-loop.md` §Phase-6 polling / Signal source: add note that `pull_request` workflows using default trigger types (opened|synchronize|reopened) do NOT re-run on `edited`, so title-only fixes must use `gh pr close && gh pr reopen` to retrigger CI (or repo must add `edited` to trigger types).
+- `references/agent-briefs/code-reviewer.md` §Output contract: require `suggested_fix` to cite the exact production symbol/constant name when naming a wire-level string (reason code, status text, header name); prevents reviewer inventing values the fixer must correct.
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 2
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~08:00
+
+---
