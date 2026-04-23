@@ -45,7 +45,9 @@ func TestHealthHandler_OK(t *testing.T) {
 }
 
 func TestNewRouter_HealthRoute(t *testing.T) {
-	h := server.NewRouter()
+	// /health must remain reachable even when no verifier is provided —
+	// the M2.7.a health contract (LESSON) has never required auth.
+	h := server.NewRouter(nil, nil)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
@@ -85,7 +87,7 @@ func TestServer_Run_GracefulShutdown(t *testing.T) {
 		HTTPAddr:        addr,
 		ShutdownTimeout: 2 * time.Second,
 	}
-	srv := server.New(cfg, nil)
+	srv := server.New(cfg, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 

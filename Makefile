@@ -132,9 +132,23 @@ keep-build: ## Build the Keep service binary into ./bin/keep
 keep-run: export KEEP_DATABASE_URL := $(KEEP_DATABASE_URL)
 keep-run: export KEEP_HTTP_ADDR := $(KEEP_HTTP_ADDR)
 keep-run: export KEEP_SHUTDOWN_TIMEOUT := $(KEEP_SHUTDOWN_TIMEOUT)
-keep-run: keep-build ## Run the Keep service locally (requires KEEP_DATABASE_URL)
+keep-run: export KEEP_TOKEN_SIGNING_KEY := $(KEEP_TOKEN_SIGNING_KEY)
+keep-run: export KEEP_TOKEN_ISSUER := $(KEEP_TOKEN_ISSUER)
+keep-run: keep-build ## Run the Keep service locally (requires KEEP_DATABASE_URL + token env)
 	@: "$${KEEP_DATABASE_URL:?ERROR: KEEP_DATABASE_URL required (e.g. postgres://user:pass@localhost:5432/db?sslmode=disable)}"
+	@: "$${KEEP_TOKEN_SIGNING_KEY:?ERROR: KEEP_TOKEN_SIGNING_KEY required (base64-encoded, >= 32 bytes decoded)}"
+	@: "$${KEEP_TOKEN_ISSUER:?ERROR: KEEP_TOKEN_ISSUER required (expected iss claim on verified tokens)}"
 	@./bin/keep
+
+# Keep integration-test runtime env. Both token values are required because
+# the spawned binary now enforces them at config load; KEEP_INTEGRATION_DB_URL
+# must point at a Postgres 16 with pgvector and every migration (001..007)
+# already applied (CI runs `make migrate-up` before invoking this target).
+.PHONY: keep-integration-test
+keep-integration-test: export KEEP_INTEGRATION_DB_URL := $(KEEP_INTEGRATION_DB_URL)
+keep-integration-test: ## Run integration tests for the Keep binary (requires KEEP_INTEGRATION_DB_URL)
+	@: "$${KEEP_INTEGRATION_DB_URL:?ERROR: KEEP_INTEGRATION_DB_URL required (e.g. postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable)}"
+	@$(GO) test -tags=integration -race -v ./core/cmd/keep/...
 
 .PHONY: govulncheck
 govulncheck: ## Scan Go dependencies for known vulnerabilities

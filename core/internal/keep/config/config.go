@@ -8,16 +8,32 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
 	"time"
 )
 
-// ErrMissingDatabaseURL is returned by Load when KEEP_DATABASE_URL is unset or
-// empty. Callers can match it with errors.Is; the wrapped error's text is
-// stable across locales.
-var ErrMissingDatabaseURL = errors.New("KEEP_DATABASE_URL is required")
+// MinTokenSigningKeyBytes is the enforced minimum length of the HS256
+// signing key (after base64 decode). Mirrors auth.MinSigningKeyBytes so
+// the fail-fast gate fires at Config.Load rather than on first token
+// verify.
+const MinTokenSigningKeyBytes = 32
+
+// Sentinel errors returned by Load. Callers match with errors.Is; the
+// messages are stable across locales (LESSON M2.1.b) so CI assertions
+// never depend on lc_messages.
+var (
+	// ErrMissingDatabaseURL — KEEP_DATABASE_URL is unset or empty.
+	ErrMissingDatabaseURL = errors.New("KEEP_DATABASE_URL is required")
+	// ErrMissingTokenSigningKey — KEEP_TOKEN_SIGNING_KEY is unset.
+	ErrMissingTokenSigningKey = errors.New("KEEP_TOKEN_SIGNING_KEY is required")
+	// ErrMissingTokenIssuer — KEEP_TOKEN_ISSUER is unset.
+	ErrMissingTokenIssuer = errors.New("KEEP_TOKEN_ISSUER is required")
+	// ErrTokenSigningKeyTooShort — decoded signing key < 32 bytes.
+	ErrTokenSigningKeyTooShort = errors.New("KEEP_TOKEN_SIGNING_KEY must decode to >= 32 bytes")
+)
 
 // Default values for optional environment variables (AC2).
 const (
@@ -33,17 +49,27 @@ type Config struct {
 	HTTPAddr string
 	// ShutdownTimeout bounds http.Server.Shutdown on SIGINT/SIGTERM.
 	ShutdownTimeout time.Duration
+	// TokenSigningKey is the raw HMAC-SHA256 key used to verify
+	// capability tokens. Decoded from KEEP_TOKEN_SIGNING_KEY (base64).
+	// Never logged.
+	TokenSigningKey []byte
+	// TokenIssuer is the expected `iss` claim on every verified token.
+	TokenIssuer string
 }
 
 // Load reads configuration from environment variables, applies defaults for
 // optional values, and returns a populated Config. It returns
 // ErrMissingDatabaseURL when KEEP_DATABASE_URL is absent or empty, and a
 // wrapped error when KEEP_SHUTDOWN_TIMEOUT fails to parse as a Go duration.
+// KEEP_TOKEN_SIGNING_KEY and KEEP_TOKEN_ISSUER are required for the M2.7.b
+// auth middleware; both are validated fail-fast so an operator cannot boot
+// a Keep process that would 401 every request at first traffic.
 func Load() (Config, error) {
 	cfg := Config{
 		DatabaseURL:     os.Getenv("KEEP_DATABASE_URL"),
 		HTTPAddr:        os.Getenv("KEEP_HTTP_ADDR"),
 		ShutdownTimeout: DefaultShutdownTimeout,
+		TokenIssuer:     os.Getenv("KEEP_TOKEN_ISSUER"),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -60,6 +86,23 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("invalid KEEP_SHUTDOWN_TIMEOUT %q: %w", raw, err)
 		}
 		cfg.ShutdownTimeout = d
+	}
+
+	rawKey := os.Getenv("KEEP_TOKEN_SIGNING_KEY")
+	if rawKey == "" {
+		return Config{}, ErrMissingTokenSigningKey
+	}
+	key, err := base64.StdEncoding.DecodeString(rawKey)
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid KEEP_TOKEN_SIGNING_KEY: base64 decode: %w", err)
+	}
+	if len(key) < MinTokenSigningKeyBytes {
+		return Config{}, fmt.Errorf("%w (got %d)", ErrTokenSigningKeyTooShort, len(key))
+	}
+	cfg.TokenSigningKey = key
+
+	if cfg.TokenIssuer == "" {
+		return Config{}, ErrMissingTokenIssuer
 	}
 
 	return cfg, nil
