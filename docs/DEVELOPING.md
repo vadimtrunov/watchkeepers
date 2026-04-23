@@ -263,8 +263,11 @@ RLS-filtered by the token's scope.
 curl -fsS -X POST http://localhost:8080/v1/search \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"embedding": [0.1, 0.2, ...], "top_k": 10}'
+  -d '{"embedding": [0.10, 0.20, 0.30], "top_k": 10}'
 ```
+
+> **Note:** production embeddings are 1536-dimensional; the example above uses three
+> values for readability only.
 
 `top_k` is clamped to `[1, 50]`; zero or negative values return `400`.
 
