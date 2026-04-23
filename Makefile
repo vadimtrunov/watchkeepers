@@ -142,7 +142,7 @@ keep-run: keep-build ## Run the Keep service locally (requires KEEP_DATABASE_URL
 
 # Keep integration-test runtime env. Both token values are required because
 # the spawned binary now enforces them at config load; KEEP_INTEGRATION_DB_URL
-# must point at a Postgres 16 with pgvector and every migration (001..007)
+# must point at a Postgres 16 with pgvector and every migration (001..008)
 # already applied (CI runs `make migrate-up` before invoking this target).
 .PHONY: keep-integration-test
 keep-integration-test: export KEEP_INTEGRATION_DB_URL := $(KEEP_INTEGRATION_DB_URL)
