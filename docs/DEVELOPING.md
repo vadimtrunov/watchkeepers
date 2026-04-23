@@ -296,8 +296,9 @@ curl -fsS -H "Authorization: Bearer $TOKEN" \
 
 Insert a `knowledge_chunk` row under the scope of the token. `scope` is
 token-bound — clients cannot override it. `subject` is optional;
-`content` and `embedding` are required. `embedding` is rejected when
-empty or longer than 4096 floats. Body is capped at 1 MiB.
+`content` and `embedding` are required. `embedding` must be exactly 1536
+floats (matching the `vector(1536)` column); any other dimension is
+rejected. Body is capped at 1 MiB.
 
 ```sh
 curl -fsS -X POST http://localhost:8080/v1/knowledge-chunks \
@@ -308,9 +309,9 @@ curl -fsS -X POST http://localhost:8080/v1/knowledge-chunks \
 ```
 
 Status codes: `201` on insert, `400` with `missing_content` /
-`missing_embedding` / `invalid_embedding` / `invalid_body`, `401` as
-above, `413 request_too_large`, `415 unsupported_media_type`, `500
-store_failed`.
+`missing_embedding` / `invalid_embedding` (not exactly 1536 floats) /
+`invalid_body`, `401` as above, `413 request_too_large`,
+`415 unsupported_media_type`, `500 store_failed`.
 
 #### `POST /v1/keepers-log`
 
@@ -331,7 +332,8 @@ curl -fsS -X POST http://localhost:8080/v1/keepers-log \
 ```
 
 Status codes: `201` on append, `400` with `missing_event_type` /
-`invalid_body` / `invalid_scope_uuid`, `401` as above,
+`invalid_body` / `invalid_scope_uuid` / `invalid_correlation_id`
+(malformed UUID in `correlation_id`), `401` as above,
 `413 request_too_large`, `415 unsupported_media_type`,
 `500 log_append_failed`.
 
@@ -352,7 +354,8 @@ curl -fsS -X PUT "http://localhost:8080/v1/manifests/<manifest-uuid>/versions" \
 # -> 201 {"id":"<uuid>"}
 ```
 
-Status codes: `201` on insert, `400` with `invalid_version_no` /
+Status codes: `201` on insert, `400` with `missing_manifest_id` /
+`invalid_manifest_id` (malformed UUID in path) / `invalid_version_no` /
 `missing_system_prompt` / `invalid_body`, `401` as above, `409
 version_conflict`, `413 request_too_large`, `415 unsupported_media_type`,
 `500 put_manifest_version_failed`.

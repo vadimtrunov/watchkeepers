@@ -20,6 +20,14 @@ import (
 // cannot force unbounded allocation by streaming a multi-GB JSON body.
 const maxRequestBodyBytes = 1 << 20
 
+// knowledgeChunkEmbeddingDim is the exact vector dimension required by the
+// knowledge_chunk.embedding column (declared vector(1536) in migration 004).
+// Any store request with a different number of floats is rejected with
+// 400 invalid_embedding before the row reaches Postgres.
+// maxEmbeddingDim (defined in handlers_read.go) is preserved for the read
+// path's looser upper-bound check; only the write path enforces exact parity.
+const knowledgeChunkEmbeddingDim = 1536
+
 // uuidPattern matches the canonical RFC 4122 text form (8-4-4-4-12 hex with
 // hyphens, any version/variant). We compile it once at package scope so the
 // per-request check stays allocation-free. Used to validate the uuid body
@@ -81,7 +89,7 @@ func parseStoreRequest(w http.ResponseWriter, req *http.Request) (storeRequest, 
 		writeError(w, http.StatusBadRequest, "missing_embedding")
 		return body, false
 	}
-	if len(body.Embedding) > maxEmbeddingDim {
+	if len(body.Embedding) != knowledgeChunkEmbeddingDim {
 		writeError(w, http.StatusBadRequest, "invalid_embedding")
 		return body, false
 	}
@@ -227,9 +235,16 @@ func handleLogAppend(r scopedRunner) http.Handler {
 			return
 		}
 
-		// correlation_id is optional; pass NULL when empty so the FK-free
-		// nullable column carries SQL NULL rather than an empty string that
-		// would fail the uuid cast.
+		// correlation_id is optional but must be a canonical UUID when present;
+		// a malformed value would reach Postgres as an invalid uuid cast and
+		// surface as a confusing 500 — reject it early with a stable 400.
+		if body.CorrelationID != "" && !uuidPattern.MatchString(body.CorrelationID) {
+			writeError(w, http.StatusBadRequest, "invalid_correlation_id")
+			return
+		}
+
+		// Pass NULL when empty so the FK-free nullable column carries SQL NULL
+		// rather than an empty string that would fail the uuid cast.
 		var correlation any
 		if body.CorrelationID != "" {
 			correlation = body.CorrelationID
@@ -336,6 +351,10 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 		manifestID := req.PathValue("manifest_id")
 		if manifestID == "" {
 			writeError(w, http.StatusBadRequest, "missing_manifest_id")
+			return
+		}
+		if !uuidPattern.MatchString(manifestID) {
+			writeError(w, http.StatusBadRequest, "invalid_manifest_id")
 			return
 		}
 

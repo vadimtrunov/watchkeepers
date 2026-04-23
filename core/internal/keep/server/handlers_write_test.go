@@ -17,6 +17,22 @@ import (
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/server"
 )
 
+// makeVec1536 returns a JSON array literal of exactly 1536 zero-valued floats,
+// suitable for use as a raw body fragment in write-handler unit tests that
+// must satisfy the knowledgeChunkEmbeddingDim == 1536 constraint.
+func makeVec1536() string {
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i := 0; i < 1536; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteByte('0')
+	}
+	sb.WriteByte(']')
+	return sb.String()
+}
+
 // writeRouterForTest builds a full Keep router whose /v1/* routes (read
 // and write) run against a *FakeScopedRunner we control. The returned
 // issuer shares its signing key with the verifier so the test can mint
@@ -79,11 +95,8 @@ func TestStore_Happy(t *testing.T) {
 	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
 	tok := mustMintToken(t, ti, "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 
-	rec := writeDo(t, h, http.MethodPost, "/v1/knowledge-chunks", tok, map[string]any{
-		"subject":   "hello",
-		"content":   "world",
-		"embedding": []float32{0.1, 0.2, 0.3},
-	}, "")
+	rec := writeDo(t, h, http.MethodPost, "/v1/knowledge-chunks", tok, nil,
+		`{"subject":"hello","content":"world","embedding":`+makeVec1536()+`}`)
 
 	// Sentinel error from FnReturns -> 500 store_failed; the test goal is
 	// to confirm the claim.Scope reaches the runner (no DB needed).
@@ -225,11 +238,8 @@ func TestStore_Happy_201(t *testing.T) {
 	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
 	tok := mustMintToken(t, ti, "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 
-	rec := writeDo(t, h, http.MethodPost, "/v1/knowledge-chunks", tok, map[string]any{
-		"subject":   "hello",
-		"content":   "world",
-		"embedding": []float32{0.1, 0.2, 0.3},
-	}, "")
+	rec := writeDo(t, h, http.MethodPost, "/v1/knowledge-chunks", tok, nil,
+		`{"subject":"hello","content":"world","embedding":`+makeVec1536()+`}`)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
@@ -437,34 +447,51 @@ func TestStore_RejectsScopeField(t *testing.T) {
 	}
 }
 
-// TestStore_OversizedEmbedding — 4097 floats → 400 invalid_embedding.
-func TestStore_OversizedEmbedding(t *testing.T) {
-	runner := &server.FakeScopedRunner{}
-	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
-	tok := mustMintToken(t, ti, "org")
+// TestStore_WrongDimEmbedding — any embedding that is not exactly 1536 floats
+// must be rejected with 400 invalid_embedding. This covers the too-short
+// (1535 floats), too-long (1537 floats), and empty (handled separately as
+// missing_embedding) cases. The schema declares vector(1536), so any other
+// dimension would fail inside Postgres and surface as a misleading 500.
+func TestStore_WrongDimEmbedding(t *testing.T) {
+	cases := []struct {
+		name string
+		dims int
+	}{
+		{"too_short_1", 1},
+		{"too_short_1535", 1535},
+		{"too_long_1537", 1537},
+		{"too_long_4097", 4097},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &server.FakeScopedRunner{}
+			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+			tok := mustMintToken(t, ti, "org")
 
-	var sb strings.Builder
-	sb.WriteString(`{"content":"x","embedding":[`)
-	for i := 0; i < 4097; i++ {
-		if i > 0 {
-			sb.WriteByte(',')
-		}
-		sb.WriteByte('0')
-	}
-	sb.WriteString(`]}`)
+			var sb strings.Builder
+			sb.WriteString(`{"content":"x","embedding":[`)
+			for i := 0; i < tc.dims; i++ {
+				if i > 0 {
+					sb.WriteByte(',')
+				}
+				sb.WriteByte('0')
+			}
+			sb.WriteString(`]}`)
 
-	rec := writeDo(t, h, http.MethodPost, "/v1/knowledge-chunks", tok, nil, sb.String())
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-	}
-	var env struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if env.Error != "invalid_embedding" {
-		t.Errorf("error = %q, want invalid_embedding", env.Error)
+			rec := writeDo(t, h, http.MethodPost, "/v1/knowledge-chunks", tok, nil, sb.String())
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			var env struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if env.Error != "invalid_embedding" {
+				t.Errorf("error = %q, want invalid_embedding", env.Error)
+			}
+		})
 	}
 }
 
@@ -596,25 +623,32 @@ func TestPutManifestVersion_UniqueViolation(t *testing.T) {
 // TestWrite_GenericRunnerError — a non-pgx error from the runner must
 // surface as 500 with the per-endpoint stable code, never the raw text.
 func TestWrite_GenericRunnerError(t *testing.T) {
-	cases := []struct {
+	type genericCase struct {
 		name, method, path, wantErr string
 		body                        any
-	}{
+		rawBody                     string
+	}
+	cases := []genericCase{
 		{
-			"store",
-			http.MethodPost, "/v1/knowledge-chunks", "store_failed",
-			map[string]any{"content": "x", "embedding": []float32{0.1}},
+			name:    "store",
+			method:  http.MethodPost,
+			path:    "/v1/knowledge-chunks",
+			wantErr: "store_failed",
+			rawBody: `{"content":"x","embedding":` + makeVec1536() + `}`,
 		},
 		{
-			"log",
-			http.MethodPost, "/v1/keepers-log", "log_append_failed",
-			map[string]any{"event_type": "x"},
+			name:    "log",
+			method:  http.MethodPost,
+			path:    "/v1/keepers-log",
+			wantErr: "log_append_failed",
+			body:    map[string]any{"event_type": "x"},
 		},
 		{
-			"put_manifest",
-			http.MethodPut, "/v1/manifests/cccccccc-cccc-4ccc-8ccc-cccccccccccc/versions",
-			"put_manifest_version_failed",
-			map[string]any{"version_no": 1, "system_prompt": "ok"},
+			name:    "put_manifest",
+			method:  http.MethodPut,
+			path:    "/v1/manifests/cccccccc-cccc-4ccc-8ccc-cccccccccccc/versions",
+			wantErr: "put_manifest_version_failed",
+			body:    map[string]any{"version_no": 1, "system_prompt": "ok"},
 		},
 	}
 	for _, tc := range cases {
@@ -623,7 +657,7 @@ func TestWrite_GenericRunnerError(t *testing.T) {
 			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
 			tok := mustMintToken(t, ti, "org")
 
-			rec := writeDo(t, h, tc.method, tc.path, tok, tc.body, "")
+			rec := writeDo(t, h, tc.method, tc.path, tok, tc.body, tc.rawBody)
 			if rec.Code != http.StatusInternalServerError {
 				t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
 			}
@@ -670,6 +704,111 @@ func TestWrite_UnauthenticatedRejects(t *testing.T) {
 			}
 			if env.Error != "unauthorized" || env.Reason != "missing_token" {
 				t.Errorf("body = %q; want error=unauthorized reason=missing_token", rec.Body.String())
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------
+// UUID prevalidation
+// -----------------------------------------------------------------------
+
+// TestLogAppend_InvalidCorrelationID — a malformed correlation_id must be
+// rejected with 400 invalid_correlation_id before the row reaches Postgres.
+func TestLogAppend_InvalidCorrelationID(t *testing.T) {
+	cases := []struct {
+		name          string
+		correlationID string
+	}{
+		{"not_uuid", "not-a-uuid"},
+		{"too_short", "1234-5678"},
+		{"empty_segments", "--------"},
+		{"with_braces", "{aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &server.FakeScopedRunner{}
+			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+			tok := mustMintToken(t, ti, "org")
+
+			rec := writeDo(t, h, http.MethodPost, "/v1/keepers-log", tok, nil,
+				`{"event_type":"x","correlation_id":"`+tc.correlationID+`"}`)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if runner.FnInvoked {
+				t.Error("runner was invoked; expected rejection before tx")
+			}
+			var env struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if env.Error != "invalid_correlation_id" {
+				t.Errorf("error = %q, want invalid_correlation_id", env.Error)
+			}
+		})
+	}
+}
+
+// TestLogAppend_ValidCorrelationID — a well-formed correlation_id must pass
+// prevalidation and reach the runner (sentinel error confirms the tx path).
+func TestLogAppend_ValidCorrelationID(t *testing.T) {
+	runner := &server.FakeScopedRunner{FnReturns: errors.New("sentinel")}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPost, "/v1/keepers-log", tok, nil,
+		`{"event_type":"x","correlation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}`)
+
+	// Sentinel from runner means 500 log_append_failed, not 400 — prevalidation passed.
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (sentinel); body=%s", rec.Code, rec.Body.String())
+	}
+	if !runner.FnInvoked {
+		t.Error("runner not invoked; valid correlation_id should pass prevalidation")
+	}
+}
+
+// TestPutManifestVersion_InvalidManifestID — a malformed manifest_id path
+// segment must be rejected with 400 invalid_manifest_id before the body is
+// decoded or the runner is called.
+func TestPutManifestVersion_InvalidManifestID(t *testing.T) {
+	cases := []struct {
+		name       string
+		manifestID string
+	}{
+		{"not_uuid", "not-a-uuid"},
+		{"too_short", "1234-5678"},
+		{"plain_word", "manifest"},
+		{"with_braces", "{cccccccc-cccc-4ccc-8ccc-cccccccccccc}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &server.FakeScopedRunner{}
+			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+			tok := mustMintToken(t, ti, "org")
+
+			rec := writeDo(t, h, http.MethodPut,
+				"/v1/manifests/"+tc.manifestID+"/versions", tok,
+				map[string]any{"version_no": 1, "system_prompt": "ok"}, "")
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if runner.FnInvoked {
+				t.Error("runner was invoked; expected rejection before tx")
+			}
+			var env struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if env.Error != "invalid_manifest_id" {
+				t.Errorf("error = %q, want invalid_manifest_id", env.Error)
 			}
 		})
 	}
