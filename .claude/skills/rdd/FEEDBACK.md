@@ -231,3 +231,50 @@ required to re-fire `pull_request.synchronize` (workflow lacks `edited` trigger 
 - Total wall time from /rdd to merge: 01:30
 
 ---
+
+## 2026-04-23 — M2.7.b+c: Keep read API — capability-token auth + read endpoints
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/9
+**Phases with incidents**: 4, 6
+
+### What worked
+
+Gate 1 re-bundling of two already-decomposed leaves (M2.7.b + M2.7.c) went through cleanly
+thanks to the planner-verdict JSON — operator pre-argued the bundle, planner confirmed fit,
+no ROADMAP churn. Phase 4 converged on iteration 2 — the explicit "domain sanity-checks"
+section of the code-reviewer brief (body-size bound, Content-Type, RLS session-var ordering,
+test fixture isolation) surfaced the blocker the author had missed (unbounded embedding slice
++ no MaxBytesReader = DoS). Bounded-loop background Monitor + heartbeat pattern kept the
+orchestrator context cache warm while CI ran across Phase 6 iterations.
+
+### What wasted effort
+
+**Phase 6 iteration 1**: `git-master` pr mode does not cross-check the PR title against
+`.commitlintrc` / `commitlint.config.cjs`. Phase 6 iter 1 burned one iteration on a purely-cosmetic
+commitlint failure of the PR title (`M2.7.b+c: ...` rejected as `subject-empty` / `type-empty`).
+The title text came from the orchestrator's own Phase-5 prompt, which used the RDD canonical
+id-first form. Orchestrator manually renamed via `gh pr edit 9 --title "feat(keep): ..."`.
+
+**Phase 4 iteration 1**: code-reviewer agent emitted keys beyond the strict JSON contract
+(`verdict`, `positive`, `ac_coverage`, renamed `blockers`/`nits` plurals). Orchestrator had
+to parse fuzzy-match; a stricter validator or a schema example in the brief would help.
+
+### Suggested skill changes
+
+- Add a note to `references/agent-briefs/git-master.md` §Mode — pr requiring that the PR
+  title pass `commitlint` when a commitlint config is present in the repo root (or at minimum,
+  follow the conventional-commits pattern `<type>(<scope>): <subject>` when ≥3 of the last
+  10 commits on main do).
+- Consider updating the PR-title template in the brief to default to `<first-commit-subject>`
+  (which already passes commitlint because all feature commits did) instead of `<roadmap-id>: <title>`.
+- Tighten `references/agent-briefs/code-reviewer.md` §Output contract: add a JSON schema
+  skeleton with a `null` example for empty severity buckets, to discourage extra keys.
+
+### Metrics
+
+- Review iterations: 2 (converged on iter 2; 4 nits deferred to Follow-up)
+- PR-fix iterations: 2 (iter 1 renamed title + fixed 2 CodeRabbit nits; iter 2 converged)
+- Operator interventions outside gates: 1 (chose A+fix-nits for Meta CI + nits; orchestrator executed `gh pr edit` for the title)
+- Total wall time from /rdd to merge: ~1 day
+
+---

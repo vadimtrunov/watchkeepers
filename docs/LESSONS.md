@@ -224,3 +224,47 @@ nonroot:nonroot`, `COPY go.mod go.sum ./` for cacheable `go mod download`, hadol
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.7 → M2.7.a, `docs/DEVELOPING.md` "Keep service"
 
 ---
+
+## 2026-04-23 — M2.7.b+c: Keep read API — capability-token auth + read endpoints
+
+**PR**: [#9](https://github.com/vadimtrunov/watchkeepers/pull/9)
+**Merged**: 2026-04-23
+
+### Context
+
+Extended the Keep service with a capability-token authentication middleware and three read endpoints
+(`/v1/search`, `/v1/manifests/{id}`, `/v1/keepers-log`) that enforce row-level security via transactional
+scope binding. Bundled two ROADMAP leaves (M2.7.b auth + M2.7.c endpoints) because the read contract
+depends on the auth layer.
+
+### Pattern
+
+**Minimal stdlib JWT verifier (HS256 without external dependency)**: Implemented in-repo verifier using only
+`crypto/hmac`, `crypto/sha256`, and `crypto/subtle`. Signs `base64url(header).base64url(payload)` where
+header is fixed `{alg:HS256,typ:JWT}` and payload JSON-encodes `Claim{Subject, Scope, Issuer, ExpiresAt, IssuedAt}`.
+No external `golang-jwt/*` dependency required; smaller attack surface, no transitive supply-chain risk.
+Exposed `testIssuer` helper in `auth/testing.go` (co-located with production verifier) so integration tests
+mint their own tokens without test-only wire format.
+
+**SET LOCAL ROLE + SET LOCAL watchkeeper.scope transactional wrapping**: `db.WithScope(ctx, pool, claim, fn)`
+opens a transaction, validates scope format (prefix matching: `org`, `user:<id>`, `agent:<id>`), runs
+`SET LOCAL ROLE wk_<kind>_role` derived from the prefix, sets `watchkeeper.scope = '<value>'` as a session
+GUC, executes the read query inside `fn`, and commits. Role validation done as a closed set of literal strings
+before string substitution into SQL — no SQL injection risk. Isolation guaranteed: two concurrent requests
+with different scopes do not observe each other's `SET LOCAL` state.
+
+**Input-bounding discipline for LLM-facing endpoints**: `POST /v1/search` request body wrapped with
+`http.MaxBytesReader(1 MiB)` to prevent unbounded buffering. Embedding vector capped at 4096 dimensions
+(hardcoded literal, checked before unmarshaling). Oversized body returns `413 Payload Too Large`. Missing
+or malformed `Content-Type: application/json` returns `415 Unsupported Media Type`. Anti-pattern: JSON body
+decoded without `MaxBytesReader` + unbounded slice = DoS vector on authenticated routes; `DisallowUnknownFields`
+does NOT save you because the decoder has already buffered the full body before field validation.
+
+### References
+
+- Files: `core/internal/keep/auth/`, `core/internal/keep/server/{middleware,handlers_read}.go`,
+  `core/internal/keep/db/scope.go`, `core/cmd/keep/read_integration_test.go`,
+  `deploy/migrations/007_read_grants.sql`, `scripts/migrate-schema-test.sh`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.7 → M2.7.b + M2.7.c, `docs/DEVELOPING.md` "Keep service"
+
+---
