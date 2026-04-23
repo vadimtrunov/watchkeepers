@@ -157,3 +157,69 @@ func TestLoad_TokenSigningKeyNotBase64(t *testing.T) {
 		t.Errorf("Load() error = %v, want mention of base64", err)
 	}
 }
+
+func TestLoad_SubscribeDefaults(t *testing.T) {
+	setTokenEnv(t)
+	t.Setenv("KEEP_DATABASE_URL", fakeDSN)
+	t.Setenv("KEEP_SUBSCRIBE_BUFFER", "")
+	t.Setenv("KEEP_SUBSCRIBE_HEARTBEAT", "")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.SubscribeBuffer != config.DefaultSubscribeBuffer {
+		t.Errorf("SubscribeBuffer default = %d, want %d", cfg.SubscribeBuffer, config.DefaultSubscribeBuffer)
+	}
+	if cfg.SubscribeHeartbeat != config.DefaultSubscribeHeartbeat {
+		t.Errorf("SubscribeHeartbeat default = %v, want %v", cfg.SubscribeHeartbeat, config.DefaultSubscribeHeartbeat)
+	}
+}
+
+func TestLoad_SubscribeOverrides(t *testing.T) {
+	setTokenEnv(t)
+	t.Setenv("KEEP_DATABASE_URL", fakeDSN)
+	t.Setenv("KEEP_SUBSCRIBE_BUFFER", "128")
+	t.Setenv("KEEP_SUBSCRIBE_HEARTBEAT", "5s")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.SubscribeBuffer != 128 {
+		t.Errorf("SubscribeBuffer = %d, want 128", cfg.SubscribeBuffer)
+	}
+	if cfg.SubscribeHeartbeat != 5*time.Second {
+		t.Errorf("SubscribeHeartbeat = %v, want 5s", cfg.SubscribeHeartbeat)
+	}
+}
+
+func TestLoad_SubscribeBufferInvalid(t *testing.T) {
+	setTokenEnv(t)
+	t.Setenv("KEEP_DATABASE_URL", fakeDSN)
+
+	cases := []string{"0", "-1", "not-a-number"}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("KEEP_SUBSCRIBE_BUFFER", raw)
+			if _, err := config.Load(); err == nil {
+				t.Fatalf("Load() returned nil for KEEP_SUBSCRIBE_BUFFER=%q", raw)
+			}
+		})
+	}
+}
+
+func TestLoad_SubscribeHeartbeatInvalid(t *testing.T) {
+	setTokenEnv(t)
+	t.Setenv("KEEP_DATABASE_URL", fakeDSN)
+
+	cases := []string{"nope", "0s", "-1s"}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("KEEP_SUBSCRIBE_HEARTBEAT", raw)
+			if _, err := config.Load(); err == nil {
+				t.Fatalf("Load() returned nil for KEEP_SUBSCRIBE_HEARTBEAT=%q", raw)
+			}
+		})
+	}
+}

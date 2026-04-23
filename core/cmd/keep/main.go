@@ -25,6 +25,7 @@ import (
 
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/auth"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/config"
+	"github.com/vadimtrunov/watchkeepers/core/internal/keep/publish"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/server"
 )
 
@@ -70,7 +71,12 @@ func run(_ []string, _ io.Writer, stderr io.Writer) int {
 		return 1
 	}
 
-	srv := server.New(cfg, pool, verifier)
+	// Registry is process-owned and closed by Server.Run during shutdown;
+	// do not call reg.Close() here or the second close would be a no-op
+	// but the invariant is clearer if the lifecycle stays with Server.
+	reg := publish.NewRegistry(cfg.SubscribeBuffer, cfg.SubscribeHeartbeat)
+
+	srv := server.New(cfg, pool, verifier, reg)
 	if err := srv.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(stderr, "keep: server: %v\n", err)
 		return 1
