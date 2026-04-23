@@ -107,6 +107,46 @@ func TestSubscribeAPI_MissingAuth(t *testing.T) {
 	}
 }
 
+// TestSubscribeAPI_MalformedToken — a structurally invalid Bearer token
+// must be rejected at the middleware with 401 bad_token before reaching
+// the SSE handler. The production middleware maps ErrMalformed to the
+// stable reason "bad_token" (see middleware.reasonFor); the review
+// comment's "invalid_token" is an informal description of the case, not
+// the wire value. We assert the actual production reason so a silent
+// regression — e.g. a middleware rewrite that swallows ErrMalformed into
+// a default "bad_signature" — surfaces here.
+func TestSubscribeAPI_MalformedToken(t *testing.T) {
+	env := newTestEnv(t)
+	addr, _, _, teardown := bootKeepSubscribe(t, env)
+	defer teardown()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+addr+"/v1/subscribe", nil)
+	if err != nil {
+		t.Fatalf("build req: %v", err)
+	}
+	// "garbage" is a single segment — the HMAC verifier rejects it with
+	// ErrMalformed long before any signature comparison.
+	req.Header.Set("Authorization", "Bearer garbage")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+	var envErr struct {
+		Error, Reason string
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envErr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if envErr.Reason != "bad_token" {
+		t.Errorf("reason = %q, want bad_token", envErr.Reason)
+	}
+}
+
 // TestSubscribeAPI_HeadersAndHeartbeat — happy path over the real binary:
 // SSE response headers are correct and a heartbeat frame is observed
 // within one heartbeat interval at the configured KEEP_SUBSCRIBE_HEARTBEAT.
@@ -205,13 +245,18 @@ func TestSubscribeAPI_CleanShutdown(t *testing.T) {
 
 	select {
 	case err := <-eofCh:
+		// AC8 requires a clean EOF on SIGTERM with no broken-pipe on the
+		// server side. AC6 guarantees Registry.Close() runs BEFORE
+		// httpSrv.Shutdown precisely so the client sees an orderly EOF,
+		// so the assertion must reject reset-style errors (which would
+		// indicate the server hung up mid-frame rather than closing the
+		// fan-out first). io.EOF is the clean-frame-boundary case;
+		// io.ErrUnexpectedEOF is the clean mid-frame case (server
+		// closed the connection while bufio.Reader still had a partial
+		// line) — both represent an orderly FIN from the server, which
+		// is what the AC measures.
 		if err != io.EOF && err != io.ErrUnexpectedEOF {
-			// Accept connection-close variants that surface as other
-			// non-nil errors on the client side; the contract here is
-			// "the server did not hang", not "stdlib returned literal
-			// EOF". Note an `unexpected EOF` also indicates a clean
-			// server-side close in the middle of a frame.
-			t.Logf("client read returned %v (accepted as shutdown signal)", err)
+			t.Fatalf("client read returned %v, want io.EOF or io.ErrUnexpectedEOF", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatalf("client did not observe stream end within 10s of SIGTERM")
