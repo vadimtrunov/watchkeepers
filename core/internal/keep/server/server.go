@@ -69,6 +69,14 @@ func NewRouter(v auth.Verifier, pool *pgxpool.Pool, reg *publish.Registry, heart
 	return mux
 }
 
+// WorkerRunner is the narrow interface Server.Run uses to start and stop
+// the outbox worker. The concrete type is *publish.Worker; the interface
+// keeps the server package free of a direct import cycle with publish while
+// also making it trivial to swap in a no-op for tests.
+type WorkerRunner interface {
+	Run(ctx context.Context) error
+}
+
 // Server is the Keep HTTP server plus its owned lifecycle. It does not own
 // the pgxpool.Pool — main.go owns and closes the pool after Run returns.
 //
@@ -77,10 +85,16 @@ func NewRouter(v auth.Verifier, pool *pgxpool.Pool, reg *publish.Registry, heart
 // returns promptly before httpSrv.Shutdown begins its grace period
 // (AC6). Callers must not call reg.Close themselves after handing it
 // here.
+//
+// If a worker is supplied via WithWorker, Run starts it in a goroutine and
+// cancels it before reg.Close() on shutdown, preserving the invariant:
+//
+//	cancel(workerCtx) → workerDone wait → reg.Close() → httpSrv.Shutdown
 type Server struct {
 	httpSrv         *http.Server
 	shutdownTimeout time.Duration
 	reg             *publish.Registry
+	worker          WorkerRunner
 }
 
 // New builds a Server bound to cfg.HTTPAddr using the default Keep router.
@@ -95,6 +109,15 @@ func New(cfg config.Config, pool *pgxpool.Pool, v auth.Verifier, reg *publish.Re
 	srv := NewWithHandler(cfg, pool, NewRouter(v, pool, reg, cfg.SubscribeHeartbeat))
 	srv.reg = reg
 	return srv
+}
+
+// WithWorker attaches an outbox worker to the server. Run will start it in a
+// goroutine and cancel its context before reg.Close() during shutdown,
+// preserving the invariant: cancel(workerCtx) → workerDone → reg.Close() →
+// httpSrv.Shutdown. Calling WithWorker more than once replaces the previous
+// worker; only the last one is used.
+func (s *Server) WithWorker(w WorkerRunner) {
+	s.worker = w
 }
 
 // NewWithHandler builds a Server with a caller-supplied http.Handler. The
@@ -113,12 +136,30 @@ func NewWithHandler(cfg config.Config, _ *pgxpool.Pool, h http.Handler) *Server 
 	}
 }
 
-// Run serves HTTP requests until ctx is canceled, then closes the publish
-// Registry (so any in-flight /v1/subscribe SSE streams return) and calls
-// Shutdown with the configured timeout. It returns nil on a clean
-// shutdown and an error otherwise. http.ErrServerClosed is treated as
-// the success sentinel.
+// Run serves HTTP requests until ctx is canceled, then shuts down in order:
+//  1. Cancel the outbox worker context and wait for it to exit (if wired).
+//  2. Close the publish Registry so in-flight SSE streams return.
+//  3. Call httpSrv.Shutdown with the configured timeout.
+//
+// It returns nil on a clean shutdown and an error otherwise.
+// http.ErrServerClosed is treated as the success sentinel.
 func (s *Server) Run(ctx context.Context) error {
+	// Start the outbox worker if one is wired. The worker runs under its
+	// own cancellable child context so we can stop it before closing the
+	// registry (step 1 of the shutdown invariant).
+	var (
+		workerCancel context.CancelFunc
+		workerDone   chan error
+	)
+	if s.worker != nil {
+		workerCtx, cancel := context.WithCancel(ctx)
+		workerCancel = cancel
+		workerDone = make(chan error, 1)
+		go func() {
+			workerDone <- s.worker.Run(workerCtx)
+		}()
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		if err := s.httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -130,18 +171,27 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case err := <-errCh:
+		if workerCancel != nil {
+			workerCancel()
+		}
 		return err
 	case <-ctx.Done():
-		// Close the registry FIRST so every active SSE handler sees its
+		// Step 1: stop the worker first so it does not publish to a
+		// closing registry.
+		if workerCancel != nil {
+			workerCancel()
+			<-workerDone
+		}
+		// Step 2: close the registry so every active SSE handler sees its
 		// channel close and returns. Doing this before httpSrv.Shutdown
 		// means the grace period is not spent waiting for streams that
 		// by contract never end on their own.
 		if s.reg != nil {
 			s.reg.Close()
 		}
-		// Derive the shutdown deadline from a detached copy of ctx so the
-		// already-canceled parent does not abort Shutdown immediately while
-		// still letting contextcheck see an inherited lineage.
+		// Step 3: derive the shutdown deadline from a detached copy of ctx
+		// so the already-canceled parent does not abort Shutdown immediately
+		// while still letting contextcheck see an inherited lineage.
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.shutdownTimeout)
 		defer cancel()
 		if err := s.httpSrv.Shutdown(shutdownCtx); err != nil {
