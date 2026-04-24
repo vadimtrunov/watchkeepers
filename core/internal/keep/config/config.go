@@ -42,6 +42,13 @@ const (
 	DefaultShutdownTimeout    = 10 * time.Second
 	DefaultSubscribeBuffer    = 64
 	DefaultSubscribeHeartbeat = 15 * time.Second
+	DefaultOutboxPollInterval = 1 * time.Second
+
+	// minOutboxPollInterval and maxOutboxPollInterval bound the
+	// KEEP_OUTBOX_POLL_INTERVAL env var to prevent accidental DoS (too
+	// short) or pathologically stale events (too long).
+	minOutboxPollInterval = 100 * time.Millisecond
+	maxOutboxPollInterval = 60 * time.Second
 )
 
 // Config holds the Keep service runtime configuration loaded from env.
@@ -67,6 +74,10 @@ type Config struct {
 	// on an idle /v1/subscribe stream. Keeps proxies and the TCP
 	// keepalive engine honest without a constant torrent of traffic.
 	SubscribeHeartbeat time.Duration
+	// OutboxPollInterval is the duration between successive polls of
+	// watchkeeper.outbox for unpublished rows. Corresponds to env var
+	// KEEP_OUTBOX_POLL_INTERVAL (default 1s, min 100ms, max 60s).
+	OutboxPollInterval time.Duration
 }
 
 // Load reads configuration from environment variables, applies defaults for
@@ -84,6 +95,7 @@ func Load() (Config, error) {
 		TokenIssuer:        os.Getenv("KEEP_TOKEN_ISSUER"),
 		SubscribeBuffer:    DefaultSubscribeBuffer,
 		SubscribeHeartbeat: DefaultSubscribeHeartbeat,
+		OutboxPollInterval: DefaultOutboxPollInterval,
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -119,6 +131,20 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("invalid KEEP_SUBSCRIBE_HEARTBEAT %q: must be positive", raw)
 		}
 		cfg.SubscribeHeartbeat = d
+	}
+
+	if raw := os.Getenv("KEEP_OUTBOX_POLL_INTERVAL"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid KEEP_OUTBOX_POLL_INTERVAL %q: %w", raw, err)
+		}
+		if d < minOutboxPollInterval {
+			return Config{}, fmt.Errorf("invalid KEEP_OUTBOX_POLL_INTERVAL %q: must be >= %s", raw, minOutboxPollInterval)
+		}
+		if d > maxOutboxPollInterval {
+			return Config{}, fmt.Errorf("invalid KEEP_OUTBOX_POLL_INTERVAL %q: must be <= %s", raw, maxOutboxPollInterval)
+		}
+		cfg.OutboxPollInterval = d
 	}
 
 	rawKey := os.Getenv("KEEP_TOKEN_SIGNING_KEY")
