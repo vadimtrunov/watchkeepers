@@ -155,14 +155,14 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M2.1.d** Row-Level Security: `scope ∈ {org, user:<id>, agent:<id>}` column on scoped tables, session-role setup, per-table policies, cross-scope rejection tests.
   - [x] **M2.1.e** `outbox` table DDL only (publisher worker → M2.7).
 - [x] **M2.6** Migration tool chosen and wired (goose / atlas / sqlc).
-- [ ] **M2.7** **Keep service binary** (Go) exposing HTTP/gRPC API: `search`, `store`, `subscribe`, `log_append`, `log_tail`, `get_manifest`, `put_manifest_version`. Auth via short-lived capability tokens issued by core.
+- [x] **M2.7** **Keep service binary** (Go) exposing HTTP/gRPC API: `search`, `store`, `subscribe`, `log_append`, `log_tail`, `get_manifest`, `put_manifest_version`. Auth via short-lived capability tokens issued by core.
   - [x] **M2.7.a** Keep service skeleton, HTTP-vs-gRPC decision, health endpoint, config, Dockerfile.
   - [x] **M2.7.b** Capability-token auth middleware and token-issuance contract.
   - [x] **M2.7.c** Read endpoints: `search`, `get_manifest`, `log_tail` with contract tests.
   - [x] **M2.7.d** Write endpoints: `store`, `log_append`, `put_manifest_version` with contract tests.
-  - [ ] **M2.7.e** `subscribe` endpoint plus outbox publisher worker (from M2.1.e).
+  - [x] **M2.7.e** `subscribe` endpoint plus outbox publisher worker (from M2.1.e).
     - [x] **M2.7.e.a** Add subscribe streaming endpoint with in-process publish API and fan-out registry
-    - [ ] **M2.7.e.b** Add outbox publisher worker consuming outbox table into subscribe publish API
+    - [x] **M2.7.e.b** Add outbox publisher worker consuming outbox table into subscribe publish API
 - [ ] **M2.8** Go client package `keepclient` used by core and by harness (no direct DB access from either).
 - [ ] **M2.9** Manifest schema fields added: `personality` (free-text) and `language` (ISO code).
   - [ ] **M2.9.a** Manifest `personality`/`language` constraints, validation, and docs (columns already landed with M2.1.a).
