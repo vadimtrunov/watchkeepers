@@ -454,17 +454,19 @@ func TestOutbox_TwoRowsDeliveredInOrder(t *testing.T) {
 		t.Fatalf("expected 2 events, got %d within budget", len(events))
 	}
 
-	// Find our two events by event_type suffix encoded in the data field.
-	// The SSE data field is a JSON object; event_type is top-level.
+	// Find our two events by event_type suffix on the SSE `event:` field.
+	// The payload was inserted as `{}`, so the suffix lives in EventType,
+	// not Data — the writer emits `event: <EventType>` and `data: <Payload>`
+	// as separate frame fields (see writeSSEEvent in handlers_subscribe.go).
 	nanoSuffix := fmt.Sprintf("%d", base.UnixNano())
 	var gotFirst, gotSecond int // index in events slice, -1 = not found
 	gotFirst = -1
 	gotSecond = -1
 	for i, ev := range events {
-		if strings.Contains(ev.Data, "order.first."+nanoSuffix) {
+		if strings.Contains(ev.EventType, "order.first."+nanoSuffix) {
 			gotFirst = i
 		}
-		if strings.Contains(ev.Data, "order.second."+nanoSuffix) {
+		if strings.Contains(ev.EventType, "order.second."+nanoSuffix) {
 			gotSecond = i
 		}
 	}
