@@ -173,6 +173,7 @@ func (s *Server) Run(ctx context.Context) error {
 	case err := <-errCh:
 		if workerCancel != nil {
 			workerCancel()
+			<-workerDone
 		}
 		return err
 	case <-ctx.Done():
