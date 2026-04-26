@@ -308,3 +308,27 @@ errors should be 400, not 500; enforce exact match to the schema's declared dime
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.7 → M2.7.d, `docs/DEVELOPING.md` "Keep service"
 
 ---
+
+## 2026-04-24 — M2.7.e.a: Keep subscribe endpoint + in-process publish Registry
+
+**PR**: [#11](https://github.com/vadimtrunov/watchkeepers/pull/11)
+**Merged**: 2026-04-24
+
+### Context
+
+Added the `GET /v1/subscribe` Server-Sent Events endpoint to the Keep service under capability-token auth. Introduced an in-process `publish.Registry` with strict scope-equality fan-out and wired it into graceful shutdown. The endpoint runs entirely in-process without outbox reads; outbox-backed event sourcing lands in M2.7.e.b.
+
+### Pattern
+
+**SSE over WebSocket/long-poll for unidirectional publish→subscribe**: Aligns with HTTP choice from M2.7.a. Uses stdlib-only `http.Flusher` with `Content-Type: text/event-stream`, no hijack of ResponseWriter. `curl -N` debuggable. Backpressure falls out of TCP + Flusher without external transport complexity.
+
+**In-process Publisher seam + Registry fan-out decouples endpoint from outbox worker**: `NewRegistry(bufSize, heartbeat)` exports `Publish(ctx, Event) error` and `Subscribe(ctx, claim) (<-chan Event, func())` / `Close()`. The `Event` carries explicit `Scope` field (a superset of outbox DDL) so fan-out filter is exact-match equality on `claim.Scope` — no hierarchy widening, mirrors M2.7.b+c's RLS model.
+
+**Non-blocking fan-out with drop-on-full backpressure**: `Publish` does a non-blocking send to each matching subscriber; on a full buffer, that subscriber closes (client reconnects) and other subscribers unaffected. Publisher never stalls. Shutdown ordering critical — `Registry.Close()` BEFORE `httpSrv.Shutdown(ctx)` — so stream handlers return cleanly and clients observe `io.EOF`/`io.ErrUnexpectedEOF`, not broken-pipe. Registry-wide `done` channel also releases per-subscription watchdog goroutines.
+
+### References
+
+- Files: `core/internal/keep/publish/{event,registry,registry_test,export_test}.go`, `core/internal/keep/server/{handlers_subscribe,handlers_subscribe_test,server,server_test,export_test}.go`, `core/internal/keep/config/config.go` (KEEP_SUBSCRIBE_BUFFER, KEEP_SUBSCRIBE_HEARTBEAT), `core/cmd/keep/{main.go,subscribe_integration_test.go}`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.7 → M2.7.e → M2.7.e.a, `docs/DEVELOPING.md` "Keep service"
+
+---

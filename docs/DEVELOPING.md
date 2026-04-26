@@ -180,15 +180,16 @@ goes back through the `rdd` loop with a new LESSON entry.
 
 ### Env vars
 
-| Variable                   | Required | Default | Notes                                                                  |
-| -------------------------- | -------- | ------- | ---------------------------------------------------------------------- |
-| `KEEP_DATABASE_URL`        | yes      | —       | pgx-compatible Postgres DSN. Boot exits non-zero if unset or bad.      |
-| `KEEP_HTTP_ADDR`           | no       | `:8080` | Listen address passed to `http.Server`.                                |
-| `KEEP_SHUTDOWN_TIMEOUT`    | no       | `10s`   | Go duration; bounds `http.Server.Shutdown` on SIGINT / SIGTERM.        |
-| `KEEP_TOKEN_SIGNING_KEY`   | yes      | —       | Base64-encoded HMAC-SHA256 key. Decoded bytes must be ≥ 32 bytes long. |
-| `KEEP_TOKEN_ISSUER`        | yes      | —       | Expected `iss` claim on every verified capability token.               |
-| `KEEP_SUBSCRIBE_BUFFER`    | no       | `64`    | Per-subscriber event channel capacity for `GET /v1/subscribe`.         |
-| `KEEP_SUBSCRIBE_HEARTBEAT` | no       | `15s`   | Interval between SSE heartbeat comments on an idle subscribe stream.   |
+| Variable                    | Required | Default | Notes                                                                                                |
+| --------------------------- | -------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `KEEP_DATABASE_URL`         | yes      | —       | pgx-compatible Postgres DSN. Boot exits non-zero if unset or bad.                                    |
+| `KEEP_HTTP_ADDR`            | no       | `:8080` | Listen address passed to `http.Server`.                                                              |
+| `KEEP_SHUTDOWN_TIMEOUT`     | no       | `10s`   | Go duration; bounds `http.Server.Shutdown` on SIGINT / SIGTERM.                                      |
+| `KEEP_TOKEN_SIGNING_KEY`    | yes      | —       | Base64-encoded HMAC-SHA256 key. Decoded bytes must be ≥ 32 bytes long.                               |
+| `KEEP_TOKEN_ISSUER`         | yes      | —       | Expected `iss` claim on every verified capability token.                                             |
+| `KEEP_SUBSCRIBE_BUFFER`     | no       | `64`    | Per-subscriber event channel capacity for `GET /v1/subscribe`.                                       |
+| `KEEP_SUBSCRIBE_HEARTBEAT`  | no       | `15s`   | Interval between SSE heartbeat comments on an idle subscribe stream.                                 |
+| `KEEP_OUTBOX_POLL_INTERVAL` | no       | `1s`    | How often the outbox worker polls `watchkeeper.outbox` for unpublished rows. Min `100ms`, max `60s`. |
 
 ### Build and run locally
 
@@ -405,11 +406,28 @@ subscriber whose per-connection buffer fills is dropped (stream closed)
 so other subscribers are never held up; the standard client response is
 to reconnect.
 
-Event **producers** (the outbox worker that turns
-`watchkeeper.outbox` rows into `publish.Event` fan-outs) are out of
-scope for M2.7.e.a and land in **M2.7.e.b**. In M2.7.e.a the stream is
-driven exclusively through the in-process `publish.Publisher` API; any
-event you emit through that API is delivered to matching subscribers.
+Event **producers** are the outbox worker (`core/internal/keep/publish/outbox.go`)
+introduced in M2.7.e.b. The worker polls `watchkeeper.outbox` every
+`KEEP_OUTBOX_POLL_INTERVAL` (default `1s`) for rows where `published_at IS NULL`,
+converts each row to a `publish.Event`, calls `reg.Publish` for SSE fan-out to
+matching subscribers (exact `scope` match), and stamps `published_at = now()` in
+the same transaction on success. A failed publish leaves the row for the next tick.
+
+The worker starts in a goroutine managed by `server.Run` and is cancelled before
+`reg.Close()` during graceful shutdown, preserving the ordering:
+
+```text
+cancel(workerCtx) → workerDone wait → reg.Close() → httpSrv.Shutdown
+```
+
+To insert an outbox row for testing (owner role, migrations 001–009 applied):
+
+```sql
+INSERT INTO watchkeeper.outbox (aggregate_type, aggregate_id, event_type, payload, scope)
+VALUES ('watchkeeper', gen_random_uuid(), 'watchkeeper.spawned', '{}', 'org');
+```
+
+Subscribers with `scope = 'org'` will receive the event within one poll interval.
 
 ### Docker image
 

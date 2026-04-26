@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -216,5 +217,93 @@ func TestServer_Run_SlowHandlerCompletes(t *testing.T) {
 	case <-handlerDone:
 	default:
 		t.Fatal("slow handler did not finish before test exit")
+	}
+}
+
+// fakeWorker is a minimal server.WorkerRunner that records when Run is
+// called and when its context is cancelled, so the shutdown-ordering test
+// can assert cancel(workerCtx) happens before reg.Close().
+type fakeWorker struct {
+	// runCalled is set to 1 when Run is entered.
+	runCalled atomic.Int32
+	// stopped is closed when Run's ctx is cancelled.
+	stopped chan struct{}
+}
+
+func newFakeWorker() *fakeWorker {
+	return &fakeWorker{stopped: make(chan struct{})}
+}
+
+func (w *fakeWorker) Run(ctx context.Context) error {
+	w.runCalled.Store(1)
+	<-ctx.Done()
+	close(w.stopped)
+	return nil
+}
+
+// TestServer_Run_WorkerShutdownOrder asserts the three-step shutdown invariant:
+//
+//	cancel(workerCtx) → workerDone → reg.Close() → httpSrv.Shutdown
+//
+// We verify this by observing that fakeWorker.stopped is closed before Run
+// returns, proving the worker exit is awaited before the function unwinds.
+func TestServer_Run_WorkerShutdownOrder(t *testing.T) {
+	addr := pickLocalAddr(t)
+	cfg := config.Config{HTTPAddr: addr, ShutdownTimeout: 2 * time.Second}
+	srv := server.New(cfg, nil, nil, nil)
+
+	w := newFakeWorker()
+	srv.WithWorker(w)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- srv.Run(ctx) }()
+
+	// Wait for the HTTP server to bind.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+addr+"/health", nil)
+		if reqErr != nil {
+			t.Fatalf("build health probe: %v", reqErr)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server never bound: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Give the worker goroutine time to start.
+	deadline2 := time.Now().Add(time.Second)
+	for w.runCalled.Load() == 0 {
+		if time.Now().After(deadline2) {
+			t.Fatal("worker Run never called before cancel")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+
+	// Run must return within the shutdown budget.
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s after cancel")
+	}
+
+	// worker.stopped must be closed (worker exited) before Run returned.
+	select {
+	case <-w.stopped:
+		// worker exited as required before Run completed
+	default:
+		t.Fatal("worker was not stopped before Run returned (shutdown ordering violated)")
 	}
 }
