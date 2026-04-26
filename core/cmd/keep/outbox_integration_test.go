@@ -136,6 +136,29 @@ func publishedAt(t *testing.T, pool *pgxpool.Pool, id string) time.Time {
 	return *ts
 }
 
+// awaitPublishedAt polls publishedAt until it is non-zero or the budget
+// expires. AC2 stamps published_at in the same transaction as the Publish
+// call, but the in-process Publish hands the event off to the SSE
+// subscriber's buffered channel BEFORE the worker's tx.Commit returns. A
+// fast subscriber + fast network read can therefore observe the SSE frame
+// strictly before the stamp UPDATE is visible to a separate connection,
+// making a single read of publishedAt racy. Polling closes the race
+// without weakening the production contract.
+func awaitPublishedAt(t *testing.T, pool *pgxpool.Pool, id string, budget time.Duration) time.Time {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for {
+		ts := publishedAt(t, pool, id)
+		if !ts.IsZero() {
+			return ts
+		}
+		if time.Now().After(deadline) {
+			return time.Time{}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 // openSubscribeStream opens a GET /v1/subscribe SSE connection with a
 // capability token for the given scope. Returns the response body reader and
 // a cancel function. The test fails fast if the server returns non-200.
@@ -287,10 +310,13 @@ func TestOutbox_OrgScopeDelivered(t *testing.T) {
 		t.Errorf("payload = %q, want org-delivery", got["test"])
 	}
 
-	// Assert published_at stamped in DB.
-	ts := publishedAt(t, pool, rowID)
+	// Assert published_at stamped in DB. The worker stamps published_at
+	// inside the same tx as the Publish call (AC2), but Publish hands off
+	// to the SSE subscriber synchronously and tx.Commit returns slightly
+	// later — so the test polls instead of single-shotting the read.
+	ts := awaitPublishedAt(t, pool, rowID, 2*time.Second)
 	if ts.IsZero() {
-		t.Errorf("published_at not set for row %s", rowID)
+		t.Errorf("published_at not set for row %s within 2s", rowID)
 	}
 }
 
