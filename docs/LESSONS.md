@@ -332,3 +332,33 @@ Added the `GET /v1/subscribe` Server-Sent Events endpoint to the Keep service un
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.7 → M2.7.e → M2.7.e.a, `docs/DEVELOPING.md` "Keep service"
 
 ---
+
+## 2026-04-27 — M2.7.e.b: outbox publisher worker consuming outbox table into subscribe publish API
+
+**PR**: [#12](https://github.com/vadimtrunov/watchkeepers/pull/12)
+**Merged**: 2026-04-27
+
+### Context
+
+Implemented an outbox publisher worker inside the Keep service. The worker polls the `watchkeeper.outbox` table for unpublished rows, converts each to a `publish.Event`, invokes the in-process `publish.Registry.Publish()` for SSE fan-out to `/v1/subscribe` subscribers, and stamps `published_at=now()` on success. Worker lifecycle is wired into graceful shutdown with strict ordering. Migration adds the `scope` column to `outbox` (deferred from M2.7.e.a).
+
+### Pattern
+
+**Outbox publisher worker with `FOR UPDATE SKIP LOCKED`**: Worker selects unpublished rows ordered by `created_at ASC` using `FOR UPDATE SKIP LOCKED` within a transaction, publishes each via `reg.Publish(ctx, event)`, and stamps `published_at=now()` in the same transaction on success. Lock-skip enables future multi-replica scale-out without double-publish. Publish failures leave the row unpublished for the next tick; errors are logged, never panicked. Semantics are at-least-once (dedup required in consumers).
+
+**Shutdown ordering on both happy and error paths**: `server.Run` cancels workerCtx → waits `<-workerDone` → calls `reg.Close()` → calls `httpSrv.Shutdown(ctx.WithoutCancel())`. This ordering must be honored on both `<-ctx.Done()` (graceful) and `<-errCh` (error) branches. Registry closes before HTTP shutdown so stream handlers drain cleanly.
+
+**Environment-driven poll interval with range validation**: Config field `OutboxPollInterval` plus env var `KEEP_OUTBOX_POLL_INTERVAL` (default `1s`, range `100ms`–`60s`) follows the existing `KEEP_SUBSCRIBE_*` pattern — env-first lookup, typed defaults, sentinel-error validation in `config.Load`. Migration `009_outbox_scope.sql` adds `scope text NOT NULL DEFAULT 'org'` with CHECK constraint matching RLS format (`org`, `user:<uuid>`, `agent:<uuid>`).
+
+**Read-after-commit race in integration tests**: SSE delivery to client races ahead of the same-transaction Commit visible to a separate pool connection. Test pattern: `awaitPublishedAt` polling helper (25ms backoff, 2s timeout) retries until `published_at IS NOT NULL` on the same row, confirming worker has completed the transaction.
+
+### Anti-pattern
+
+Docstring claim of "exactly-once delivery via stamp-in-txn" is wrong. Stamping and publishing span an in-process side-effect plus a DB transaction; if Commit fails after Publish succeeds, the next tick re-publishes. Semantics are at-least-once; consumers must dedup on `Event.ID`. Don't claim "exactly-once" without an end-to-end transactional guarantee.
+
+### References
+
+- Files: `core/internal/keep/publish/outbox.go`, `core/internal/keep/server/server.go`, `core/cmd/keep/outbox_integration_test.go`, `deploy/migrations/009_outbox_scope.sql`, `core/internal/keep/config/config.go`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.7 → M2.7.e → M2.7.e.b
+
+---

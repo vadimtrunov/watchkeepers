@@ -358,3 +358,35 @@ Gate 1 decomposition (M2.7.e → {M2.7.e.a, M2.7.e.b}) proved correct: planner f
 - Total wall time from /rdd to merge: ~08:00
 
 ---
+
+## 2026-04-27 — M2.7.e.b: outbox publisher worker consuming outbox table into subscribe publish API
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/12
+**Phases with incidents**: 5, 6
+
+### What worked
+
+Bounded loop's severity contract held tight: both unresolved CodeRabbit comments (nit #1 docstring, nit #2 AC4 shutdown path) were correctly classified as `nit` per contract. Operator-decided exception (merging despite AC4 nit #2 touching AC directly) was a clean recovery path documented in Follow-up. Executor (opus) at Phase 6 iter 1 quickly diagnosed both integration-test failures as test-side bugs (read-after-commit race + substring match), using local pgvector to repro with `KEEP_INTEGRATION_DB_URL` pointed at port 55432. CI converged green on second push.
+
+### What wasted effort
+
+**Preflight Check 4 (clean working tree) failed on untracked build artifact**: An ~15MB Mach-O `keep` binary in the repo root was untracked and not in `.gitignore`. Cost a clarification round before Phase 1 could even begin. Worth considering: should preflight surface untracked-but-gitignorable build artifacts with an explicit "add to .gitignore?" suggestion rather than blocking with the generic dirty-tree message?
+
+**Phase 5 PR title still using `<roadmap-id>:` form despite prior feedback**: Title `M2.7.e.b: add outbox publisher worker` failed commitlint (`type-empty`/`subject-empty`). The git-master brief suggestion from M2.7.e.a has not yet been promoted into `references/agent-briefs/git-master.md`, so the pattern repeated. Orchestrator fixed via `gh pr edit` to `feat(keep): add outbox publisher worker (M2.7.e.b)`. Third occurrence of this anti-pattern indicates the brief urgently needs update.
+
+**Phase 7 pre-step: local main diverged from origin/main before merge**: Commit `21483fa` (from M2.7.e.a's Phase 7 lessons) was on origin but not local. Squash-merge would have absorbed it; `git pull --ff-only` would have diverged. Orchestrator pushed local main first, then merged. The `git-master merge` brief currently doesn't account for this — worth adding a check: "before `gh pr merge`, ensure local `main` matches `origin/main`; if not, fast-forward push first or escalate."
+
+### Suggested skill changes
+
+- Update `references/agent-briefs/git-master.md` Phase 5 §"Open the PR" to require a conventional-commits-conformant title (provide the `<type>(<scope>): <subject> (<roadmap-id>)` pattern explicitly, citing a recent commit on the branch as ground truth).
+- Update `references/agent-briefs/git-master.md` Phase 7 to add pre-merge check: "before `gh pr merge`, run `git fetch origin && git log -1 --oneline main ^origin/main`; if non-empty, push local main or escalate" to prevent squash-absorbing foreign commits or diverging on merge-base.
+- Consider adding Preflight Check 4.5: list untracked-but-gitignorable build artifacts (`*.o`, `keep`, `main`, common binaries) and offer to add to `.gitignore` rather than blocking with the generic dirty-tree message.
+
+### Metrics
+
+- Review iterations: unknown for this TASK (Phase 4 occurred in prior session)
+- PR-fix iterations: 2 (iter 1: test bugs; iter 2: AC4 nit)
+- Operator interventions outside of gates: 1 (preflight Check 4 clarification)
+- Total wall time from /rdd to merge: ~2 hours
+
+---
