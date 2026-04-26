@@ -25,6 +25,7 @@ secrets/
 # Go build outputs
 /bin/
 /dist/
+/keep
 *.test
 *.out
 coverage.out

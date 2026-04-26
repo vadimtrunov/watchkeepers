@@ -76,7 +76,14 @@ func run(_ []string, _ io.Writer, stderr io.Writer) int {
 	// but the invariant is clearer if the lifecycle stays with Server.
 	reg := publish.NewRegistry(cfg.SubscribeBuffer, cfg.SubscribeHeartbeat)
 
+	// Outbox worker polls watchkeeper.outbox for unpublished rows and fans
+	// them out via the Registry. Server.Run enforces the shutdown order:
+	//   cancel(workerCtx) → workerDone → reg.Close() → httpSrv.Shutdown
+	workerCfg := publish.WorkerConfig{PollInterval: cfg.OutboxPollInterval}
+	worker := publish.NewWorker(pool, reg, workerCfg)
+
 	srv := server.New(cfg, pool, verifier, reg)
+	srv.WithWorker(worker)
 	if err := srv.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(stderr, "keep: server: %v\n", err)
 		return 1

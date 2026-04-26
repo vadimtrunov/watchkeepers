@@ -223,3 +223,55 @@ func TestLoad_SubscribeHeartbeatInvalid(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_OutboxPollIntervalDefault(t *testing.T) {
+	setTokenEnv(t)
+	t.Setenv("KEEP_DATABASE_URL", fakeDSN)
+	t.Setenv("KEEP_OUTBOX_POLL_INTERVAL", "")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.OutboxPollInterval != config.DefaultOutboxPollInterval {
+		t.Errorf("OutboxPollInterval default = %v, want %v", cfg.OutboxPollInterval, config.DefaultOutboxPollInterval)
+	}
+}
+
+func TestLoad_OutboxPollIntervalOverride(t *testing.T) {
+	setTokenEnv(t)
+	t.Setenv("KEEP_DATABASE_URL", fakeDSN)
+	t.Setenv("KEEP_OUTBOX_POLL_INTERVAL", "5s")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.OutboxPollInterval != 5*time.Second {
+		t.Errorf("OutboxPollInterval = %v, want 5s", cfg.OutboxPollInterval)
+	}
+}
+
+func TestLoad_OutboxPollIntervalInvalid(t *testing.T) {
+	setTokenEnv(t)
+	t.Setenv("KEEP_DATABASE_URL", fakeDSN)
+
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"not-a-duration", "nope"},
+		{"below-min", "50ms"},
+		{"above-max", "2m"},
+		{"zero", "0s"},
+		{"negative", "-1s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KEEP_OUTBOX_POLL_INTERVAL", tc.raw)
+			if _, err := config.Load(); err == nil {
+				t.Fatalf("Load() returned nil for KEEP_OUTBOX_POLL_INTERVAL=%q", tc.raw)
+			}
+		})
+	}
+}

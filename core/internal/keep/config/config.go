@@ -42,6 +42,13 @@ const (
 	DefaultShutdownTimeout    = 10 * time.Second
 	DefaultSubscribeBuffer    = 64
 	DefaultSubscribeHeartbeat = 15 * time.Second
+	DefaultOutboxPollInterval = 1 * time.Second
+
+	// minOutboxPollInterval and maxOutboxPollInterval bound the
+	// KEEP_OUTBOX_POLL_INTERVAL env var to prevent accidental DoS (too
+	// short) or pathologically stale events (too long).
+	minOutboxPollInterval = 100 * time.Millisecond
+	maxOutboxPollInterval = 60 * time.Second
 )
 
 // Config holds the Keep service runtime configuration loaded from env.
@@ -67,6 +74,10 @@ type Config struct {
 	// on an idle /v1/subscribe stream. Keeps proxies and the TCP
 	// keepalive engine honest without a constant torrent of traffic.
 	SubscribeHeartbeat time.Duration
+	// OutboxPollInterval is the duration between successive polls of
+	// watchkeeper.outbox for unpublished rows. Corresponds to env var
+	// KEEP_OUTBOX_POLL_INTERVAL (default 1s, min 100ms, max 60s).
+	OutboxPollInterval time.Duration
 }
 
 // Load reads configuration from environment variables, applies defaults for
@@ -84,6 +95,7 @@ func Load() (Config, error) {
 		TokenIssuer:        os.Getenv("KEEP_TOKEN_ISSUER"),
 		SubscribeBuffer:    DefaultSubscribeBuffer,
 		SubscribeHeartbeat: DefaultSubscribeHeartbeat,
+		OutboxPollInterval: DefaultOutboxPollInterval,
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -94,43 +106,17 @@ func Load() (Config, error) {
 		cfg.HTTPAddr = DefaultHTTPAddr
 	}
 
-	if raw := os.Getenv("KEEP_SHUTDOWN_TIMEOUT"); raw != "" {
-		d, err := time.ParseDuration(raw)
-		if err != nil {
-			return Config{}, fmt.Errorf("invalid KEEP_SHUTDOWN_TIMEOUT %q: %w", raw, err)
-		}
-		cfg.ShutdownTimeout = d
+	if err := cfg.applyOptionalDurations(); err != nil {
+		return Config{}, err
 	}
 
-	if raw := os.Getenv("KEEP_SUBSCRIBE_BUFFER"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n <= 0 {
-			return Config{}, fmt.Errorf("invalid KEEP_SUBSCRIBE_BUFFER %q: must be a positive integer", raw)
-		}
-		cfg.SubscribeBuffer = n
+	if err := cfg.applyOptionalInts(); err != nil {
+		return Config{}, err
 	}
 
-	if raw := os.Getenv("KEEP_SUBSCRIBE_HEARTBEAT"); raw != "" {
-		d, err := time.ParseDuration(raw)
-		if err != nil {
-			return Config{}, fmt.Errorf("invalid KEEP_SUBSCRIBE_HEARTBEAT %q: %w", raw, err)
-		}
-		if d <= 0 {
-			return Config{}, fmt.Errorf("invalid KEEP_SUBSCRIBE_HEARTBEAT %q: must be positive", raw)
-		}
-		cfg.SubscribeHeartbeat = d
-	}
-
-	rawKey := os.Getenv("KEEP_TOKEN_SIGNING_KEY")
-	if rawKey == "" {
-		return Config{}, ErrMissingTokenSigningKey
-	}
-	key, err := base64.StdEncoding.DecodeString(rawKey)
+	key, err := loadTokenSigningKey()
 	if err != nil {
-		return Config{}, fmt.Errorf("invalid KEEP_TOKEN_SIGNING_KEY: base64 decode: %w", err)
-	}
-	if len(key) < MinTokenSigningKeyBytes {
-		return Config{}, fmt.Errorf("%w (got %d)", ErrTokenSigningKeyTooShort, len(key))
+		return Config{}, err
 	}
 	cfg.TokenSigningKey = key
 
@@ -139,4 +125,73 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// applyOptionalDurations parses the duration env vars that may override
+// defaults. Extracted to keep Load's cyclomatic complexity within the linter
+// threshold (gocyclo ≤ 15).
+func (c *Config) applyOptionalDurations() error {
+	if raw := os.Getenv("KEEP_SHUTDOWN_TIMEOUT"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("invalid KEEP_SHUTDOWN_TIMEOUT %q: %w", raw, err)
+		}
+		c.ShutdownTimeout = d
+	}
+
+	if raw := os.Getenv("KEEP_SUBSCRIBE_HEARTBEAT"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("invalid KEEP_SUBSCRIBE_HEARTBEAT %q: %w", raw, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("invalid KEEP_SUBSCRIBE_HEARTBEAT %q: must be positive", raw)
+		}
+		c.SubscribeHeartbeat = d
+	}
+
+	if raw := os.Getenv("KEEP_OUTBOX_POLL_INTERVAL"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("invalid KEEP_OUTBOX_POLL_INTERVAL %q: %w", raw, err)
+		}
+		if d < minOutboxPollInterval {
+			return fmt.Errorf("invalid KEEP_OUTBOX_POLL_INTERVAL %q: must be >= %s", raw, minOutboxPollInterval)
+		}
+		if d > maxOutboxPollInterval {
+			return fmt.Errorf("invalid KEEP_OUTBOX_POLL_INTERVAL %q: must be <= %s", raw, maxOutboxPollInterval)
+		}
+		c.OutboxPollInterval = d
+	}
+
+	return nil
+}
+
+// applyOptionalInts parses the integer env vars that may override defaults.
+func (c *Config) applyOptionalInts() error {
+	if raw := os.Getenv("KEEP_SUBSCRIBE_BUFFER"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid KEEP_SUBSCRIBE_BUFFER %q: must be a positive integer", raw)
+		}
+		c.SubscribeBuffer = n
+	}
+	return nil
+}
+
+// loadTokenSigningKey reads KEEP_TOKEN_SIGNING_KEY from the environment,
+// base64-decodes it, and validates its length.
+func loadTokenSigningKey() ([]byte, error) {
+	rawKey := os.Getenv("KEEP_TOKEN_SIGNING_KEY")
+	if rawKey == "" {
+		return nil, ErrMissingTokenSigningKey
+	}
+	key, err := base64.StdEncoding.DecodeString(rawKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid KEEP_TOKEN_SIGNING_KEY: base64 decode: %w", err)
+	}
+	if len(key) < MinTokenSigningKeyBytes {
+		return nil, fmt.Errorf("%w (got %d)", ErrTokenSigningKeyTooShort, len(key))
+	}
+	return key, nil
 }
