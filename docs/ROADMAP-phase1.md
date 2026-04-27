@@ -164,6 +164,10 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
     - [x] **M2.7.e.a** Add subscribe streaming endpoint with in-process publish API and fan-out registry
     - [x] **M2.7.e.b** Add outbox publisher worker consuming outbox table into subscribe publish API
 - [ ] **M2.8** Go client package `keepclient` used by core and by harness (no direct DB access from either).
+  - [ ] **M2.8.a** keepclient package skeleton: HTTP transport, options, typed errors, capability-token injection, and health check.
+  - [ ] **M2.8.b** keepclient read endpoints: Search, GetManifest, LogTail with typed models and contract tests.
+  - [ ] **M2.8.c** keepclient write endpoints: Store, LogAppend, PutManifestVersion with typed models and contract tests.
+  - [ ] **M2.8.d** keepclient Subscribe SSE streaming method with reconnect/dedup hooks and contract tests.
 - [ ] **M2.9** Manifest schema fields added: `personality` (free-text) and `language` (ISO code).
   - [ ] **M2.9.a** Manifest `personality`/`language` constraints, validation, and docs (columns already landed with M2.1.a).
 
