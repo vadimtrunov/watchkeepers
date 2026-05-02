@@ -3,12 +3,14 @@ package keepclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestGetManifest_Success asserts the happy round-trip: a 200 with the full
@@ -201,5 +203,103 @@ func TestGetManifest_PathEscaping(t *testing.T) {
 	}
 	if rawQuery != "" {
 		t.Errorf("query = %q; want empty (smuggled query escaped into path)", rawQuery)
+	}
+}
+
+// TestGetManifest_StatusMappings exhaustively asserts that every documented
+// status code surfaces as the corresponding sentinel via errors.Is.
+func TestGetManifest_StatusMappings(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		status  int
+		wantErr error
+	}{
+		{"400", 400, ErrInvalidRequest},
+		{"401", 401, ErrUnauthorized},
+		{"403", 403, ErrForbidden},
+		{"404", 404, ErrNotFound},
+		{"500", 500, ErrInternal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = fmt.Fprintf(w, `{"error":"err_%d"}`, tc.status)
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+			_, err := c.GetManifest(context.Background(), "some-id")
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("errors.Is(err, %v) = false; err = %v", tc.wantErr, err)
+			}
+			var se *ServerError
+			if !errors.As(err, &se) || se.Status != tc.status {
+				t.Errorf("ServerError.Status = %v, want %d (err=%v)", se, tc.status, err)
+			}
+		})
+	}
+}
+
+// TestGetManifest_TransportError asserts that a transport-level failure
+// (server closed before request) surfaces as a wrapped error, not a *ServerError.
+func TestGetManifest_TransportError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	c := NewClient(WithBaseURL(url), WithTokenSource(StaticToken("t")))
+	_, err := c.GetManifest(context.Background(), "some-id")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var se *ServerError
+	if errors.As(err, &se) {
+		t.Errorf("transport error must not be a *ServerError; got %v", err)
+	}
+}
+
+// TestGetManifest_ContextCancellation asserts that a cancelled context aborts
+// the in-flight request and the resulting error wraps context.Canceled. The
+// handler stalls on a per-test "release" channel so the cleanup path lets the
+// server return promptly even if the client's connection-close races the
+// server-side request context.
+func TestGetManifest_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	_, err := c.GetManifest(ctx, "some-id")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false; err = %v", err)
 	}
 }

@@ -3,11 +3,13 @@ package keepclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestLogTail_Success asserts the happy round-trip with one row carrying
@@ -219,7 +221,8 @@ func TestLogTail_NoTokenSource(t *testing.T) {
 	}
 }
 
-// TestLogTail_StatusMappings verifies each documented status -> sentinel.
+// TestLogTail_StatusMappings exhaustively asserts that every documented status
+// code surfaces as the corresponding sentinel via errors.Is.
 func TestLogTail_StatusMappings(t *testing.T) {
 	t.Parallel()
 
@@ -228,8 +231,10 @@ func TestLogTail_StatusMappings(t *testing.T) {
 		status  int
 		wantErr error
 	}{
+		{"400", 400, ErrInvalidRequest},
 		{"401", 401, ErrUnauthorized},
 		{"403", 403, ErrForbidden},
+		{"404", 404, ErrNotFound},
 		{"500", 500, ErrInternal},
 	}
 	for _, tc := range cases {
@@ -239,19 +244,77 @@ func TestLogTail_StatusMappings(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(tc.status)
-				_, _ = io.WriteString(w, `{"error":"x"}`)
+				_, _ = fmt.Fprintf(w, `{"error":"err_%d"}`, tc.status)
 			}))
 			t.Cleanup(srv.Close)
 
 			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
 			_, err := c.LogTail(context.Background(), LogTailOptions{})
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
 			if !errors.Is(err, tc.wantErr) {
 				t.Errorf("errors.Is(err, %v) = false; err = %v", tc.wantErr, err)
 			}
 			var se *ServerError
 			if !errors.As(err, &se) || se.Status != tc.status {
-				t.Errorf("ServerError.Status = %v, want %d", se, tc.status)
+				t.Errorf("ServerError.Status = %v, want %d (err=%v)", se, tc.status, err)
 			}
 		})
+	}
+}
+
+// TestLogTail_TransportError asserts that a transport-level failure (server
+// closed before request) surfaces as a wrapped error, not a *ServerError.
+func TestLogTail_TransportError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	c := NewClient(WithBaseURL(url), WithTokenSource(StaticToken("t")))
+	_, err := c.LogTail(context.Background(), LogTailOptions{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var se *ServerError
+	if errors.As(err, &se) {
+		t.Errorf("transport error must not be a *ServerError; got %v", err)
+	}
+}
+
+// TestLogTail_ContextCancellation asserts that a cancelled context aborts the
+// in-flight request and the resulting error wraps context.Canceled. The
+// handler stalls on a per-test "release" channel so the cleanup path lets the
+// server return promptly even if the client's connection-close races the
+// server-side request context.
+func TestLogTail_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	_, err := c.LogTail(ctx, LogTailOptions{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false; err = %v", err)
 	}
 }
