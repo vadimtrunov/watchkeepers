@@ -384,3 +384,27 @@ Bootstrapped the `keepclient` package under `core/pkg/keepclient/` as the first 
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.8 → M2.8.a
 
 ---
+
+## 2026-05-02 — M2.8.b: keepclient read endpoints (Search, GetManifest, LogTail)
+
+**PR**: [#14](https://github.com/vadimtrunov/watchkeepers/pull/14)
+**Merged**: 2026-05-02 19:11
+
+### Context
+
+Extended `core/pkg/keepclient/` with three typed read methods (Search, GetManifest, LogTail) that wrap stable server-side endpoints. Each method reuses the M2.8.a transport helper `do()`, which abstracts token injection, error mapping, and JSON marshalling. Adds unit tests against `httptest.Server` for contract surface (auth, query-string assembly, status mapping, JSON shape) and integration smoke test against the real Keep binary.
+
+### Pattern
+
+**TDD round per endpoint sharing transport plumbing**: Search, GetManifest, LogTail were structurally near-duplicates because `do(ctx, method, path, body, out)` absorbed all cross-cutting concerns. Each endpoint was ~60 LOC of typed models + a one-liner `do` call. Future M2.8.c/d should follow this layout.
+
+**Per-method test matrices for status-code coverage**: Reviewer flagged AC5 gap: GetManifest and LogTail lacked full 400/500/context-cancel/transport-error sentinel cases per method. The fix is mechanical (table-driven `errors.As` + `errors.Is`), but critical: when an AC says "(per method)", every method needs the full matrix.
+
+**Server JSON shape mirroring via JSON tags**: Client types (SearchResult, ManifestVersion, LogEvent) mirror server handlers verbatim — field names, `omitempty`, `*string` for nullable cols, `json.RawMessage` for jsonb. Keeping field-name correspondence at the JSON tag level avoids a translation layer and reduces shape divergence risk.
+
+### References
+
+- Files: `core/pkg/keepclient/{read_search,read_manifest,read_logtail}*.go`, `core/cmd/keep/keepclient_read_smoke_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.8 → M2.8.b
+
+---

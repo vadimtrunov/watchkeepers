@@ -416,3 +416,32 @@ Phase 4 converged on iteration 1 (0 blocker, 0 important, 3 nits) — scope disc
 - Total wall time from /rdd to merge: ~5 days (2026-04-27 → 2026-05-02; mostly elapsed clock time, not active work)
 
 ---
+
+## 2026-05-02 — M2.8.b: keepclient read endpoints (Search, GetManifest, LogTail)
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/14
+**Phases with incidents**: 6
+
+### What worked
+
+Planner's "fits one PR" heuristic was correct — the three methods shared the M2.8.a transport plumbing tightly, making one cohesive unit. Phase 3 executor (opus, build) delivered all 7 ACs green in 4 commits (~1290 lines) with strong test coverage (115s keep-integration-test, all checks passing). Phase 4 iteration 1 surfaced 4 important items (all AC5 per-method sentinel gaps in GetManifest/LogTail); fixer resolved all in one commit. Iteration 2 converged cleanly (0 blocker/important). Phase 5 & 6 benefited from M2.8.a precedent: PR title `feat(keep): add keepclient read endpoints (M2.8.b)` passed commitlint on first attempt (conventional-commits pattern established in M2.8.a FEEDBACK).
+
+### What wasted effort
+
+**PR-title commitlint retrigger issue (Phase 6 iteration 1)**: PR title `M2.8.b: keepclient read endpoints` was initially non-conventional, flagged by Meta CI. Operator renamed via `gh pr edit` to conventional form. However, `gh run rerun --failed` replayed the cached event payload (still old title), requiring `gh pr close && gh pr reopen` to fire a fresh `pull_request: reopened` event with the new title. This is not a skill process failure (M2.8.a FEEDBACK had documented the fix) but a gotcha that recurred because the bounded-loop polling does not surface event-payload staleness as a distinct signal — it only sees "CI still failing" and advises retry without distinguishing "title still old" from "code still broken".
+
+**Preflight Check 3 EMU auth caveat (Phase 7)**: Same as M2.8.a — the active `gh` account at merge time was EMU and lacked write scope, requiring operator account-switch. The M2.8.a FEEDBACK suggestion to tighten Preflight Check 3 has not yet been implemented, so the same friction recurred.
+
+### Suggested skill changes
+
+- In `references/bounded-loop.md` §"Phase 6 polling", add a clause: "when a commitlint-title failure is the sole remaining blocker, validate that the title edit persisted via `gh pr view` before retrying CI. If `gh pr view --json title` still shows the old form, use `gh pr close && gh pr reopen` instead of `gh run rerun`."
+- Promote the Preflight Check 3 tightening from M2.8.a FEEDBACK into the actual `references/preflight.md` Check 3 implementation — explicitly verify the active `gh auth` account and warn on EMU mismatch.
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 2
+- Operator interventions outside of gates: 2 (PR title rename confirmation; auth-account switch)
+- Total wall time from /rdd to merge: approx 5–6 hours
+
+---
