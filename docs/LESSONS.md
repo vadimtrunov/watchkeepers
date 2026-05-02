@@ -362,3 +362,25 @@ Docstring claim of "exactly-once delivery via stamp-in-txn" is wrong. Stamping a
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.7 → M2.7.e → M2.7.e.b
 
 ---
+
+## 2026-05-02 — M2.8.a: keepclient package skeleton
+
+**PR**: [#13](https://github.com/vadimtrunov/watchkeepers/pull/13)
+**Merged**: 2026-05-02 12:00
+
+### Context
+
+Bootstrapped the `keepclient` package under `core/pkg/keepclient/` as the first reusable Go client for the Keep service. Established the transport plumbing (functional options, context-aware request helper, token injection, error mapping) and exercised it via the `Health(ctx)` endpoint — an open route requiring no authentication. Sets the canonical client shape for future M2.8.b/c/d business-endpoint slices.
+
+### Pattern
+
+**Functional-options + lowercase `do(ctx, method, path, body, out)` helper as canonical client shape**: `NewClient(opts ...Option)` accepts `WithBaseURL(url)`, `WithHTTPClient(client)`, `WithTokenSource(source)`, and `WithLogger(func)` via closures that mutate a `clientConfig`. The internal `do` helper marshals request JSON, injects `Authorization: Bearer <token>` only on paths prefixed `/v1/` (leaving open routes like Health clean), decodes response JSON, and parses server error envelopes to a typed `ServerError` whose `Unwrap()` returns a sentinel (`ErrUnauthorized`, `ErrForbidden`, etc.) for `errors.Is` pattern matching. This shape (conditional auth injection + sentinel errors) reused in M2.8.b/c/d.
+
+**Smoke contract test pattern**: `core/cmd/keep/keepclient_smoke_test.go` boots the real Keep binary (reusing the `KEEP_INTEGRATION_DB_URL` gate from other integration tests) and constructs a client against it, verifying end-to-end Health call succeeds. Isolates the transport contract from unit tests (which use `httptest.Server`) and upstream client-library shape from server implementation.
+
+### References
+
+- Files: `core/pkg/keepclient/{client,do,errors,tokensource}.go`, `core/pkg/keepclient/client_test.go`, `core/cmd/keep/keepclient_smoke_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.8 → M2.8.a
+
+---

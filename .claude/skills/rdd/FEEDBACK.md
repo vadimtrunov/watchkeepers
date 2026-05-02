@@ -390,3 +390,29 @@ Bounded loop's severity contract held tight: both unresolved CodeRabbit comments
 - Total wall time from /rdd to merge: ~2 hours
 
 ---
+
+## 2026-05-02 — M2.8.a: keepclient package skeleton
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/13
+**Phases with incidents**: 7
+
+### What worked
+
+Phase 4 converged on iteration 1 (0 blocker, 0 important, 3 nits) — scope discipline held tight, executor delivered all 8 ACs + 10 test-plan cases in one pass with 87.6% coverage. Phase 6 converged on iteration 1 (all 9 CI checks green on first push, CodeRabbit posted 2 nits matched severity contract). Reuse of the commitlint LESSON from M2.7.e.b (applying conventional-commits title pattern upfront) eliminated Phase 5 friction entirely — PR title `feat(keep): add keepclient package skeleton (M2.8.a)` passed Meta CI on first attempt.
+
+### What wasted effort
+
+**Phase 7 operator intervention outside gates**: Initial merge attempt via `gh pr merge 13 --squash --delete-branch` failed because the active `gh` account (`vadym-trunov_wbt`, EMU) lacked write access to the repository. Operator had to diagnose, switch to the correct account (`vadimtrunov`), and retry. The Preflight checks do not surface the active vs. required GitHub account distinction when an organization uses EMU, leaving the mismatch invisible until merge time.
+
+### Suggested skill changes
+
+- Update Preflight Check 3 (`gh` CLI readiness) to explicitly verify that the active `gh auth` account (`gh auth status --hostname github.com | grep "Logged in"`) matches the repository's owner or org (inferred from `gh repo view --json owner`). If mismatch detected and the repo is under an organization using EMU, emit a loud warning: "Active account `<active>` is not a member of `<org>`; if write-blocked at merge, use `gh auth switch` to select the correct account."
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 1 (EMU account mismatch at Phase 7)
+- Total wall time from /rdd to merge: ~5 days (2026-04-27 → 2026-05-02; mostly elapsed clock time, not active work)
+
+---
