@@ -691,3 +691,30 @@ Reviewer flagged 5 nits — same "low bar for nits" pattern observed on M2b.2.b 
 - Total wall time from /rdd to merge: ~30 min
 
 ---
+
+## 2026-05-03 — M2b.4: Notebook ArchiveOnRetire shutdown helper
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/24
+**Phases with incidents**: 4 (1 important fixer iter)
+
+### What worked
+
+Reviewer caught a real goroutine leak that would have shipped silently. The leak doesn't trigger in tests (fakeStore drains via `io.Copy`) and only surfaces in production with a real S3/LocalFS that fails before reading. Reviewer-as-design-pressure pattern paid off. The reviewer ALSO caught the test masking the leak (Issue #2) — catching both the production defect and the test fragility together is the gold standard. Converter truncation guard from prior FEEDBACK entries still holding — executor delivered full structured report before exit.
+
+### What wasted effort
+
+The TS-vs-Go harness structural ambiguity was caught at planner time, but only as a "decompose to library helper, defer harness wiring" workaround. The underlying question — should we build a Go harness or shell out from TypeScript? — is still unanswered. Future M2b.4-successor TASKs will hit this again. No process waste, but a reminder that deferring structural decisions at Gate 1 postpones rather than resolves the ambiguity.
+
+### Suggested skill changes
+
+- Promote a generic LESSON pattern to `SKILL.md`: "when a planner decomposes around a structural ambiguity (e.g. language gap, layering issue), open a follow-up TASK in the BACKLOG that names the ambiguity explicitly so it doesn't get forgotten when the deferred work re-surfaces."
+- Add to `references/agent-briefs/code-reviewer.md` an explicit `io.Pipe` checklist item: "any code using `io.Pipe` must verify that BOTH sides can unblock each other on failure; the test for the consumer-failure path must use a fake that fails BEFORE consuming." This would have caught Issue #1+#2 on iter 0 (or led the executor to write the correct test the first time).
+
+### Metrics
+
+- Review iterations: 2 (iter 1: 0/2/3; iter 2: converged)
+- PR-fix iterations: 0 (CI green on first push)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~50 min
+
+---

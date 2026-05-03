@@ -657,3 +657,27 @@ Implemented the S3Compatible backend for ArchiveStore using minio-go/v7 and test
 - Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.3 (now `[x]`). **M2b.4 onward** (Archive on retire / Periodic backup / Import / Audit-log) plug into the stable ArchiveStore interface.
 
 ---
+
+## 2026-05-03 — M2b.4: Notebook ArchiveOnRetire shutdown helper
+
+**PR**: [#24](https://github.com/vadimtrunov/watchkeepers/pull/24)
+**Merged**: 2026-05-03 (squash commit `6028b53`)
+
+### Context
+
+Implemented `notebook.ArchiveOnRetire` as a blocking orchestrator that chains Archive→Put→LogAppend during graceful shutdown. Three integration paths existed (literal `archivestore.ArchiveStore`, interface-based bridge, defer to caller). Planner decomposed to a library helper (this TASK) with harness-wiring deferred to M2b.4-successor. Phase 3 executor delivered 1 commit (+675 LOC, 8 tests). Phase 4 iter 1 surfaced 2 important items (real goroutine leak on producer-side unblock failure; test masking the leak via `io.Copy`-before-error). Fixer resolved both in 1 commit; Phase 4 iter 2 converged.
+
+### Pattern
+
+**`io.Pipe` Archive→Put bidirectional unblock required**: Streaming a producer into a consumer via `io.Pipe` works only if BOTH sides can unblock each other on failure. Producer side (Archive goroutine writing): if consumer aborts early, the next `pw.Write` blocks forever. Fix: after consumer's `Put(ctx, agentID, pr)` returns with non-nil error, call `pr.CloseWithError(putErr)` from the main goroutine BEFORE draining the producer error channel. Without this, real ArchiveStore impls (S3 auth failure, ECONNREFUSED before reading) leak the producer goroutine. Pattern: any `io.Pipe`-based streaming must terminate the producer explicitly on consumer failure, not just on context cancellation.
+
+**Test fakes that drain before checking error mask producer-blocking bugs**: `fakeStore.Put` doing `io.Copy(&buf, src)` BEFORE checking injected error makes the test pass for the wrong reason — the pipe was fully drained, so the producer completed naturally. Real impls fail BEFORE reading. Pattern: when testing `(consumer, producer)` via `io.Pipe`, the fake consumer MUST fail without consuming. Add a `failBeforeRead bool` flag; test the early-fail path.
+
+**Local interface to break import cycles**: M2b.4 was specced to take `archivestore.ArchiveStore`, but `archivestore/*_test.go` imports `notebook` for round-trips. Adopting `archivestore.ArchiveStore` in the consumer would cycle in the test build. Solution: define a local interface in the consumer (`notebook.Storer { Put(ctx, agentID, io.Reader) (string, error) }`). Go's structural typing lets concrete `archivestore` impls satisfy it without changes. Pattern: when a downstream package needs a type from an upstream package whose tests depend on the downstream, define a local interface and let structural typing bridge.
+
+### References
+
+- Files: `core/pkg/notebook/{archive_on_retire,archive_on_retire_test}.go`, `core/pkg/notebook/README.md`
+- Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.4. **Future M2b.4-successor** wires this helper into the actual harness once TS-vs-Go ambiguity is resolved.
+
+---
