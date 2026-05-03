@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"unicode/utf8"
 )
 
 // uuidPattern matches the canonical RFC 4122 text form (8-4-4-4-12 hex with
@@ -15,6 +16,21 @@ import (
 //
 //nolint:gochecknoglobals // intentional package-scoped precompiled regex.
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// clientLanguagePattern mirrors the server-side `languagePattern` (and the
+// SQL CHECK from migration 010) used for [PutManifestVersionRequest.Language]:
+// 2-3 lowercase letters (ISO 639-1/-3) optionally followed by a 2-letter
+// uppercase ISO 3166-1 region. Rejecting client-side spares a network
+// round-trip on the obvious malformed shapes ("english", "EN", "en-us").
+//
+//nolint:gochecknoglobals // intentional package-scoped precompiled regex.
+var clientLanguagePattern = regexp.MustCompile(`^[a-z]{2,3}(-[A-Z]{2})?$`)
+
+// clientPersonalityMaxRunes mirrors the server-side
+// `manifestPersonalityMaxRunes` cap and the SQL `char_length(personality)
+// <= 1024` CHECK from migration 010. Counted in Unicode codepoints so a
+// CJK / accented-Latin payload cannot smuggle past a byte-based cap.
+const clientPersonalityMaxRunes = 1024
 
 // PutManifestVersionRequest is the typed request body for
 // [Client.PutManifestVersion]. Field names and `omitempty` placement mirror
@@ -39,11 +55,15 @@ type PutManifestVersionRequest struct {
 	// KnowledgeSources is the jsonb knowledge_sources column. Optional —
 	// `omitempty` so the server's default ('[]'::jsonb) fires when absent.
 	KnowledgeSources json.RawMessage `json:"knowledge_sources,omitempty"`
-	// Personality is the optional personality text. `omitempty` so an
-	// empty string round-trips to SQL NULL on the server.
+	// Personality is the optional free-text personality. Capped at 1024
+	// Unicode codepoints (matching SQL char_length semantics). Server and
+	// DB CHECK constraint (migration 010) enforce the same cap.
 	Personality string `json:"personality,omitempty"`
-	// Language is the optional language code. `omitempty` so an empty
-	// string round-trips to SQL NULL on the server.
+	// Language is the optional language code. When non-empty, it must
+	// match BCP 47-lite shape `<lang>(-<REGION>)?`: 2-3 lowercase letters
+	// for ISO 639-1/-3, optionally followed by a 2-letter ISO 3166-1
+	// uppercase region (e.g. "en", "en-US", "pt-BR", "kab"). Server and
+	// DB CHECK constraint (migration 010) enforce the same regex.
 	Language string `json:"language,omitempty"`
 }
 
@@ -69,6 +89,18 @@ func (c *Client) PutManifestVersion(ctx context.Context, manifestID string, req 
 		return nil, ErrInvalidRequest
 	}
 	if req.VersionNo <= 0 || req.SystemPrompt == "" {
+		return nil, ErrInvalidRequest
+	}
+	// Symmetric with parsePutManifestVersionRequest on the server: an
+	// empty Language is allowed (round-trips as SQL NULL); a non-empty
+	// value must match the BCP 47-lite shape. Personality is capped at
+	// 1024 Unicode codepoints (utf8.RuneCountInString, not len) to mirror
+	// SQL char_length semantics. Both checks short-circuit before any
+	// network hit.
+	if req.Language != "" && !clientLanguagePattern.MatchString(req.Language) {
+		return nil, ErrInvalidRequest
+	}
+	if utf8.RuneCountInString(req.Personality) > clientPersonalityMaxRunes {
 		return nil, ErrInvalidRequest
 	}
 	var out PutManifestVersionResponse

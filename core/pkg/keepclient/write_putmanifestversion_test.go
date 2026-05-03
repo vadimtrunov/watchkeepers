@@ -252,6 +252,14 @@ func TestPutManifestVersion_PreflightValidation(t *testing.T) {
 		{"zero_version_no", validManifestID, PutManifestVersionRequest{VersionNo: 0, SystemPrompt: "sp"}},
 		{"negative_version_no", validManifestID, PutManifestVersionRequest{VersionNo: -1, SystemPrompt: "sp"}},
 		{"empty_system_prompt", validManifestID, PutManifestVersionRequest{VersionNo: 1, SystemPrompt: ""}},
+		{
+			"invalid_language", validManifestID,
+			PutManifestVersionRequest{VersionNo: 1, SystemPrompt: "sp", Language: "english"},
+		},
+		{
+			"personality_too_long", validManifestID,
+			PutManifestVersionRequest{VersionNo: 1, SystemPrompt: "sp", Personality: strings.Repeat("a", 1025)},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

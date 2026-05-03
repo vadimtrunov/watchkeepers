@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -36,6 +37,25 @@ const knowledgeChunkEmbeddingDim = 1536
 //
 //nolint:gochecknoglobals // intentional module-scoped precompiled regex.
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// languagePattern enforces the BCP 47-lite shape accepted for the
+// manifest_version.language column: 2-3 lowercase letters (ISO 639-1/-3),
+// optionally followed by a 2-letter uppercase ISO 3166-1 region (e.g. "en",
+// "en-US", "pt-BR", "kab", "eng"). Mirrored at the SQL layer by the
+// `manifest_version_language_format` CHECK constraint (migration 010); the
+// server-side check returns a stable 400 reason code before Postgres
+// surfaces a `23514` check_violation.
+//
+//nolint:gochecknoglobals // intentional module-scoped precompiled regex.
+var languagePattern = regexp.MustCompile(`^[a-z]{2,3}(-[A-Z]{2})?$`)
+
+// manifestPersonalityMaxRunes is the per-row cap on the
+// manifest_version.personality column expressed in Unicode codepoints, to
+// match SQL `char_length` semantics enforced by the
+// `manifest_version_personality_length` CHECK constraint (migration 010).
+// `len(s)` would count bytes — multi-byte runes (e.g. CJK, accented Latin)
+// would slip past a byte-based cap and only fail at the DB.
+const manifestPersonalityMaxRunes = 1024
 
 // -----------------------------------------------------------------------
 // POST /v1/knowledge-chunks — handleStore
@@ -331,6 +351,22 @@ func parsePutManifestVersionRequest(w http.ResponseWriter, req *http.Request) (p
 	}
 	if body.SystemPrompt == "" {
 		writeError(w, http.StatusBadRequest, "missing_system_prompt")
+		return body, false
+	}
+	// Symmetric with the SQL CHECK from migration 010: an empty Language
+	// round-trips as SQL NULL (allowed); a non-empty value must match the
+	// BCP 47-lite shape. Reject before the row hits Postgres so the caller
+	// gets a stable `invalid_language` reason instead of an opaque 500.
+	if body.Language != "" && !languagePattern.MatchString(body.Language) {
+		writeError(w, http.StatusBadRequest, "invalid_language")
+		return body, false
+	}
+	// Mirror the SQL `char_length(personality) <= 1024` cap. Use
+	// utf8.RuneCountInString — `len(body.Personality)` counts bytes and
+	// would let a 1024-rune CJK / accented-Latin payload (each rune up to
+	// 4 bytes) bypass the cap on the wire only to fail later at Postgres.
+	if utf8.RuneCountInString(body.Personality) > manifestPersonalityMaxRunes {
+		writeError(w, http.StatusBadRequest, "personality_too_long")
 		return body, false
 	}
 	return body, true

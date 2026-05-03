@@ -772,6 +772,87 @@ func TestLogAppend_ValidCorrelationID(t *testing.T) {
 	}
 }
 
+// TestPutManifestVersion_InvalidLanguage — a non-empty `language` body field
+// that does not match the BCP 47-lite regex must be rejected with 400
+// invalid_language before the row reaches Postgres. Mirrors the SQL
+// `manifest_version_language_format` CHECK from migration 010.
+func TestPutManifestVersion_InvalidLanguage(t *testing.T) {
+	cases := []struct {
+		name, language string
+	}{
+		{"too_long", "english"},
+		{"uppercase", "EN"},
+		{"region_lowercase", "en-us"},
+		{"region_too_long", "en-USA"},
+		{"digits", "123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &server.FakeScopedRunner{}
+			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+			tok := mustMintToken(t, ti, "org")
+
+			rec := writeDo(t, h, http.MethodPut,
+				"/v1/manifests/cccccccc-cccc-4ccc-8ccc-cccccccccccc/versions",
+				tok, map[string]any{
+					"version_no":    1,
+					"system_prompt": "ok",
+					"language":      tc.language,
+				}, "")
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if runner.FnInvoked {
+				t.Error("runner was invoked; expected rejection before tx")
+			}
+			var env struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if env.Error != "invalid_language" {
+				t.Errorf("error = %q, want invalid_language", env.Error)
+			}
+		})
+	}
+}
+
+// TestPutManifestVersion_PersonalityTooLong — a personality longer than
+// 1024 Unicode codepoints must be rejected with 400 personality_too_long
+// before the row reaches Postgres. Mirrors the SQL
+// `manifest_version_personality_length` CHECK from migration 010.
+func TestPutManifestVersion_PersonalityTooLong(t *testing.T) {
+	runner := &server.FakeScopedRunner{}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/cccccccc-cccc-4ccc-8ccc-cccccccccccc/versions",
+		tok, map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+			"personality":   strings.Repeat("a", 1025),
+		}, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked; expected rejection before tx")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "personality_too_long" {
+		t.Errorf("error = %q, want personality_too_long", env.Error)
+	}
+}
+
 // TestPutManifestVersion_InvalidManifestID — a malformed manifest_id path
 // segment must be rejected with 400 invalid_manifest_id before the body is
 // decoded or the runner is called.

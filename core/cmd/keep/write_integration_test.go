@@ -683,6 +683,129 @@ func TestWriteAPI_ConcurrentScopeIsolation(t *testing.T) {
 // Regression
 // -----------------------------------------------------------------------
 
+// TestWriteAPI_PutManifestVersion_LanguageBCP47Variants — every accepted
+// BCP 47-lite shape (`en`, `en-US`, `eng`, `pt-BR`) plus the all-NULL case
+// inserts cleanly under the migration 010 CHECK constraint. Each created
+// manifest_version row is removed via t.Cleanup so the seed stays stable.
+func TestWriteAPI_PutManifestVersion_LanguageBCP47Variants(t *testing.T) {
+	env := newTestEnv(t)
+	addr, teardown := bootKeep(t, env)
+	defer teardown()
+
+	ti := issuerForTest(t)
+	tok := mintToken(t, ti, "org")
+
+	// Each variant gets a distinct version_no above the seed (1 and 2) so
+	// the inserts never collide on the unique (manifest_id, version_no)
+	// index. The "null" case asserts the empty-string round-trips as SQL
+	// NULL (the existing happy path) under the new constraints.
+	cases := []struct {
+		name      string
+		versionNo int
+		language  string
+	}{
+		{"en", 100, "en"},
+		{"en_us", 101, "en-US"},
+		{"eng", 102, "eng"},
+		{"pt_br", 103, "pt-BR"},
+		{"null", 104, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := doJSON(t, http.MethodPut,
+				"http://"+addr+"/v1/manifests/"+env.manifestID+"/versions", tok,
+				putManifestVersionRequestBody{
+					VersionNo:    tc.versionNo,
+					SystemPrompt: "bcp47 " + tc.name,
+					Language:     tc.language,
+				})
+			if status != http.StatusCreated {
+				t.Fatalf("status = %d, want 201; body = %s", status, body)
+			}
+			var created writeIDResponse
+			if err := json.Unmarshal(body, &created); err != nil {
+				t.Fatalf("decode: %v; body=%s", err, body)
+			}
+			if created.ID == "" {
+				t.Fatalf("empty id; body=%s", body)
+			}
+			id := created.ID
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if _, err := env.pool.Exec(ctx,
+					`DELETE FROM watchkeeper.manifest_version WHERE id = $1::uuid`, id); err != nil {
+					t.Logf("cleanup manifest_version %s: %v", id, err)
+				}
+			})
+		})
+	}
+}
+
+// TestWriteAPI_PutManifestVersion_InvalidLanguage — a `language` field that
+// fails the BCP 47-lite shape (`english`) must surface as 400
+// invalid_language from the handler, never reaching the SQL CHECK as a 500.
+func TestWriteAPI_PutManifestVersion_InvalidLanguage(t *testing.T) {
+	env := newTestEnv(t)
+	addr, teardown := bootKeep(t, env)
+	defer teardown()
+
+	ti := issuerForTest(t)
+	tok := mintToken(t, ti, "org")
+
+	status, body := doJSON(t, http.MethodPut,
+		"http://"+addr+"/v1/manifests/"+env.manifestID+"/versions", tok,
+		putManifestVersionRequestBody{
+			VersionNo:    200,
+			SystemPrompt: "invalid lang",
+			Language:     "english",
+		})
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", status, body)
+	}
+	var envErr struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envErr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if envErr.Error != "invalid_language" {
+		t.Errorf("error = %q, want invalid_language", envErr.Error)
+	}
+}
+
+// TestWriteAPI_PutManifestVersion_PersonalityTooLong — a personality
+// payload exceeding 1024 Unicode codepoints must surface as 400
+// personality_too_long from the handler before hitting the SQL CHECK.
+func TestWriteAPI_PutManifestVersion_PersonalityTooLong(t *testing.T) {
+	env := newTestEnv(t)
+	addr, teardown := bootKeep(t, env)
+	defer teardown()
+
+	ti := issuerForTest(t)
+	tok := mintToken(t, ti, "org")
+
+	status, body := doJSON(t, http.MethodPut,
+		"http://"+addr+"/v1/manifests/"+env.manifestID+"/versions", tok,
+		putManifestVersionRequestBody{
+			VersionNo:    201,
+			SystemPrompt: "personality cap",
+			Personality:  strings.Repeat("a", 1025),
+		})
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", status, body)
+	}
+	var envErr struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envErr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if envErr.Error != "personality_too_long" {
+		t.Errorf("error = %q, want personality_too_long", envErr.Error)
+	}
+}
+
 // TestWriteAPI_HealthStillOpen — adding write routes must not affect
 // /health. Regression guard per the TASK test plan.
 func TestWriteAPI_HealthStillOpen(t *testing.T) {
