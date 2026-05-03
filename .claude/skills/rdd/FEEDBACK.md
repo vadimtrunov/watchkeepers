@@ -499,3 +499,32 @@ Consider documenting the "decomposition at Gate 1" path more prominently in `SKI
 - Total wall time from /rdd to merge: ~25 min
 
 ---
+
+## 2026-05-03 — M2.8.d.b: Subscribe reconnect policy + Last-Event-ID + dedup hooks + integration smoke
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/17
+**Phases with incidents**: 4 (1 important fixer iter), 6 (CI fail + pr-fixer iter)
+
+### What worked
+
+Sleeper-injection seam in the unit tests caught the backoff math without flakes. Bounded-loop.md Phase 6 polling Monitor + GitHub-side severity classifier kept the loop deterministic. Reviewer at iter 1 caught the empty-`id:` clobber that CodeRabbit + executor both missed. Frame-count fixer pattern (Fix A in pr-fixer brief) was a clean drop-in for the bytes-threshold flake.
+
+### What wasted effort
+
+The smoke test's outbox-row leak ONLY surfaced because `TestOutbox_OrgScopeDelivered` decoded our payload — not because we wrote a leak detection. Test isolation should be enforced by the harness, not discovered by accident. Suggest a `t.Cleanup` audit helper or a defer that DELETEs all outbox rows touched in the test (track via a `chan string`/slice).
+
+CodeRabbit's 🟠 Major comment (replacement stream inherits per-call `Next` ctx) is a real semantic bug. The `bounded-loop.md` classifier downgrades all bot comments to `nit`, so it didn't block merge. Worth a SKILL discussion: is "real defect flagged by a bot" still nit?
+
+### Suggested skill changes
+
+- `references/agent-briefs/code-reviewer.md`: add "verify resource-cleanup discipline in test files" — specifically, any test that inserts to a shared schema must register a `t.Cleanup` deletion. Would have caught the outbox leak in iter 1.
+- `references/bounded-loop.md` §"Phase 6 severity recognition": consider promoting CodeRabbit comments tagged `🟠 Major` or `⚠️ Potential issue` to `important` rather than blanket-classifying as `nit`. Trade-off: more iterations vs. shipping known bugs.
+
+### Metrics
+
+- Review iterations: 2 (Phase 4: 1 important + 1 fixer + 1 converge iter)
+- PR-fix iterations: 1 (Phase 6: 1 CI fail + 1 fixer + 1 green re-poll)
+- Operator interventions outside of gates: 1 (orchestrator did Phase 7 merge inline)
+- Total wall time from /rdd to merge: ~50 min
+
+---

@@ -467,3 +467,31 @@ First streaming endpoint in `core/pkg/keepclient/`. Wraps `GET /v1/subscribe` fr
 - Server contract: `core/internal/keep/server/handlers_subscribe.go`
 
 ---
+
+## 2026-05-03 — M2.8.d.b: Subscribe reconnect policy + Last-Event-ID + dedup hooks + integration smoke
+
+**PR**: [#17](https://github.com/vadimtrunov/watchkeepers/pull/17)
+**Merged**: 2026-05-03
+
+### Context
+
+Layered resilience onto the M2.8.d.a streaming primitive: exponential-backoff reconnection on transport EOF or error, `Last-Event-ID` forwarding for dedup (W3C spec-compliant), and caller-supplied or built-in LRU dedup predicate. Entire surface is `(c).SubscribeResilient(ctx, opts...)` returning `*ResilientStream{Next, Close}` — same shape as the inner stream, allowing zero-change caller swap-up.
+
+### Pattern
+
+**Resilient streaming layered on top of an iterator-style primitive**: `*ResilientStream` wraps `*Stream` from M2.8.d.a. Adds reconnect-on-EOF/transport-error with exponential backoff + jitter, `Last-Event-ID` forwarding (forward-compat — server doesn't honor today), caller-supplied dedup predicate or built-in LRU. Entire surface is `(c).SubscribeResilient(ctx, opts...)` returning `*ResilientStream{Next, Close}` — same shape as the inner stream so callers can swap up.
+
+**Sleeper-injection seam for backoff tests**: `type sleeper interface{ Sleep(ctx, d) error }` with a real impl and a `fakeSleeper` recording the requested durations. Backoff sequence assertions (`min(maxDelay, initial*2^n) ± 25%`) verify deterministically without any wall-clock waits. Pattern reusable for any future timer-based code.
+
+**Empty-`id:` SSE frame state-machine bug**: the W3C SSE spec says `last-event-ID` only updates when a frame carried an `id:` field. Naive `s.lastID = ev.ID` clobbers a previously-recorded id with `""` whenever the server emits an id-less frame. Fixed with `if ev.ID != "" { s.lastID = ev.ID }`. Forward-compat critical: the moment the server starts honoring `Last-Event-ID`, this would silently replay events. Keep this guard pattern in mind for any future SSE-state-tracking code.
+
+**Integration-test isolation in shared DB**: smoke tests that publish to `watchkeeper.outbox` MUST clean up their rows in `t.Cleanup`. The publisher worker stamps `published_at` async; if the binary tears down mid-tick (`context canceled`), unstamped rows persist and the NEXT test's worker re-publishes them, polluting unrelated subscriber tests. Pattern: helpers like `publishOutboxEvent` should return the row id; tests call `t.Cleanup(func(){ deleteOutboxRow(t, pool, id) })` for every insert.
+
+**CI-vs-local determinism for transport failure injection**: a custom round-tripper that drops the body after N BYTES is flaky — TCP buffering and small payloads can let everything through in one Read. Drop after N FRAMES (count `\n\n` SSE boundaries) is deterministic regardless of network. Pattern usable for any SSE/chunked-stream test fixture.
+
+### References
+
+- Files: `core/pkg/keepclient/{subscribe_resilient,subscribe_resilient_test}.go`, `core/pkg/keepclient/subscribe.go` (added private `subscribeWithLastEventID`), `core/pkg/keepclient/errors.go` (`+ErrReconnectExhausted`), `core/cmd/keep/keepclient_subscribe_smoke_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.8 → M2.8.d → M2.8.d.b. **M2.8 is now COMPLETE** (cascade); M2 still `[ ]` because M2.9 pending.
+
+---
