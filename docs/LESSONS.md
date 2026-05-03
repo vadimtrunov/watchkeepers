@@ -495,3 +495,31 @@ Layered resilience onto the M2.8.d.a streaming primitive: exponential-backoff re
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.8 → M2.8.d → M2.8.d.b. **M2.8 is now COMPLETE** (cascade); M2 still `[ ]` because M2.9 pending.
 
 ---
+
+## 2026-05-03 — M2.9.a: Manifest personality/language constraints, validation, and docs
+
+**PR**: [#18](https://github.com/vadimtrunov/watchkeepers/pull/18)
+**Merged**: 2026-05-03 (squash commit `847f42c`)
+
+### Context
+
+Added database and API constraints for the manifest `language` and `personality` fields to close the M2 milestone entirely. Migration `010_manifest_constraints.sql` enforces `language` as BCP 47-lite (`^[a-z]{2,3}(-[A-Z]{2})?$`) and `personality` as max 1024 Unicode codepoints via SQL CHECK constraints. Server handler `parsePutManifestVersionRequest` validates symmetrically before the row reaches Postgres. Client `(*Client).PutManifestVersion` pre-validates on the same shape for early feedback.
+
+### Pattern
+
+**Defense-in-depth: regex constraints in BOTH validation layers AND DB**: Server `parsePutManifestVersionRequest` rejects `invalid_language`/`personality_too_long` with stable 400 reason codes BEFORE the row reaches Postgres; the new migration adds matching CHECK constraints (`manifest_version_language_format` for the regex, `manifest_version_personality_length` for `char_length <= 1024`) so a regression in the handler or a non-Keep writer cannot sneak bad data in. Client `(*Client).PutManifestVersion` also pre-validates symmetrically — three validation layers, same regex string constant, same codepoint limit.
+
+**`utf8.RuneCountInString` not `len()` for SQL `char_length` parity**: Postgres `char_length` counts Unicode codepoints, not bytes. Counting bytes via `len(s)` would silently accept a 256-byte 64-glyph personality on the server while the DB would still reject it as 64 chars (passing) — but the bug surfaces the OTHER way: a 1024-rune string of 4-byte chars (4096 bytes) would byte-rejected by the server even though SQL would accept it. Always use `utf8.RuneCountInString` to match Postgres semantics.
+
+**BCP 47-lite for "ISO code" fields**: `^[a-z]{2,3}(-[A-Z]{2})?$` covers ISO 639-1 (`en`), ISO 639-3 (`eng`, `kab`), and optional ISO 3166-1 region (`en-US`, `pt-BR`). Lowercase language + uppercase region is a strict but stable subset; full BCP 47 (script tags, variants, extensions) is over-engineering for a manifest field. Document the regex shape inline (godoc + SQL header comment + migration body) so future readers don't reverse-engineer it.
+
+**Goose migration for adding constraints to existing columns**: `ALTER TABLE ... ADD CONSTRAINT ... CHECK (col IS NULL OR <pred>)` is the canonical shape. Both `IF EXISTS` on `+goose Down` for safe rollback. Constraints fire only on non-NULL values so existing `NULL` rows aren't broken. No `ADD CONSTRAINT NOT VALID` needed because we're confident no bad rows exist (small table, short history).
+
+**Test isolation in shared DB cemented as habit (3rd consecutive PR)**: Integration smoke registers `t.Cleanup(func(){ pool.Exec(... DELETE FROM ... WHERE id = $1 ...) })` for every inserted row. M2.8.d.b LESSONS introduced this pattern; M2.9.a adopted without prompting. Reviewer caught zero violations because the executor brief explicitly cited the LESSONS pattern.
+
+### References
+
+- Files: `deploy/migrations/010_manifest_constraints.sql`, `core/internal/keep/server/handlers_write.go` (+ test), `core/pkg/keepclient/write_putmanifestversion.go` (+ test), `core/cmd/keep/write_integration_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.9 → M2.9.a. **M2 milestone COMPLETE** — Keep service + keepclient + manifest validation done.
+
+---

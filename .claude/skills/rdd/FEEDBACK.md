@@ -528,3 +528,30 @@ CodeRabbit's 🟠 Major comment (replacement stream inherits per-call `Next` ctx
 - Total wall time from /rdd to merge: ~50 min
 
 ---
+
+## 2026-05-03 — M2.9.a: Manifest personality/language constraints, validation, and docs
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/18
+**Phases with incidents**: 3 (executor truncation)
+
+### What worked
+
+Reviewer caught zero issues on first iteration — a sign that the TASK brief was specific enough (chose regex, picked length cap, named the reason codes, cited the M2.8.d.b cleanup pattern) that the executor had no design ambiguity to fumble. Cascade rule from `roadmap-migration.md` §"Cascade at Phase 7" worked exactly as written: M2.9.a → M2.9 → M2 traversal flipped three checkboxes in one commit, with the orchestrator stopping at M2 because that's the deepest ancestor with all-`[x]` children.
+
+### What wasted effort
+
+The first executor session committed only the migration and returned a truncated report mid-implementation: `"Now add the language pattern constant + the validation logic:"` — that's the silent-exit anti-pattern flagged in FEEDBACK 2026-04-22 manifesting in an executor agent rather than the orchestrator. The orchestrator detected the truncation by reading `git log --oneline main..HEAD` and `git diff --stat`, then dispatched a continuation executor with a focused brief. Cost: ~5 minutes of orchestrator self-correction. Could have been worse if the orchestrator had trusted the partial report.
+
+### Suggested skill changes
+
+- In `references/agent-briefs/executor.md`, add a "Truncation guard" section at the bottom: the executor MUST print its full structured report (`COMMITS: ... TEST CMD: ... TEST EXIT CODE: ...`) BEFORE its `Stop` event. If the model is about to hit a token budget and can only print partial content, it should print `INCOMPLETE: <what is left>` so the orchestrator knows to dispatch a continuation. The current brief documents the report format but does not flag truncation as a failure mode worth its own checklist item.
+- Add a "trust-but-verify" line in `SKILL.md` Phase 3: after the executor returns, the orchestrator should ALWAYS run `git log --oneline main..HEAD` and `git diff --stat main...HEAD` before declaring Phase 3 complete, even when the report claims success. This caught M2.9.a truncation but is currently informal.
+
+### Metrics
+
+- Review iterations: 1 (converged immediately)
+- PR-fix iterations: 0 (CI green on first push)
+- Operator interventions outside of gates: 1 (orchestrator detected executor truncation and dispatched continuation)
+- Total wall time from /rdd to merge: ~30 min
+
+---
