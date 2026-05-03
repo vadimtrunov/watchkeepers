@@ -7,9 +7,9 @@ This package owns the on-disk storage layer for an agent's private memory
 `$WATCHKEEPER_DATA/notebook/<agent_id>.sqlite`, applies
 `PRAGMA journal_mode=WAL`, and ensures the schema exists. M2b.2.a adds the
 in-process CRUD surface (`Remember` / `Recall` / `Forget` / `Stats`) on top of
-the substrate. `Archive` / `Import` (snapshot lifecycle) and the audit-log
-write to Keeper's Log remain out of scope and are deferred to M2b.2.b and
-M2b.7 respectively.
+the substrate; M2b.2.b layers the snapshot lifecycle (`Archive` / `Import`)
+on top of that. The audit-log write to Keeper's Log remains out of scope
+(deferred to M2b.7).
 
 ## Public API
 
@@ -28,6 +28,51 @@ Sentinel errors live in `errors.go`:
 - `ErrInvalidEntry` — bad shape (empty content, wrong embedding dim, bad
   category, non-canonical UUID).
 - `ErrNotFound` — `Forget` called against a missing id.
+- `ErrCorruptArchive` — `Import` was given a payload that fails the
+  SQLite-header / required-schema check.
+- `ErrTargetNotEmpty` — `Import` was called against a live DB that still
+  has at least one row in `entry`.
+
+## Snapshot lifecycle
+
+M2b.2.b adds the snapshot half of the substrate on top of the M2b.2.a CRUD
+surface:
+
+| Method                             | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                              | AC      |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `Archive(ctx, w io.Writer) error`  | Run SQLite's native `VACUUM INTO <tempfile>` against a temp file under `os.TempDir()`, then stream the bytes to `w`. Read-only with respect to the live `*DB` — concurrent reads/writes during Archive are safe. An empty agent still produces a valid snapshot (the schema rides along).                                                                                                                                                            | AC1     |
+| `Import(ctx, src io.Reader) error` | Spool `src` to a hidden `.notebook-import-*.sqlite` file in the SAME directory as `agentDBPath(...)` (so `os.Rename` does not cross filesystems on POSIX), validate via the SQLite magic header + the required `entry`/`entry_vec` tables and the two partial indexes, refuse on a non-empty target, then close + rename + reopen. The receiver's internal `*sql.DB` is swapped in place so existing callers see the imported data on the next call. | AC2/AC4 |
+
+`Import` is **strict**: when the live `entry` table has any rows it returns
+`ErrTargetNotEmpty` without touching the on-disk file. Callers wanting an
+overwrite-with-archive flow should layer `Archive` + Forget-all + `Import`
+themselves; M2b.6's CLI may add a `--force` flag for this, but the substrate
+itself never drops live data.
+
+`Import` validation failures wrap `ErrCorruptArchive`. The validator
+checks the SQLite file-format magic header (`"SQLite format 3\x00"`) plus
+the presence of every object the package emits during `openAt`: the
+`entry` table, the `entry_vec` virtual table (which appears in
+`sqlite_schema` with `type = 'table'`), and the two partial indexes
+(`entry_category_active`, `entry_active_after`). A snapshot taken from an
+older binary that pre-dates the partial indexes is therefore rejected as
+corrupt rather than transparently re-created — callers should re-archive
+under the current binary before importing.
+
+### Concurrency contract
+
+`Import` takes a per-receiver `sync.Mutex` for the duration of the call
+and closes + reopens the underlying `*sql.DB` in the middle. Callers MUST
+NOT invoke other `*DB` methods concurrently with an Import on the same
+receiver: a Recall in flight would race the connection swap. After Import
+returns successfully the receiver is fully usable on the new file.
+
+### ArchiveStore handoff
+
+Both methods deliberately speak in `io.Reader` / `io.Writer` so the
+package stays storage-agnostic. M2b.3 wraps Archive/Import with an
+`ArchiveStore` interface and LocalFS / S3 backends; this package will
+provide the bytes either direction without knowing where they end up.
 
 Two partial indexes back the hot read paths and are added by the idempotent
 schema-init (AC5):
@@ -123,7 +168,7 @@ the same UID lets each read every other notebook in the same data dir.
 
 ## Out of scope (still deferred)
 
-- `Archive` / `Import` snapshot lifecycle — see M2b.2.b.
-- ArchiveStore for retired entries — see M2b.3.
+- ArchiveStore wrappers (LocalFS / S3 backends) over `Archive` / `Import` —
+  see M2b.3.
 - Audit-log integration with the Keep `keepers_log` — see M2b.7.
 - Watchmaster `promote_to_keep` — see M2b.8.
