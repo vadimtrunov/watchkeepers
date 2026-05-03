@@ -305,6 +305,77 @@ Wiring this helper INTO any specific harness (a `wk notebook import` CLI
 subcommand, the auto-inheritance policy, or a TS shellout) is deferred
 to follow-ups; M2b.6 ships only the library function.
 
+## Audit emission
+
+M2b.7 layers correlated audit events on top of the in-process `Remember` /
+`Forget` mutating ops. The opt-in is a single functional option on `Open`:
+
+```go
+client := keepclient.NewClient(...)
+db, err := notebook.Open(ctx, agentID, notebook.WithLogger(client))
+```
+
+When a `*DB` is opened **without** `WithLogger`, `db.logger == nil` and
+the audit-emit code path is a no-op — every existing caller of
+`Open(ctx, agentID)` keeps the pre-M2b.7 behavior verbatim. The
+backward-compat guarantee is structural: existing tests across the
+package pass without modification because the `nil` logger short-circuits
+the LogAppend block entirely.
+
+### Event types
+
+Two `event_type` strings are written to keepers_log via the supplied
+`Logger`. Downstream subscribers distinguish the two by name; the
+payload schemas are deliberately disjoint.
+
+| `event_type`                | Emitted from   | Payload fields                                   |
+| --------------------------- | -------------- | ------------------------------------------------ |
+| `notebook_entry_remembered` | `*DB.Remember` | `agent_id`, `entry_id`, `category`, `created_at` |
+| `notebook_entry_forgotten`  | `*DB.Forget`   | `agent_id`, `entry_id`, `forgotten_at`           |
+
+`created_at` and `forgotten_at` are RFC3339Nano UTC strings.
+
+### Payload exclusion (PII / large fields)
+
+The audit log is for "what happened", not "what was stored". Both
+payloads deliberately omit:
+
+- `content`, `subject` — the textual body of the entry, often
+  user-supplied;
+- `embedding` — the 1536-dim vector;
+- `relevance_score`, `last_used_at`, `active_after`,
+  `evidence_log_ref`, `tool_version`, `superseded_by` — the M2b.1
+  schema's optional metadata.
+
+A downstream subscriber that needs more context recovers it from the
+DB by id; the audit log is the chronological correlation surface, not a
+secondary store.
+
+### Partial-failure contract
+
+Mirrors the `(uri, err)` shape used by `ArchiveOnRetire` /
+`PeriodicBackup`. The transactional commit happens **before** the
+LogAppend call, so:
+
+- `Remember` returns `(entryID, fmt.Errorf("audit emit: %w", logErr))`
+  on a LogAppend failure. The entry IS in the DB; the caller has the
+  id and can retry just the audit emit with the same payload shape.
+- `Forget` returns `fmt.Errorf("audit emit: %w", logErr)` on a
+  LogAppend failure. The entry IS gone; the caller can retry just the
+  audit emit (the id is whatever the caller passed in).
+
+Pre-commit failures (`ErrInvalidEntry`, `ErrNotFound`, transaction
+errors) return **before** the LogAppend block and never emit an event;
+rolled-back operations are invisible to the audit log by construction.
+
+### Out of scope
+
+- Auditing direct `*DB.Import`. The canonical operator-callable path
+  is `ImportFromArchive` (M2b.6), which already emits
+  `notebook_imported`. The bypass-method path is documentation-only.
+- Auditing `Archive` (read-only) and `Open` / `Close` (lifecycle, not
+  data mutation).
+
 ## Out of scope (still deferred)
 
 - Watchmaster `promote_to_keep` — see M2b.8.
