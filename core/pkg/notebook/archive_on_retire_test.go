@@ -23,19 +23,27 @@ import (
 // an injectable error and an optional gate channel for the
 // context-cancellation test.
 type fakeStore struct {
-	putErr     error
-	putBlock   chan struct{} // optional: gate Put returning, for ctx-cancel tests
-	putBytes   bytes.Buffer
-	putAgent   string
-	putCalled  atomic.Int32
-	getCalled  atomic.Int32
-	listCalled atomic.Int32
-	nextURI    string
+	putErr           error
+	putErrBeforeRead bool          // when true, Put returns putErr immediately without reading src
+	putBlock         chan struct{} // optional: gate Put returning, for ctx-cancel tests
+	putBytes         bytes.Buffer
+	putAgent         string
+	putCalled        atomic.Int32
+	getCalled        atomic.Int32
+	listCalled       atomic.Int32
+	nextURI          string
 }
 
 func (f *fakeStore) Put(ctx context.Context, agentID string, src io.Reader) (string, error) {
 	f.putCalled.Add(1)
 	f.putAgent = agentID
+	// Simulate a real ArchiveStore that fails before reading any bytes
+	// (e.g. auth failure, ECONNREFUSED). This exercises the goroutine-leak
+	// fix in ArchiveOnRetire: without pr.CloseWithError, the Archive
+	// goroutine would block on pw.Write indefinitely.
+	if f.putErrBeforeRead && f.putErr != nil {
+		return "", f.putErr
+	}
 	if _, err := io.Copy(&f.putBytes, src); err != nil {
 		return "", err
 	}
@@ -267,7 +275,7 @@ func TestArchiveOnRetire_PutFails(t *testing.T) {
 	seedRetireDB(ctx, t, src)
 
 	putBoom := errors.New("put boom")
-	store := &fakeStore{putErr: putBoom}
+	store := &fakeStore{putErr: putBoom, putErrBeforeRead: true}
 	logger := &fakeLogger{}
 
 	uri, err := ArchiveOnRetire(ctx, src, retireAgentID, store, logger)

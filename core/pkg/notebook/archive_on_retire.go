@@ -134,6 +134,15 @@ func ArchiveOnRetire(ctx context.Context, db *DB, agentID string, store Storer, 
 	}()
 
 	uri, putErr := store.Put(ctx, agentID, pr)
+	if putErr != nil {
+		// Unblock the Archive goroutine if it is still blocked on pw.Write.
+		// A real ArchiveStore implementation may return an error before
+		// reading any bytes (auth failure, ECONNREFUSED, etc.). Without this
+		// call, pw.Write would block indefinitely waiting for a reader, and
+		// the goroutine would leak. CloseWithError makes the next pw.Write
+		// return io.ErrClosedPipe so the goroutine exits cleanly.
+		_ = pr.CloseWithError(putErr)
+	}
 	// Drain the goroutine's result AFTER Put returns so we cannot race a
 	// still-running Archive. CloseWithError above guarantees the goroutine
 	// always finishes — Archive returns once VACUUM and io.Copy unwind, and
