@@ -142,7 +142,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 ---
 
-### M2 — Keep service (business knowledge + audit) [ ]
+### M2 — Keep service (business knowledge + audit) [x]
 
 **Goal**: Standalone Keep service that holds the organization's business knowledge and the platform's audit log. Every agent and core subsystem accesses it through the Keep API — no direct DB access from callers.
 
@@ -170,8 +170,8 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M2.8.d** keepclient Subscribe SSE streaming method with reconnect/dedup hooks and contract tests.
     - [x] **M2.8.d.a** Add keepclient Subscribe SSE consumption with typed Event model and httptest contract tests.
     - [x] **M2.8.d.b** Add Subscribe reconnect policy, Last-Event-ID resume, and dedup hooks with integration smoke.
-- [ ] **M2.9** Manifest schema fields added: `personality` (free-text) and `language` (ISO code).
-  - [ ] **M2.9.a** Manifest `personality`/`language` constraints, validation, and docs (columns already landed with M2.1.a).
+- [x] **M2.9** Manifest schema fields added: `personality` (free-text) and `language` (ISO code).
+  - [x] **M2.9.a** Manifest `personality`/`language` constraints, validation, and docs (columns already landed with M2.1.a).
 
 **Artifacts**: schema SQL, migrations, Keep service binary, Go `keepclient` package, RLS and append-only tests, contract tests against the Keep API.
 
