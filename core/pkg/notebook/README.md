@@ -166,9 +166,42 @@ information leaks on a shared host should rely on standard Unix user
 isolation (separate UIDs per agent process) — running multiple agents under
 the same UID lets each read every other notebook in the same data dir.
 
+## ArchiveOnRetire
+
+M2b.4 ships a harness-language-neutral library helper that orchestrates the
+three already-merged primitives — `notebook.*DB.Archive`,
+`archivestore.ArchiveStore.Put`, `keepclient.Client.LogAppend` — into one
+shutdown-time call. It streams the live notebook through `Archive` →
+`Put` via `io.Pipe` (no on-disk intermediate) and emits a
+`notebook_archived` event to Keeper's Log on success. See the godoc on
+[`ArchiveOnRetire`](archive_on_retire.go) for the full sequence and the
+partial-failure return-shape contract.
+
+```go
+client := keepclient.NewClient(...)
+store, _ := archivestore.NewLocalFS(archivestore.WithRoot("/var/lib/watchkeepers"))
+defer func() {
+    uri, err := notebook.ArchiveOnRetire(shutdownCtx, db, agentID, store, client)
+    if err != nil {
+        // log; URI may still be set if only the audit emit failed —
+        // caller can retry just the LogAppend with the same payload.
+    }
+}()
+```
+
+The helper builds in NO retry logic. Callers distinguish three outcomes by
+inspecting the `(uri, err)` tuple:
+
+- `("", err)` — Archive→Put failure, snapshot never landed; retry the
+  whole call while the agent process is still alive.
+- `(uri, err)` — Put succeeded, audit emit failed; the snapshot is in the
+  store and the caller can retry just the audit with the same payload.
+- `(uri, nil)` — full success.
+
+Wiring this helper INTO any specific harness (Go binary, CLI shim, or TS
+shellout) is deferred to a follow-up; M2b.4 ships only the library
+function.
+
 ## Out of scope (still deferred)
 
-- ArchiveStore wrappers (LocalFS / S3 backends) over `Archive` / `Import` —
-  see M2b.3.
-- Audit-log integration with the Keep `keepers_log` — see M2b.7.
 - Watchmaster `promote_to_keep` — see M2b.8.
