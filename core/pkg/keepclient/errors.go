@@ -26,6 +26,12 @@ var (
 	// [WithTokenSource]. Returned synchronously, before any network round-trip,
 	// so a missing token never becomes a stale-token request.
 	ErrNoTokenSource = errors.New("keepclient: no token source configured")
+	// ErrReconnectExhausted — [Client.SubscribeResilient]'s reconnect loop
+	// gave up after the configured WithMaxReconnectAttempts. The wrapped
+	// chain carries the last underlying transport error: callers can match
+	// both [errors.Is](err, ErrReconnectExhausted) and
+	// [errors.As](err, &netErr) on the same value.
+	ErrReconnectExhausted = errors.New("keepclient: reconnect attempts exhausted")
 )
 
 // ServerError carries the parsed envelope from a non-2xx response. Status is
