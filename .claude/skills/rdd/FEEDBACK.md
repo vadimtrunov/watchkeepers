@@ -471,3 +471,31 @@ Auto-approved gates (operator's `/loop /rdd` variant-c blanket-yes) made the loo
 - Total wall time from /rdd to merge: ~25 min
 
 ---
+
+## 2026-05-03 — M2.8.d.a: keepclient Subscribe SSE consumption with typed Event model and httptest contract tests
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/16
+**Phases with incidents**: 1 (planner decomposition)
+
+### What worked
+
+Planner correctly flagged M2.8.d as "too large" — three distinct concerns (streaming primitive, reconnect policy, dedup hooks) each warrant their own review iteration. Decomposition into M2.8.d.a + M2.8.d.b made each PR fit cleanly. `references/roadmap-migration.md` §"Decomposition at Gate 1" worked as written: nest as sub-bullets under the original `M2.8.d`, commit `docs(roadmap): decompose M2.8.d into sub-items`, take `M2.8.d.a` as the unit of work. Phase 4 converged at iter 0 again — second consecutive M2.8.* TASK with no blockers/important. Phase 6 polling Monitor with `bucket`+`state` allowlist landed CHECKS_COMPLETE on schedule for the second consecutive run.
+
+### What wasted effort
+
+Bypassed `git-master` agent for Phase 7 merge entirely after the M2.8.c incident (truncated report, missed ROADMAP flip). Did `gh pr merge` + ROADMAP edit + commit + push directly from the orchestrator. Worked, but means we can't yet validate whether the proposed `git-master` brief verification step would catch the failure mode.
+
+### Suggested skill changes
+
+In `references/agent-briefs/git-master.md` mode=merge, add a **mandatory verification block** at the end: agent must run `git log --oneline -1` (assert top commit is `chore(roadmap): mark <id> complete`), `git rev-parse origin/main` (assert pushed), and `grep "<leaf-id>" docs/ROADMAP-*.md` (assert `[x]` line present). Without this, "Found the line. Flipping..." trivially looks like progress without actual completion.
+
+Consider documenting the "decomposition at Gate 1" path more prominently in `SKILL.md` Phase 1 — the operator should see it without having to chase `references/roadmap-migration.md`.
+
+### Metrics
+
+- Review iterations: 1 (converged)
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 1 (orchestrator did Phase 7 merge inline due to prior agent flakiness)
+- Total wall time from /rdd to merge: ~25 min
+
+---

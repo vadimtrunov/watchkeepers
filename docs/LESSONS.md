@@ -436,3 +436,34 @@ Extended `core/pkg/keepclient/` with three typed write methods (Store, LogAppend
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.8 → M2.8.c
 
 ---
+
+## 2026-05-03 — M2.8.d.a: keepclient Subscribe SSE consumption with typed Event model and httptest contract tests
+
+**PR**: [#16](https://github.com/vadimtrunov/watchkeepers/pull/16)
+**Merged**: 2026-05-03
+
+### Context
+
+First streaming endpoint in `core/pkg/keepclient/`. Wraps `GET /v1/subscribe` from M2.7.e. Adds the SSE parser and iterator-style `*Stream` API; reconnect and Last-Event-ID deduplication deferred to M2.8.d.b.
+
+### Pattern
+
+**Streaming primitive ≠ unary `do(...)`**: The unary helper used by M2.8.b/c covers token injection, JSON marshalling, and status mapping, but cannot host long-lived SSE bodies. M2.8.d.a introduces a sibling streaming open path that reuses the unary code's auth + initial-status decoder, then hands `resp.Body` to a `*bufio.Reader`-backed parser. Future streaming endpoints follow this layout.
+
+**Iterator over channel**: `Stream.Next(ctx) (Event, error)` + `Stream.Close()` chosen over `<-chan Event` to make `Close` deterministic and to give M2.8.d.b a clean place to layer reconnect (just wrap the iterator).
+
+**`io.EOF` vs `ErrStreamClosed` distinction**: Clean server EOF returns `io.EOF`; local `Close()` makes subsequent `Next` return `ErrStreamClosed` (a non-EOF sentinel). Callers can distinguish "server is done" from "we closed it".
+
+**Default 10s httpClient.Timeout caps the body read too**: `NewClient` sets a 10s timeout that applies to the entire request lifecycle, including streaming body reads. Subscribe godoc instructs callers to override with `WithHTTPClient(&http.Client{})` (no timeout) or a per-request `context.WithTimeout`. M2.8.d.b should consider splitting timeouts at the `Client` level (request-init vs body-read).
+
+**SSE parser correctness**: Handles multi-line `data:` joined with `\n`, missing `data:` (Payload=nil), missing `event:` (EventType=""), and silently skips `:` heartbeats. Bare `\r` terminator (per HTML EventSource spec) is unhandled but server uses `\n`-only; documented as a known limitation.
+
+**`id:` captured even though M2.8.d.a does not use it**: Keeping it in the `Event` struct now means M2.8.d.b can wire `Last-Event-ID` resume without a struct change.
+
+### References
+
+- Files: `core/pkg/keepclient/subscribe.go`, `core/pkg/keepclient/subscribe_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.8 → M2.8.d → M2.8.d.a
+- Server contract: `core/internal/keep/server/handlers_subscribe.go`
+
+---
