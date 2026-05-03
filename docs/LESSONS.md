@@ -523,3 +523,27 @@ Added database and API constraints for the manifest `language` and `personality`
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.9 → M2.9.a. **M2 milestone COMPLETE** — Keep service + keepclient + manifest validation done.
 
 ---
+
+## 2026-05-03 — M2b.1: Notebook SQLite + sqlite-vec storage substrate
+
+**PR**: [#19](https://github.com/vadimtrunov/watchkeepers/pull/19)
+**Merged**: 2026-05-03 (squash commit `814e68c`)
+
+### Context
+
+Established the Notebook library's storage substrate using SQLite + sqlite-vec for vector embeddings. Three integration paths existed for SQLite + sqlite-vec in Go (mattn CGo, ncruces+wazero WASM, modernc pure-Go). After prototyping Option B (ncruces+wazero CGo-free), executor discovered a blocker: wazero v1.7.3 cannot enable `i32.atomic.store` instructions used in sqlite-vec's WASM bundle. Fallback to Option A (mattn/go-sqlite3 v1.14.44 + asg017/sqlite-vec-go-bindings/cgo v0.1.6) was clean and well-documented. Code-reviewer flagged a blocker on foreign-key enforcement and an important sync-contract documentation gap; fixer resolved both in one commit.
+
+### Pattern
+
+**Two-prong driver evaluation with documented fallback**: When adopting a new dependency with multiple integration options, encode the matrix in the TASK file with explicit reject criteria BEFORE writing code. Executor picked Option B per preference-driven rubric, hit a WASM-incompatibility wall, and fell back to Option A with confidence because the decision tree was already in place. Pattern: decision-matrix THEN evidence-driven pick THEN clean fallback.
+
+**SQLite foreign-key enforcement OFF by default per connection**: `superseded_by TEXT NULL REFERENCES entry(id)` is silently a no-op unless the connection sets `PRAGMA foreign_keys=ON`. Mattn driver supports `_foreign_keys=on` DSN flag. Every new SQLite connection must (a) enable foreign-keys via DSN, (b) read it back via `PRAGMA foreign_keys` with fail-loud error if misnamed, and (c) carry a constraint-rejection negative test. Pattern: idempotent pragma readback mirrors M2.7.e.b's WAL pattern.
+
+**Two-table sqlite-vec layout has explicit sync contract**: The vec0 virtual table and regular table joined on `id` is the canonical sqlite-vec pattern, but there is NO auto-cascade. INSERTs and DELETEs must be paired in the same transaction; UPDATE of join key is symmetric. Document the contract in package godoc + README so the next-layer API (M2b.2) doesn't get it wrong. Reviewer caught this on iter 1; fixer added the docs in `# Sync contract` godoc subsection + README mirror.
+
+### References
+
+- Files: `core/pkg/notebook/{db,path}.go` (+ `_test.go`), `core/pkg/notebook/README.md`, `go.mod` (added `mattn/go-sqlite3`, `asg017/sqlite-vec-go-bindings/cgo`)
+- Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.1. **M2b.1 substrate ready**; M2b.2 owns the `Remember`/`Recall`/`Forget`/`Archive`/`Import`/`Stats` public API and Recall-supporting indexes.
+
+---

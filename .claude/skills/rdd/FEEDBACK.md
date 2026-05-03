@@ -529,6 +529,34 @@ CodeRabbit's 🟠 Major comment (replacement stream inherits per-call `Next` ctx
 
 ---
 
+## 2026-05-03 — M2b.1: Notebook SQLite + sqlite-vec storage substrate
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/19
+**Phases with incidents**: 4 (1 blocker fixer iter)
+
+### What worked
+
+Gate 2's "driver decision matrix" section laid out all three options (mattn CGo, ncruces+wazero, modernc pure-Go) with explicit reject criteria. Executor used Option B exactly per rubric, hit a WASM-incompatibility wall, and fell back to Option A with documentation. No design churn or back-and-forth. Fixer for the FK blocker landed in one commit — DSN flag + PRAGMA readback + two tests + sync-contract docs all addressed cleanly. Reviewer correctly classified mattn's silent-DSN-flag-drop as a blocker (not nit) because AC4 required FK enforcement; this is exactly the bounded-loop severity judgment that the definitions exist for.
+
+### What wasted effort
+
+The first executor session had a truncation incident in the prior M2.9.a run; this M2b.1 session did NOT repeat it because the brief explicitly cited the FEEDBACK truncation guard and required the structured report block before any "Stop". Pattern works — keep enforcing. Pre-push license-scan emitted 2 warnings for CGo modules (`sqlite-vec-go-bindings/cgo`, `mattn/go-sqlite3`) lacking machine-readable license files. Did NOT block the push (warnings, not errors). Worth confirming upstream licenses (both MIT/BSD-equivalent in READMEs) and either suppressing the warning or adding manual license metadata to lefthook config.
+
+### Suggested skill changes
+
+- In `references/agent-briefs/executor.md`, formalize the "encode driver/integration matrix in TASK" pattern: when a new dependency has multiple Go integrations, the TASK MUST list them with explicit reject criteria so the executor can pick evidence-driven, not preference-driven.
+- In `references/agent-briefs/code-reviewer.md`, add a checklist item for "SQLite + foreign-key enforcement": any new SQLite connection in the diff must set `_foreign_keys=on` AND have a PRAGMA readback. This blocker would have been caught by a checklist; reviewer found it via judgment, which is fine but slower to scale.
+- In `SKILL.md` Phase 7, mention that the orchestrator should `TaskStop` any orphan Monitor before exiting — this run had a stale poller still emitting POLL events after CHECKS_COMPLETE because the Monitor script raced its own exit.
+
+### Metrics
+
+- Review iterations: 2 (iter 1: 1 blocker + 1 important; iter 2: converged)
+- PR-fix iterations: 0 (CI green on first push)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~30 min
+
+---
+
 ## 2026-05-03 — M2.9.a: Manifest personality/language constraints, validation, and docs
 
 **PR**: https://github.com/vadimtrunov/watchkeepers/pull/18
