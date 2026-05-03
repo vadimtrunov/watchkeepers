@@ -32,6 +32,19 @@
 // `vec0`'s vector-only column space separate from the regular SQL columns
 // so common queries that don't touch the embedding don't have to read it.
 //
+// # Sync contract
+//
+// The substrate exposes two tables that callers MUST keep in lock-step:
+//
+//   - INSERT into entry MUST be paired with INSERT into entry_vec(id, embedding)
+//     in the same transaction.
+//   - DELETE from entry (Forget / Archive) MUST also DELETE from entry_vec
+//     by id. The vec0 virtual table does NOT auto-cascade.
+//   - UPDATE of entry.id (rare) requires symmetric UPDATE of entry_vec.id.
+//
+// The substrate does not enforce this — M2b.2 owns transactional Insert /
+// Delete that wraps both tables.
+//
 // # Out of scope
 //
 // The Remember / Recall / Forget / Archive / Import / Stats public API
@@ -133,7 +146,10 @@ func openAt(ctx context.Context, path string) (*DB, error) {
 	// pragma; we additionally re-issue the PRAGMA below so we can read it
 	// back and surface a clear error on mis-configuration. `_busy_timeout`
 	// avoids `SQLITE_BUSY` under contention with no measurable cost.
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000", path)
+	// `_foreign_keys=on` enables FK enforcement per connection (SQLite's
+	// default is OFF); we verify it stuck with a PRAGMA readback below
+	// because mattn silently drops misnamed open-string flags.
+	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on", path)
 	sqlDB, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("notebook: open %q: %w", path, err)
@@ -161,6 +177,19 @@ func openAt(ctx context.Context, path string) (*DB, error) {
 	if mode != "wal" {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("notebook: journal_mode=WAL ignored on %q (got %q)", path, mode)
+	}
+
+	// Confirm foreign-key enforcement is active. mattn/go-sqlite3 silently
+	// ignores misnamed open-string flags, so we read the pragma back rather
+	// than trusting the DSN was accepted.
+	var fkOn int
+	if err := sqlDB.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&fkOn); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("notebook: read foreign_keys pragma on %q: %w", path, err)
+	}
+	if fkOn != 1 {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("notebook: foreign_keys pragma did not stick on %q (got %d, want 1)", path, fkOn)
 	}
 
 	if _, err := sqlDB.ExecContext(ctx, schemaSQL); err != nil {

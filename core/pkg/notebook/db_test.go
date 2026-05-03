@@ -332,6 +332,44 @@ func TestVecExtensionLoaded(t *testing.T) {
 	}
 }
 
+func TestSchema_ForeignKeysEnabled(t *testing.T) {
+	db, ctx, _ := freshDB(t)
+
+	var fkOn int
+	if err := db.sql.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&fkOn); err != nil {
+		t.Fatalf("PRAGMA foreign_keys: %v", err)
+	}
+	if fkOn != 1 {
+		t.Fatalf("foreign_keys = %d, want 1 (FK enforcement must be enabled)", fkOn)
+	}
+}
+
+func TestSchema_SupersededByFK_Rejects(t *testing.T) {
+	db, ctx, _ := freshDB(t)
+
+	// Insert a valid parent row first so we know the FK column works when
+	// the referenced id exists.
+	if _, err := db.sql.ExecContext(ctx,
+		`INSERT INTO entry(id, category, content, created_at) VALUES (?,?,?,?)`,
+		"parent-id", "lesson", "parent", int64(1),
+	); err != nil {
+		t.Fatalf("insert parent: %v", err)
+	}
+
+	// This INSERT references a non-existent id and must be rejected by the
+	// REFERENCES entry(id) FK constraint.
+	_, err := db.sql.ExecContext(ctx,
+		`INSERT INTO entry(id, category, content, created_at, superseded_by) VALUES (?,?,?,?,?)`,
+		"child-id", "lesson", "child", int64(2), "non-existent-uuid",
+	)
+	if err == nil {
+		t.Fatal("INSERT with invalid superseded_by succeeded; FK constraint not enforced")
+	}
+	if !strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+		t.Fatalf("expected FOREIGN KEY constraint error, got: %v", err)
+	}
+}
+
 func TestOpen_PermissionDenied(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: chmod 0 trick is bypassed")

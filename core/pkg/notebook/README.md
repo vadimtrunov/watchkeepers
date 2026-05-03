@@ -71,6 +71,17 @@ from Notebook to Keep keeps the same vector shape. Two tables joined by
 space separate from the regular SQL columns, so common queries that don't
 touch the embedding don't have to read it.
 
+### Sync contract
+
+The `entry` and `entry_vec` tables must be kept in lock-step by all
+callers. The `vec0` virtual table does **not** auto-cascade deletes or
+updates from `entry`. Concretely: every INSERT into `entry` must be paired
+with an INSERT into `entry_vec(id, embedding)` in the same transaction, and
+every DELETE from `entry` (Forget / Archive) must also DELETE from
+`entry_vec` by id. M2b.2 owns the transactional Insert / Delete wrappers
+that enforce this contract. See the `# Sync contract` section in the
+[package godoc](db.go) for the full specification.
+
 ## Per-agent isolation
 
 Each agent has exactly one notebook file. The directory mode `0o700` is the
