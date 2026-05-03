@@ -718,3 +718,30 @@ The TS-vs-Go harness structural ambiguity was caught at planner time, but only a
 - Total wall time from /rdd to merge: ~50 min
 
 ---
+
+## 2026-05-03 — M2b.5: Notebook PeriodicBackup helper
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/25
+**Phases with incidents**: none (clean run)
+
+### What worked
+
+Reviewer converged at iteration 1 with 0 blocker, 0 important, 0 nit — a sign of excellent scope discipline and TASK brief clarity. The brief named all three patterns (refactor-on-second-caller timing, `time.Ticker` + select idiom, polling-deadline test discipline) so the executor had no design ambiguity. The "refactor-on-second-caller" timing was right: M2b.4 shipped lean (no premature helper); M2b.5's refactor commit was small and reviewable. Both PRs stayed under the per-PR budget. Phase 6 CI passed 9/9 on first push. Truncation guard from prior FEEDBACK still holding — executor delivered full structured report. The M2b.4 goroutine-leak-fix pattern (`pr.CloseWithError`) was preserved through the refactor without regression.
+
+### What wasted effort
+
+The TS-vs-Go harness ambiguity (raised in M2b.4 FEEDBACK) is now compounding: M2b.5 ships a SECOND library helper that no concrete harness yet calls. Future M2b.x sub-items will keep adding to the "library helpers awaiting harness wiring" pile until the operator-level decision lands. Worth surfacing this as a backlog item.
+
+### Suggested skill changes
+
+- Promote the "refactor-on-second-caller" timing pattern to a SKILL note or `references/refactoring.md`. It's now confirmed across M2b.3.b (tarball-streaming helpers extraction) and M2b.5 (`archiveAndAudit` extraction). A third confirmation would warrant a dedicated reference doc.
+- M2b.5 confirms the goroutine-leak-fix-via-`pr.CloseWithError` pattern. Worth adding to `references/agent-briefs/code-reviewer.md` as an `io.Pipe` checklist item: "any code using `io.Pipe` for streaming must verify both sides can unblock each other on failure". This pattern now appears in both M2b.4 FEEDBACK and M2b.5 production code.
+
+### Metrics
+
+- Review iterations: 1 (converged immediately)
+- PR-fix iterations: 0 (CI green on first push)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~30 min
+
+---

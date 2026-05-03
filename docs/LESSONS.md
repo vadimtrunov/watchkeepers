@@ -681,3 +681,29 @@ Implemented `notebook.ArchiveOnRetire` as a blocking orchestrator that chains Ar
 - Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.4. **Future M2b.4-successor** wires this helper into the actual harness once TS-vs-Go ambiguity is resolved.
 
 ---
+
+## 2026-05-03 — M2b.5: Notebook PeriodicBackup helper
+
+**PR**: [#25](https://github.com/vadimtrunov/watchkeepers/pull/25)
+**Merged**: 2026-05-03 (squash commit `0c0bb82`)
+
+### Context
+
+Implemented `notebook.PeriodicBackup` as a best-effort periodic helper for archive-on-retire lifecycle. Uses `time.NewTicker` with `time.Duration` cadence (cron deferred to M3.3) and extracted a private `archiveAndAudit(ctx, db, agentID, store, logger, eventType)` helper from the original M2b.4 inline pipeline. Refactoring preserved the M2b.4 goroutine-leak fix via `pr.CloseWithError`. Phase 3 executor delivered 1 commit (+542 LOC, 7 tests passing under `-race`). Phase 4 iter 1 converged 0/0/0 (zero blocker/important/nit). Phase 6 CI green 9/9. Phase 7 PR squash-merged.
+
+### Pattern
+
+**Refactor-on-second-caller, not first**: M2b.4 shipped the Archive→Put→LogAppend pipeline inline in `ArchiveOnRetire`. M2b.5 needed the same pipeline with a different EventType — extracted a private `archiveAndAudit(ctx, db, agentID, store, logger, eventType)` helper. Pattern: when a second caller of the same logic appears, refactor THEN. Premature extraction on the first caller is YAGNI; on the second it is necessary. Same pattern successfully applied in M2b.3.b (tarball-streaming helpers extraction).
+
+**`time.NewTicker` + `select { ctx.Done, ticker.C }` for periodic best-effort jobs**: Canonical Go pattern for "fire every N, exit on cancel". `time.NewTicker(cadence)` + `defer ticker.Stop()` to avoid goroutine leak. The `select` is two-way: `<-ctx.Done()` returns `ctx.Err()` cleanly; `<-ticker.C` runs the work. Per-tick failures DO NOT exit the loop — backups are best-effort; the next tick retries. The optional `onTick` callback is called synchronously (NOT spawned) — caller's responsibility to keep it fast. `time.Ticker` drops missed ticks rather than queueing, so a slow callback can cause skipped ticks but will not pile up.
+
+**Polling deadline tests over fixed-sleep tests for time-driven loops**: `cadence=10ms` + `sleep(30ms)` is flaky on loaded CI (only 1 tick fires when the test expected ≥2). Replace with: `cadence=25ms` + poll until counter ≥ N OR deadline (e.g. 3s). The poll exits as soon as the assertion is met OR fails the test on timeout. Robust under jitter without slowing happy-path runs. Pattern reusable for any time-driven loop's tests.
+
+**`flakyStore` pattern for fail-then-succeed test scenarios**: To test that a periodic loop survives transient failures, give the fake an internal counter that fails on odd-numbered Put calls and succeeds on even (or any other deterministic predicate). The test polls until BOTH at-least-one-error and at-least-one-success have been observed via the onTick callback. Avoids tying the assertion to a specific tick number.
+
+### References
+
+- Files: `core/pkg/notebook/{periodic_backup,archive_on_retire}.go` + `_test.go`, `core/pkg/notebook/{errors.go,README.md}`
+- Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.5. **Future**: cron-expression-driven scheduling lands in M3.3 (`robfig/cron`).
+
+---
