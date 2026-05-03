@@ -1,8 +1,6 @@
 package archivestore
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -178,7 +176,9 @@ func (s *LocalFS) Put(ctx context.Context, agentID string, snapshot io.Reader) (
 // writeTarball produces a gzipped tar at `dstPath` containing exactly one
 // entry named `<agentID>.sqlite` (mode [fileMode]) whose bytes come from
 // `srcPath`. Pulled out of [LocalFS.Put] so the happy path stays linear
-// and the deferred close-and-cleanup chain is easier to read.
+// and the deferred close-and-cleanup chain is easier to read. Delegates
+// the actual gzip+tar framing to [writeTarballStream] so the same wire
+// format is shared with the S3Compatible backend (M2b.3.b).
 func writeTarball(srcPath, dstPath, agentID string, size int64) error {
 	src, err := os.Open(srcPath)
 	if err != nil {
@@ -200,27 +200,8 @@ func writeTarball(srcPath, dstPath, agentID string, size int64) error {
 		}
 	}()
 
-	gz := gzip.NewWriter(dst)
-	tw := tar.NewWriter(gz)
-
-	hdr := &tar.Header{
-		Name:    agentID + ".sqlite",
-		Mode:    int64(fileMode),
-		Size:    size,
-		ModTime: time.Now().UTC(),
-		Format:  tar.FormatPAX,
-	}
-	if err := tw.WriteHeader(hdr); err != nil {
-		return fmt.Errorf("archivestore: write tar header: %w", err)
-	}
-	if _, err := io.Copy(tw, src); err != nil {
-		return fmt.Errorf("archivestore: write tar body: %w", err)
-	}
-	if err := tw.Close(); err != nil {
-		return fmt.Errorf("archivestore: close tar writer: %w", err)
-	}
-	if err := gz.Close(); err != nil {
-		return fmt.Errorf("archivestore: close gzip writer: %w", err)
+	if err := writeTarballStream(dst, src, agentID, size); err != nil {
+		return err
 	}
 	if err := dst.Close(); err != nil {
 		return fmt.Errorf("archivestore: close archive: %w", err)
@@ -255,44 +236,13 @@ func (s *LocalFS) Get(ctx context.Context, uri string) (io.ReadCloser, error) {
 		}
 		return nil, fmt.Errorf("archivestore: open %q: %w", path, err)
 	}
-	gz, err := gzip.NewReader(f)
+	rc, err := openTarballStream(f)
 	if err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("archivestore: open gzip %q: %w: %w", path, err, ErrInvalidURI)
+		// openTarballStream closes `f` on failure; just enrich the error
+		// with the on-disk path for debuggability.
+		return nil, fmt.Errorf("archivestore: read archive %q: %w", path, err)
 	}
-	tr := tar.NewReader(gz)
-	if _, err := tr.Next(); err != nil {
-		_ = gz.Close()
-		_ = f.Close()
-		return nil, fmt.Errorf("archivestore: read tar header %q: %w: %w", path, err, ErrInvalidURI)
-	}
-	return &snapshotReader{tar: tr, gz: gz, file: f}, nil
-}
-
-// snapshotReader wraps the tar entry's body so the caller sees a flat
-// [io.ReadCloser]. Close releases the gzip reader and the underlying
-// file in that order; the tar reader has no Close (the gzip Close
-// covers the underlying gzip stream).
-type snapshotReader struct {
-	tar  *tar.Reader
-	gz   *gzip.Reader
-	file *os.File
-}
-
-// Read forwards to the tar reader, which itself reads from the gzip
-// stream. EOF on the tar entry signals the end of the snapshot bytes.
-func (r *snapshotReader) Read(p []byte) (int, error) { return r.tar.Read(p) }
-
-// Close closes the gzip reader and the underlying file. Both errors are
-// surfaced — the gzip error wins when both fail because the gzip layer
-// is logically "closer to" the data the caller saw.
-func (r *snapshotReader) Close() error {
-	gerr := r.gz.Close()
-	ferr := r.file.Close()
-	if gerr != nil {
-		return gerr
-	}
-	return ferr
+	return rc, nil
 }
 
 // List returns every snapshot URI for `agentID` under this LocalFS root,
