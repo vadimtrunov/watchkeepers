@@ -107,12 +107,11 @@ func publishOutboxEvent(t *testing.T, env *testEnv, scope, eventType, payloadJSO
 
 // closingTransport is a custom http.RoundTripper that wraps an inner
 // transport and forcibly closes the response body of the FIRST response
-// after the configured number of complete SSE frames have been read.
-// Frames are detected by counting "\n\n" boundaries in the byte stream.
-// Using a frame count rather than a byte threshold makes the drop
-// deterministic across environments: a bytes-based threshold can be
-// skipped entirely when TCP buffering delivers all events in a single
-// read before the threshold is ever checked. Used by
+// after the configured number of complete SSE *data* frames have been
+// read. Heartbeat frames (`:\n\n` comment lines) do NOT count — counting
+// them would race with the heartbeat ticker (KEEP_SUBSCRIBE_HEARTBEAT)
+// and cause the drop to fire before any real event is delivered, making
+// the reconnect path non-deterministic. Used by
 // TestKeepclientSubscribe_ReconnectSmoke to inject a transport-level
 // drop without restarting the server.
 type closingTransport struct {
@@ -122,8 +121,8 @@ type closingTransport struct {
 }
 
 // RoundTrip returns the response with its Body wrapped so that, on the
-// first call, after observing dropAfterFrames complete SSE frames the
-// body returns io.EOF on the next Read, forcing the keepclient to
+// first call, after observing dropAfterFrames complete SSE data frames
+// the body returns io.EOF on the next Read, forcing the keepclient to
 // reconnect. Subsequent calls pass straight through (no-op).
 func (t *closingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.inner.RoundTrip(req)
@@ -141,15 +140,20 @@ func (t *closingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-// frameCountingBody counts complete SSE frames (delimited by "\n\n") as
-// data streams through Read. Once dropAfterFrames frames have been
-// observed it returns io.EOF on the next call, simulating a clean
-// connection drop that the keepclient resilient layer must reconnect from.
+// frameCountingBody counts complete SSE data frames (delimited by
+// "\n\n") as data streams through Read. A frame is considered a data
+// frame only if it contains at least one line beginning with "data:" —
+// SSE heartbeat comments (`:\n\n`) are skipped so they cannot trip the
+// drop before a real event is delivered. Once dropAfterFrames data
+// frames have been observed Read returns io.EOF on the next call,
+// simulating a clean connection drop that the keepclient resilient
+// layer must reconnect from.
 type frameCountingBody struct {
 	inner           io.ReadCloser
 	dropAfterFrames int
 	frames          int
-	tail            byte // last byte of the previous read, for "\n\n" split detection
+	frameBuf        []byte // bytes of the current SSE frame, reset on each "\n\n" boundary
+	prevByteNL      bool   // last byte appended to frameBuf was '\n'
 	mark            *atomic.Bool
 	closed          bool
 }
@@ -159,24 +163,20 @@ func (c *frameCountingBody) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	n, err := c.inner.Read(p)
-	// Count "\n\n" frame boundaries in the bytes just read. We track the
-	// last byte of the previous read (c.tail) to catch a boundary split
-	// across two consecutive Read calls.
-	chunk := p[:n]
-	prev := c.tail
-	for i, b := range chunk {
-		var prevB byte
-		if i == 0 {
-			prevB = prev
-		} else {
-			prevB = chunk[i-1]
+	for i := 0; i < n; i++ {
+		b := p[i]
+		if b == '\n' && c.prevByteNL {
+			// Frame boundary. Count only if this frame had a data: line.
+			frame := c.frameBuf
+			if frameHasDataLine(frame) {
+				c.frames++
+			}
+			c.frameBuf = c.frameBuf[:0]
+			c.prevByteNL = false
+			continue
 		}
-		if prevB == '\n' && b == '\n' {
-			c.frames++
-		}
-	}
-	if n > 0 {
-		c.tail = chunk[n-1]
+		c.frameBuf = append(c.frameBuf, b)
+		c.prevByteNL = (b == '\n')
 	}
 	if c.frames >= c.dropAfterFrames {
 		c.closed = true
@@ -190,6 +190,31 @@ func (c *frameCountingBody) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	return n, err
+}
+
+// frameHasDataLine reports whether the SSE frame buffer contains at
+// least one line whose prefix is "data:". Lines are separated by '\n';
+// the buffer may end with the trailing '\n' that preceded the frame
+// terminator. A heartbeat frame's buffer is just ":\n", which has no
+// data: line and is therefore ignored by the counter.
+func frameHasDataLine(buf []byte) bool {
+	const prefix = "data:"
+	for i := 0; i < len(buf); {
+		// Find end of current line.
+		j := i
+		for j < len(buf) && buf[j] != '\n' {
+			j++
+		}
+		line := buf[i:j]
+		if len(line) >= len(prefix) && string(line[:len(prefix)]) == prefix {
+			return true
+		}
+		if j == len(buf) {
+			break
+		}
+		i = j + 1
+	}
+	return false
 }
 
 func (c *frameCountingBody) Close() error {
