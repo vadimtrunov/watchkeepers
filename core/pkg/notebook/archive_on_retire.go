@@ -52,6 +52,11 @@ type retirePayload struct {
 // the same string the production code emits.
 const retireEventType = "notebook_archived"
 
+// backupEventType is the `event_type` column written to keepers_log for the
+// periodic-backup audit event emitted by [PeriodicBackup]. Held as a const
+// so tests can pin against the same string the production code emits.
+const backupEventType = "notebook_backed_up"
+
 // ArchiveOnRetire orchestrates the three primitives a graceful shutdown
 // needs into a single call: it streams the live notebook through
 // [DB.Archive] into the [Storer]'s Put (any
@@ -115,6 +120,28 @@ const retireEventType = "notebook_archived"
 // whether to retry the whole call (Archive→Put failure) or just the audit
 // emit (Put→LogAppend failure).
 func ArchiveOnRetire(ctx context.Context, db *DB, agentID string, store Storer, logger Logger) (string, error) {
+	return archiveAndAudit(ctx, db, agentID, store, logger, retireEventType)
+}
+
+// archiveAndAudit is the shared Archive→Put→LogAppend pipeline used by both
+// [ArchiveOnRetire] (eventType = "notebook_archived") and [PeriodicBackup]
+// (eventType = "notebook_backed_up"). The body is identical except for the
+// `EventType` field carried into [keepclient.LogAppendRequest]: the audit
+// payload shape (`agent_id`, `uri`, `archived_at`) is the same in both
+// cases — downstream subscribers of keepers_log distinguish the two via
+// the event_type column, not the payload shape.
+//
+// The partial-failure contract documented on [ArchiveOnRetire] applies
+// verbatim:
+//
+//   - Archive→Put failure → ("", err)
+//   - Put→LogAppend failure → (uri, err)
+//   - All success → (uri, nil)
+//
+// See the godoc on [ArchiveOnRetire] for the full sequence, context-cancel
+// semantics, and the rationale for the (uri, err) tuple in the
+// LogAppend-failure path.
+func archiveAndAudit(ctx context.Context, db *DB, agentID string, store Storer, logger Logger, eventType string) (string, error) {
 	if !uuidPattern.MatchString(agentID) {
 		return "", ErrInvalidEntry
 	}
@@ -174,7 +201,7 @@ func ArchiveOnRetire(ctx context.Context, db *DB, agentID string, store Storer, 
 	}
 
 	if _, logErr := logger.LogAppend(ctx, keepclient.LogAppendRequest{
-		EventType: retireEventType,
+		EventType: eventType,
 		Payload:   payloadBytes,
 	}); logErr != nil {
 		return uri, fmt.Errorf("audit emit: %w", logErr)

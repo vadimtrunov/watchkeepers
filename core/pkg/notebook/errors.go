@@ -27,3 +27,9 @@ var ErrCorruptArchive = errors.New("notebook: corrupt archive")
 // [DB.Archive] + Forget-all + [DB.Import], but this package itself never
 // drops live data.
 var ErrTargetNotEmpty = errors.New("notebook: import target not empty")
+
+// ErrInvalidCadence is returned synchronously by [PeriodicBackup] when the
+// supplied cadence is non-positive (zero or negative). The helper validates
+// before constructing the ticker so a programmer mistake fails fast and no
+// goroutine / ticker is started.
+var ErrInvalidCadence = errors.New("notebook: invalid cadence")
