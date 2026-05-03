@@ -119,8 +119,17 @@ var vecOnce sync.Once
 // single agent's notebook file. The zero value is not usable; construct via
 // [Open]. [DB.Close] is idempotent — repeated calls return nil and do not
 // touch the underlying handle twice.
+//
+// `path` records the on-disk SQLite file backing the handle so [DB.Import]
+// can rename a validated spool file over it without re-resolving via
+// [agentDBPath]. `importMu` serialises [DB.Import] against itself; callers
+// must NOT invoke [DB.Import] concurrently with other methods on the same
+// receiver — Import closes the underlying connection and swaps it for a new
+// one, and a Recall in flight would race the swap.
 type DB struct {
 	sql      *sql.DB
+	path     string
+	importMu sync.Mutex
 	closeOne sync.Once
 	closeErr error
 }
@@ -205,7 +214,7 @@ func openAt(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("notebook: schema init on %q: %w", path, err)
 	}
 
-	return &DB{sql: sqlDB}, nil
+	return &DB{sql: sqlDB, path: path}, nil
 }
 
 // Close closes the underlying [database/sql.DB]. Safe to call multiple times
