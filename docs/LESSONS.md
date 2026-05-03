@@ -707,3 +707,29 @@ Implemented `notebook.PeriodicBackup` as a best-effort periodic helper for archi
 - Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.5. **Future**: cron-expression-driven scheduling lands in M3.3 (`robfig/cron`).
 
 ---
+
+## 2026-05-04 — M2b.6: Notebook ImportFromArchive helper
+
+**PR**: [#26](https://github.com/vadimtrunov/watchkeepers/pull/26)
+**Merged**: 2026-05-04 (squash commit `534a5fe`)
+
+### Context
+
+Implemented `notebook.ImportFromArchive(ctx, db, agentID, fetcher)` as a library helper that streams an archive tarball into the live Notebook via a `Fetcher` interface abstraction. Complements M2b.4/M2b.5's `Storer` interface for archive orchestration. Phase 1 planner verdict: "fits" (~3–4 files, ≤ 1 day); executor (opus) delivered 1 commit (+714 LOC, 10 tests passing under `-race`). Phase 4 iter 1 converged 0/0/0. Phase 6 CI green 9/9. Phase 7 PR squash-merged (`534a5fe`); ROADMAP M2b.6 marked `[x]` (`0e88a44`).
+
+### Pattern
+
+**Single-method `Fetcher` interface complements `Storer` for cross-package consumption**: M2b.4/M2b.5 use `notebook.Storer { Put(...) }`; M2b.6 introduces `notebook.Fetcher { Get(...) }`. Both are one-method interfaces — Go's "accept interfaces, return structs" idiom. Concrete `archivestore.LocalFS` and `archivestore.S3Compatible` satisfy both via structural typing without explicit declaration. Pattern: when a downstream package needs DIFFERENT methods of an upstream package's type at different sites, define separate single-method interfaces in the downstream rather than extending one or accepting the wide concrete type.
+
+**Defer LIFO ordering matters when one resource owns another**: `ImportFromArchive` does `defer rc.Close()` THEN `defer db.Close()`. Go runs defers in reverse, so `db.Close` runs FIRST when the function returns — that's correct because `db.Import(ctx, rc)` is a method on `db` that consumes `rc`; closing `rc` first while `db.Close` is still running could leave the database mid-flush with no source. Pattern: when X depends on Y for its operation, defer Y.Close BEFORE X.Close (so X.Close runs first via LIFO).
+
+**Import-then-audit ordering with explicit data-presence test**: When orchestrating "side effect → audit emit", the data lands BEFORE the audit. If audit fails, the test must explicitly verify the data is still in place — not just that the function returned an error. M2b.6's `TestImportFromArchive_LogAppendFails` reopens the destination notebook AFTER the audit failure and runs `assertImportedSeed` for every seed; without this assertion, a regression where Import is also rolled back on audit failure would silently break the partial-failure contract.
+
+**Cross-package `Fetcher` compile-time check via test-only import**: `var _ Fetcher = (*archivestore.LocalFS)(nil)` in `import_from_archive_test.go` confirms structural compatibility at build time. Production `notebook` code MUST NOT import `archivestore` (cycle: archivestore tests import notebook). But test files compile separately into a different binary — they CAN import archivestore. Pattern: when verifying interface compliance across packages with a one-way cycle, put the compile-time `var _ Iface = ...` in `_test.go`, not in production code.
+
+### References
+
+- Files: `core/pkg/notebook/import_from_archive.go` + `_test.go`, `core/pkg/notebook/README.md` (delta)
+- Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.6. **Future**: `wk notebook import <wk> <archive>` CLI lands in M10.3 on top of this helper; auto-inheritance policy is Phase 2.
+
+---

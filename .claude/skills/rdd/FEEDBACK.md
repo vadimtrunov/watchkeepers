@@ -745,3 +745,30 @@ The TS-vs-Go harness ambiguity (raised in M2b.4 FEEDBACK) is now compounding: M2
 - Total wall time from /rdd to merge: ~30 min
 
 ---
+
+## 2026-05-04 — M2b.6: Notebook ImportFromArchive helper
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/26
+**Phases with incidents**: none (clean run)
+
+### What worked
+
+Phase 4 review converged on iteration 1 with 0 blocker, 0 important, 0 nit — the TASK brief named all four "concerns to spot-check" (defer LIFO order, embedding-byte assertion, LogAppend-fails data-presence verification, ctx cancellation via gate channel) and the executor implemented each correctly the first time. When the brief enumerates the failure modes, the executor doesn't have to guess. Bonus interface-satisfaction test (`TestImportFromArchive_FetcherInterfaceSatisfiedByLocalFS`) covers BOTH `LocalFS` AND `S3Compatible` — the executor went above the AC requirement (only one was strictly needed) for marginal extra coverage. Phase 6 CI green 9/9. Phase 7 PR squash-merged; cascade commit `0e88a44` closed M2b.6 immediately. Truncation guard from M2b.1 FEEDBACK still holding.
+
+### What wasted effort
+
+The TS-vs-Go harness ambiguity is now compounding for the THIRD time (M2b.4, M2b.5, M2b.6 all ship library helpers with no concrete harness caller). Worth surfacing as a backlog item BEFORE M2b.7/M2b.8 add yet more. The accumulating "library helpers awaiting harness wiring" pile is a smell — eventually someone will need to write either a Go harness binary, a CLI shim, or wire these into the existing TS harness via shellouts.
+
+### Suggested skill changes
+
+- Promote the "single-method interfaces for cross-package consumption" pattern to `references/refactoring.md` or a SKILL note. It's now confirmed across `Storer` (M2b.4/M2b.5) and `Fetcher` (M2b.6).
+- Promote the "test-only import for cross-package compile-time interface check" pattern — useful for any package where production code can't import a sibling but test code can.
+
+### Metrics
+
+- Review iterations: 1 (converged immediately)
+- PR-fix iterations: 0 (CI green on first push)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~30 min
+
+---
