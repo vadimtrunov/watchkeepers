@@ -664,3 +664,30 @@ The fixer for embedding-byte assertion required cross-package SQLite access (arc
 - Total wall time from /rdd to merge: ~30 min
 
 ---
+
+## 2026-05-03 — M2b.3.b: S3Compatible ArchiveStore via minio-go + testcontainers-go
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/23
+**Phases with incidents**: none (clean run)
+
+### What worked
+
+Reviewer iteration 1 converged immediately with 0 blocker, 0 important, 5 nits — the TASK brief named the patterns (Stat-then-Read for NoSuchKey, singleton container with sync.Once, per-test bucket isolation) so the executor had no guesswork. The "extract helpers on second-backend's PR" timing was right: M2b.3.a shipping LocalFS-private helpers minimised that PR's surface; M2b.3.b's refactor commit (`87e798f`) was small and reviewable on its own. Both PRs stayed under the per-PR budget. Truncation guard from FEEDBACK 2026-05-03 still holding — executor printed structured report cleanly.
+
+### What wasted effort
+
+Reviewer flagged 5 nits — same "low bar for nits" pattern observed on M2b.2.b (4 nits) and M2b.3.a (2 nits). Three consecutive iterations with 2–5 nits each suggests reviewers reach for content when convergence is otherwise easy. Worth promoting the FEEDBACK suggestion from M2b.2.b: tighten the bar to "nits that change a future maintainer's behaviour, not pure preference".
+
+### Suggested skill changes
+
+- `references/agent-briefs/code-reviewer.md`: add explicit guidance "if iter-1 has 0 blocker AND 0 important, prefer 0–2 nits over 4+. Doc-comment-style suggestions belong in a separate doc-pass, not the review JSON."
+- M2b.3 milestone is the third consecutive case where the planner correctly decomposed a "feature + N implementations" sub-item. Pattern is well-established. Consider promoting it to a SKILL note or `references/decomposition.md`.
+
+### Metrics
+
+- Review iterations: 1 (converged immediately)
+- PR-fix iterations: 0 (CI green on first push)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~30 min
+
+---

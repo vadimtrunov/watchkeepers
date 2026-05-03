@@ -631,3 +631,29 @@ Introduced the `ArchiveStore` interface as an abstraction for backup-tarball sto
 - Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.3 → M2b.3.a. **M2b.3.b plugs** S3Compatible into the parameterised contract suite.
 
 ---
+
+## 2026-05-03 — M2b.3.b: S3Compatible ArchiveStore via minio-go + testcontainers-go
+
+**PR**: [#23](https://github.com/vadimtrunov/watchkeepers/pull/23)
+**Merged**: 2026-05-03 (squash commit `fafb346`)
+
+### Context
+
+Implemented the S3Compatible backend for ArchiveStore using minio-go/v7 and testcontainers-go/modules/minio. Extracted tarball-streaming helpers (`writeTarballStream`, `openTarballStream`) from LocalFS into `internal_tar.go` so both backends share wire-compatible code. Phase 3 executor delivered 2 commits (refactor + S3 feat) with 7 files total; 17 S3-specific sub-tests passed against a real minio Docker container. Reviewer iteration 1 converged immediately (0 blocker, 0 important, 5 nits). PR squash-merged; cascade commit `b573a95` closed M2b.3 entirely.
+
+### Pattern
+
+**Tarball helper extraction is the right call on the second backend, not the first**: M2b.3.a kept tar/gzip helpers private to `localfs.go`. M2b.3.b refactored them into `internal_tar.go` (`writeTarballStream`, `openTarballStream`) so both LocalFS and S3Compatible call the same helpers, guaranteeing identical wire bytes. Pattern: premature extraction after a single implementation is YAGNI; on the second implementation it becomes necessary. Timing: refactor as its own commit (M2b.3.b iter 0) so reviews separate interface concerns from helper canonicalization.
+
+**`testcontainers-go/modules/minio` + `sync.Once` singleton for integration tests**: Official testcontainers module is safer than hand-rolled GenericContainer. Pattern: `var (testMinioOnce sync.Once; testMinioContainer *minio.Container; testMinioErr error)` with a `sharedMinioContainer(t)` helper lazily initializing on first call. Per-test bucket isolation via UUID names prevents state leakage. Ryuk reaper terminates the container on process exit (no manual `Terminate`). Skip tests on Docker-unavailable via substring matcher (`"docker daemon"`, `"connection refused"`, `"Cannot connect"`) returning `t.Skip`; no build tags needed, single `go test ./...` invocation works everywhere.
+
+**`minio.Client.GetObject()` → `obj.Stat()` pattern for `NoSuchKey` detection**: `GetObject` returns `*minio.Object` immediately; the actual fetch happens on first `Read`. To detect missing objects up-front (mapping to `ErrNotFound`), call `obj.Stat()` first and check `minio.ToErrorResponse(err).Code == "NoSuchKey"`. Without this, the error surfaces inside the tarball reader on first `Read`, where it's harder to map cleanly to a sentinel.
+
+**Per-test bucket isolation without manual cleanup**: Contract tests create a fresh UUID-named bucket for each invocation. No explicit teardown needed — Ryuk reaper cleans up the whole container on exit, and bucket-creation latency (~10ms) is negligible against the container startup cost. Pattern is idempotent and test-friendly.
+
+### References
+
+- Files: `core/pkg/archivestore/{s3,internal_tar}.go` + `s3_test.go`, `core/pkg/archivestore/{localfs,README}.go` (refactored), `go.mod` (+ minio-go/v7 v7.1.0, testcontainers-go/modules/minio v0.42.0)
+- Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.3 (now `[x]`). **M2b.4 onward** (Archive on retire / Periodic backup / Import / Audit-log) plug into the stable ArchiveStore interface.
+
+---
