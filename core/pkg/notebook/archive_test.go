@@ -5,6 +5,8 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 )
 
 // roundTripSeed describes one entry to seed-then-round-trip in
@@ -63,6 +65,23 @@ func assertRoundTrip(ctx context.Context, t *testing.T, dst *DB, s roundTripSeed
 	}
 	if results[0].Content != s.content {
 		t.Fatalf("Recall(%s) content = %q, want %q", s.category, results[0].Content, s.content)
+	}
+
+	// AC5: embedding bytes must survive the Archive→Import round-trip
+	// byte-for-byte. Recall only checks semantic similarity; this SELECT
+	// directly reads entry_vec.embedding to catch truncation or zeroing.
+	want, err := sqlitevec.SerializeFloat32(s.embedding)
+	if err != nil {
+		t.Fatalf("SerializeFloat32(%s): %v", s.id, err)
+	}
+	var got []byte
+	if err := dst.sql.QueryRowContext(ctx,
+		"SELECT embedding FROM entry_vec WHERE id = ?", s.id,
+	).Scan(&got); err != nil {
+		t.Fatalf("SELECT entry_vec.embedding for %s: %v", s.id, err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("entry %s: embedding bytes differ: got %x want %x", s.id, got, want)
 	}
 }
 
