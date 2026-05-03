@@ -200,6 +200,8 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [ ] **M2b.3** `ArchiveStore` Go interface with two implementations:
   - `LocalFS` — default; tarballs to `$DATA_DIR/archives/notebook/<agent_id>/<timestamp>.tar.gz`.
   - `S3Compatible` — any S3-API endpoint (AWS S3, Cloudflare R2, Wasabi, SeaweedFS, Garage, customer-owned); config via endpoint URL + credentials through secrets interface.
+  - [ ] **M2b.3.a** ArchiveStore Go interface + LocalFS implementation: define ArchiveStore (Put/Get/List) with sentinel errors in `core/pkg/archivestore/`; LocalFS writes tarballs to `<root>/notebook/<agent_id>/<RFC3339>.tar.gz` with 0o700 dir mode and UUID validation, plus contract+round-trip tests against `notebook.Archive`/`Import`.
+  - [ ] **M2b.3.b** S3Compatible ArchiveStore implementation: minio-go-based backend with endpoint/accessKey/secretKey/bucket/secure config (plain struct; secrets interface deferred to M9); object keys `notebook/<agent_id>/<RFC3339>.tar.gz`; testcontainers-go minio integration smoke wired into parameterised contract suite.
 - [ ] **M2b.4** Archive on retire: harness invokes `Archive` during graceful shutdown; resulting URI emitted to Keeper's Log via `keepclient.log_append` (`notebook_archived` event).
 - [ ] **M2b.5** Periodic backup: cron-scheduled snapshot of live Notebook files to `ArchiveStore` (`notebook_backed_up` event). Cadence configurable.
 - [ ] **M2b.6** Import: `notebook.Import(agent_id, archive_uri)` restores a predecessor's archive into a fresh agent file. Operator-driven in Phase 1 via CLI (see M10). Auto-inheritance policy → ⏸ Phase 2.
