@@ -5,9 +5,39 @@ Module: `github.com/vadimtrunov/watchkeepers/core/pkg/notebook`
 This package owns the on-disk storage layer for an agent's private memory
 ("Notebook"). It opens (or creates) a per-agent SQLite file at
 `$WATCHKEEPER_DATA/notebook/<agent_id>.sqlite`, applies
-`PRAGMA journal_mode=WAL`, and ensures the schema exists. The
-Remember/Recall/Forget/Archive/Import/Stats Go API surface is **out of
-scope** for M2b.1 — it lands in M2b.2 on top of this substrate.
+`PRAGMA journal_mode=WAL`, and ensures the schema exists. M2b.2.a adds the
+in-process CRUD surface (`Remember` / `Recall` / `Forget` / `Stats`) on top of
+the substrate. `Archive` / `Import` (snapshot lifecycle) and the audit-log
+write to Keeper's Log remain out of scope and are deferred to M2b.2.b and
+M2b.7 respectively.
+
+## Public API
+
+The four exported methods on `*DB` (M2b.2.a) cover the in-process CRUD
+surface that the harness will call from M2b.4 onwards:
+
+| Method                                               | Purpose                                                                                                                                                         | AC  |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
+| `Remember(ctx, e Entry) (string, error)`             | Insert into `entry` and `entry_vec` in one transaction; auto-generates a UUID v7 when `Entry.ID` is empty and defaults `CreatedAt` to `time.Now().UnixMilli()`. | AC1 |
+| `Recall(ctx, q RecallQuery) ([]RecallResult, error)` | Cosine KNN against `entry_vec` joined back to `entry`; filters out superseded rows and rows whose `active_after` is in the future. Optional category filter.    | AC2 |
+| `Forget(ctx, id string) error`                       | Atomic delete from both tables. Returns `ErrNotFound` when the id is well-formed but unknown.                                                                   | AC3 |
+| `Stats(ctx) (Stats, error)`                          | Aggregate counts: total / active / superseded, plus `ByCategory` over active entries.                                                                           | AC4 |
+
+Sentinel errors live in `errors.go`:
+
+- `ErrInvalidEntry` — bad shape (empty content, wrong embedding dim, bad
+  category, non-canonical UUID).
+- `ErrNotFound` — `Forget` called against a missing id.
+
+Two partial indexes back the hot read paths and are added by the idempotent
+schema-init (AC5):
+
+- `entry_category_active ON entry(category) WHERE superseded_by IS NULL`
+- `entry_active_after ON entry(active_after) WHERE superseded_by IS NULL`
+
+The indexes use `CREATE INDEX IF NOT EXISTS` so an existing M2b.1 file
+upgrades transparently the first time it is opened by an M2b.2.a binary;
+the migration is exercised by `TestSchema_IndexesAddedOnReopen`.
 
 ## Driver decision
 
@@ -91,10 +121,9 @@ information leaks on a shared host should rely on standard Unix user
 isolation (separate UIDs per agent process) — running multiple agents under
 the same UID lets each read every other notebook in the same data dir.
 
-## Out of scope for M2b.1
+## Out of scope (still deferred)
 
-- Public API for the Notebook (`Remember` / `Recall` / `Forget` / `Archive`
-  / `Import` / `Stats`) — see M2b.2.
+- `Archive` / `Import` snapshot lifecycle — see M2b.2.b.
 - ArchiveStore for retired entries — see M2b.3.
 - Audit-log integration with the Keep `keepers_log` — see M2b.7.
 - Watchmaster `promote_to_keep` — see M2b.8.
