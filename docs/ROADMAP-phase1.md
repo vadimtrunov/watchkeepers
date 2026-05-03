@@ -193,7 +193,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Scope**
 
-- [ ] **M2b.1** SQLite + `sqlite-vec` embedded storage. Per-agent file at `$WATCHKEEPER_DATA/notebook/<agent_id>.sqlite`. Schema: `entry(id, category ∈ {lesson, preference, observation, pending_task, relationship_note}, subject, content, embedding, created_at, last_used_at, relevance_score, superseded_by, evidence_log_ref, tool_version, active_after)`.
+- [x] **M2b.1** SQLite + `sqlite-vec` embedded storage. Per-agent file at `$WATCHKEEPER_DATA/notebook/<agent_id>.sqlite`. Schema: `entry(id, category ∈ {lesson, preference, observation, pending_task, relationship_note}, subject, content, embedding, created_at, last_used_at, relevance_score, superseded_by, evidence_log_ref, tool_version, active_after)`.
 - [ ] **M2b.2** Go library `notebook/` linked into the harness process (not a service). API: `Remember`, `Recall`, `Forget`, `Archive`, `Import`, `Stats`.
 - [ ] **M2b.3** `ArchiveStore` Go interface with two implementations:
   - `LocalFS` — default; tarballs to `$DATA_DIR/archives/notebook/<agent_id>/<timestamp>.tar.gz`.
