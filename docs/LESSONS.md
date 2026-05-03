@@ -603,3 +603,31 @@ Implemented the Notebook library's snapshot lifecycle: `Archive` exports the liv
 - Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.2 (now `[x]`). **M2b.3 owns ArchiveStore** — wraps Archive/Import with LocalFS + S3Compatible backends.
 
 ---
+
+## 2026-05-03 — M2b.3.a: ArchiveStore interface + LocalFS implementation
+
+**PR**: [#22](https://github.com/vadimtrunov/watchkeepers/pull/22)
+**Merged**: 2026-05-03 (squash commit `ba28046`)
+
+### Context
+
+Introduced the `ArchiveStore` interface as an abstraction for backup-tarball storage, with a LocalFS implementation storing tarballs under a root directory. Phase 1 planner decomposed M2b.3 into M2b.3.a (interface + LocalFS) and M2b.3.b (S3Compatible). M2b.3.a includes parameterized contract tests (`runContractTests`) reusable by M2b.3.b, path-traversal defenses, and RFC3339 timestamp filenames. Executor delivered all 5 AC green in 1 commit; Phase 4 fixer iter 1 resolved 1 important (embedding-byte round-trip test coverage via external SQLite access).
+
+### Pattern
+
+**Stdlib `archive/tar` + `compress/gzip` cover backup-tarball needs without a new dep**: M2b.3.a wraps a `notebook.Archive` snapshot in a single-entry tarball at `<root>/notebook/<agentID>/<RFC3339>.tar.gz` using only stdlib. Pattern: spool the snapshot to a temp file in the same dir as the target tarball (cross-FS-rename safe per M2b.2.b LESSONS), `os.Stat` it for `tar.Header.Size`, then write tar+gzip in one streaming pass. No memory blowup, no third-party deps.
+
+**Path-traversal defence via `filepath.Clean` + `strings.HasPrefix`**: For any `Get(uri)`-style API where the URI maps to a filesystem path under a known root, the canonical defence is: parse the scheme, strip prefix, `filepath.Abs` + `filepath.Clean` both the input AND the root, then verify `strings.HasPrefix(cleanedInput, cleanedRoot + filepath.Separator)`. Reject otherwise with a wrapped sentinel. Catches `file:///etc/passwd`, `file://<root>/../../etc/passwd`, and `s3://` schemes uniformly.
+
+**Parameterised contract test suite for backend interfaces**: When introducing an interface that will have multiple implementations (here: `ArchiveStore` with `LocalFS` now and `S3Compatible` later), write the contract tests as `func runContractTests(t *testing.T, factory func(t *testing.T) ArchiveStore)`. Each implementation calls it with its own factory. Future M2b.3.b will reuse the suite verbatim with a minio-backed factory; no duplicated assertions.
+
+**RFC3339 with hyphens-not-colons for filename-safe timestamps**: `time.Now().UTC().Format("2006-01-02T15-04-05Z")` produces fixed-length, lex-sortable, filename-portable timestamps. Colons are illegal in Windows filenames; the dash variant works on every filesystem.
+
+**Cross-package vec0 access requires `sqlitevec.Auto()` registration**: Tests that open a SQLite file from outside the `notebook` package must register the sqlite-vec extension before the first connection. The notebook package does this via `vecOnce.Do(func() { sqlitevec.Auto() })` in `db.go`; external packages should call the same helper from `init()` so the global SQLite auto-extension table contains the entry by the time `sql.Open(..., "?mode=ro")` runs. Duplicate registrations are safe (sqlite-vec is idempotent).
+
+### References
+
+- Files: `core/pkg/archivestore/{archivestore,localfs}.go` + `_test.go`, `core/pkg/archivestore/contract_test.go`, `core/pkg/archivestore/README.md`
+- Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.3 → M2b.3.a. **M2b.3.b plugs** S3Compatible into the parameterised contract suite.
+
+---

@@ -637,3 +637,30 @@ Iter-1 reviewer flagged 4 nits (`TestImport_AtomicRename` name oversells, `&immu
 - Total wall time from /rdd to merge: ~50 min
 
 ---
+
+## 2026-05-03 — M2b.3.a: ArchiveStore interface + LocalFS implementation
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/22
+**Phases with incidents**: 4 (1 important fixer iter)
+
+### What worked
+
+Truncation guard from prior FEEDBACK entries still holding — executor session printed full structured report before exit. Decomposition rule from M2b.2 proved correct: M2b.3 split into M2b.3.a (interface + LocalFS) and M2b.3.b (S3Compatible), kept each PR compact. Reviewer iteration 1 converged to 0/1/2 severity split — the `important` was genuine (embedding-byte round-trip test must open the imported SQLite file directly, not mock). Fixer resolved it cleanly: added `assertEmbeddingBytesRoundTrip` helper that registers `sqlitevec.Auto()` in `init()`, opens the notebook-owned file directly via `sql.Open("sqlite3", "file:..?mode=ro&_foreign_keys=on")`, SELECTs the embedding, and `bytes.Equal`-s it. Pattern reusable for any external integration test touching vec0.
+
+### What wasted effort
+
+The fixer for embedding-byte assertion required cross-package SQLite access (archivestore test opening a notebook-owned file). The setup ceremony — `init()` registering `sqlitevec.Auto()`, closing the notebook handle before opening a raw `*sql.DB`, gocyclo extraction of `assertEmbeddingBytesRoundTrip` to satisfy lint — was ~70 LOC of test boilerplate. Worth the coverage but a reminder that "test embedding bytes from outside the package" is a recurring tax on any external integration test.
+
+### Suggested skill changes
+
+- Consider whether `notebook` should expose a small test-helper API for "open the imported file in a way external tests can verify". E.g. `func (d *DB) DBPath() string` plus a doc note on how to register vec extension. This would let archivestore (and M2b.3.b) avoid duplicating the `init()` + raw-`sql.Open` boilerplate.
+- The third-consecutive-decomposition trend (M2.8.d, M2b.2, M2b.3 all split) suggests milestones in ROADMAP-phase1.md are bundled too tightly. Consider a SKILL note: "if planner decomposes 3 in a row, lower the heuristic threshold from ~1 day to ~half day for the rest of the milestone".
+
+### Metrics
+
+- Review iterations: 2 (iter 1: 0/1/2; iter 2: converged)
+- PR-fix iterations: 0 (CI green on first push)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~30 min
+
+---
