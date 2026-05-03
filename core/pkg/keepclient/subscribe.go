@@ -137,11 +137,29 @@ func (s *Stream) Close() error {
 // 5xx→[ErrInternal]). On 2xx the body is wrapped in a [Stream]; the caller
 // owns Close().
 //
-// Out of scope for M2.8.d.a (deferred to M2.8.d.b): reconnect, exponential
-// backoff, Last-Event-ID resume, deduplication. Subscribe is a single-attempt
-// open; callers compose retry behavior on top.
+// Subscribe is a single-attempt open: it does NOT reconnect, retry, or
+// resume after a transport error. Callers that need a long-lived stream
+// across drops should use [Client.SubscribeResilient] (M2.8.d.b), which
+// layers reconnect + Last-Event-ID resume + dedup on top of this primitive.
 func (c *Client) Subscribe(ctx context.Context) (*Stream, error) {
-	c.cfg.logger(ctx, "keepclient.subscribe begin", "path", subscribePath)
+	return c.subscribeWithLastEventID(ctx, "")
+}
+
+// subscribeWithLastEventID opens the SSE stream like [Client.Subscribe] but
+// optionally sets the `Last-Event-ID` request header to lastID when lastID
+// is non-empty. Used by [Client.SubscribeResilient] to forward the last
+// observed [Event.ID] across reconnects.
+//
+// Note on server behavior: the current Keep server (M2.7.e) does NOT read
+// the `Last-Event-ID` header — it always streams events from the moment
+// the subscription is registered. The client sends the header for
+// forward-compatibility with a future server-side replay implementation;
+// callers must not assume gap-free delivery across a reconnect. The
+// [Client.SubscribeResilient] dedup hook (`WithDedup`/`WithDedupLRU`) is
+// the safety net for the duplicate-on-reconnect case once the server does
+// honor the header.
+func (c *Client) subscribeWithLastEventID(ctx context.Context, lastID string) (*Stream, error) {
+	c.cfg.logger(ctx, "keepclient.subscribe begin", "path", subscribePath, "last_event_id", lastID)
 
 	if c.cfg.tokenSource == nil {
 		c.cfg.logger(ctx, "keepclient.subscribe end", "status", 0, "err", ErrNoTokenSource)
@@ -160,6 +178,9 @@ func (c *Client) Subscribe(ctx context.Context) (*Stream, error) {
 		return nil, fmt.Errorf("keepclient: build request: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	if lastID != "" {
+		req.Header.Set("Last-Event-ID", lastID)
+	}
 
 	// Resolve the token BEFORE issuing the request so a refresh failure
 	// never becomes a stale-token request (mirrors do.go discipline).
