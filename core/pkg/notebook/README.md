@@ -202,6 +202,55 @@ Wiring this helper INTO any specific harness (Go binary, CLI shim, or TS
 shellout) is deferred to a follow-up; M2b.4 ships only the library
 function.
 
+## PeriodicBackup
+
+M2b.5 layers a periodic-backup helper on top of the same Archive→Put→
+LogAppend pipeline `ArchiveOnRetire` uses. Where retire fires once at
+graceful shutdown, `PeriodicBackup` blocks in a ticker loop and emits
+`notebook_backed_up` audit events on every cadence interval. It exists so
+agents that crash between graceful shutdowns still leave a recent
+snapshot in the archivestore — the retire path covers clean exits, the
+periodic loop covers everything else.
+
+```go
+go func() {
+    err := notebook.PeriodicBackup(ctx, db, agentID, store, client, 30*time.Minute, func(uri string, err error) {
+        if err != nil { /* log; next tick will retry */ }
+    })
+    // err is ctx.Err() on shutdown.
+    _ = err
+}()
+```
+
+Contract:
+
+- `cadence` is a fixed `time.Duration`. Cron-expression scheduling
+  (`@daily`, `0 */30 * * * *`, …) is **not** part of M2b.5 — see M3.3 for
+  the `robfig/cron` integration. A non-positive cadence returns the new
+  `ErrInvalidCadence` sentinel synchronously without starting a goroutine.
+- Per-tick failures are best-effort: `Archive`, `Put`, or `LogAppend`
+  errors are surfaced via the optional `onTick` callback but do **not**
+  exit the loop. The next tick still fires. If a transient archivestore
+  outage drops three ticks in a row the fourth still tries.
+- `onTick` is called **synchronously** on the loop goroutine (no
+  per-tick `go func()`). A slow callback delays the next ticker fire —
+  Go's `time.Ticker` drops missed ticks rather than queueing. Keep
+  callbacks fast (log + return); spawn a goroutine inside the callback
+  if you need async work.
+- The loop exits only when `ctx` is cancelled, returning the
+  cancellation error (`context.Canceled` / `context.DeadlineExceeded`).
+  An in-flight tick is allowed to finish current step (the ctx
+  cancellation propagates into `Archive` / `Put` / `LogAppend`, all of
+  which honour ctx).
+
+The shared Archive→Put→LogAppend body lives in a private
+`archiveAndAudit(ctx, db, agentID, store, logger, eventType)` so
+`ArchiveOnRetire` and `PeriodicBackup` agree on the partial-failure
+contract by construction. The only difference between the two callers is
+the `event_type` written to keepers_log: `"notebook_archived"` vs
+`"notebook_backed_up"`. Downstream subscribers distinguish the two via
+that column.
+
 ## Out of scope (still deferred)
 
 - Watchmaster `promote_to_keep` — see M2b.8.
