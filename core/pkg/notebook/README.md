@@ -251,6 +251,60 @@ the `event_type` written to keepers_log: `"notebook_archived"` vs
 `"notebook_backed_up"`. Downstream subscribers distinguish the two via
 that column.
 
+## ImportFromArchive
+
+M2b.6 ships the inverse of `ArchiveOnRetire`: a harness-language-neutral
+library helper that orchestrates the three already-merged primitives —
+`archivestore.ArchiveStore.Get`, `notebook.Open`, `notebook.*DB.Import` —
+into one operator-callable "restore a predecessor's archive into a fresh
+agent file" call. On success it emits a `notebook_imported` event to
+Keeper's Log via the same `Logger` interface used by `ArchiveOnRetire`.
+The helper opens AND closes the destination notebook itself; the caller
+does NOT pass a `*DB`.
+
+```go
+client := keepclient.NewClient(...)
+store, _ := archivestore.NewLocalFS(archivestore.WithRoot("/var/lib/watchkeepers"))
+
+if err := notebook.ImportFromArchive(
+    ctx,
+    successorAgentID,
+    "file:///var/lib/watchkeepers/notebook/<predecessor>/2026-05-03T12-00-00Z.tar.gz",
+    store,
+    client,
+); err != nil {
+    // wraps ErrInvalidEntry / archivestore.ErrNotFound /
+    // ErrCorruptArchive / ErrTargetNotEmpty / context.Canceled / etc.
+}
+```
+
+The helper takes a `notebook.Fetcher { Get(ctx, uri) (io.ReadCloser, error) }`
+single-method interface — separate from `Storer { Put(...) }` so each
+helper's contract stays minimal per the Go single-method-interface idiom.
+Both `*archivestore.LocalFS` and `*archivestore.S3Compatible` satisfy
+`Fetcher` structurally, so callers wire their existing store value
+straight in without any adapter shim.
+
+The error contract follows the same wrapping discipline as
+`ArchiveOnRetire`:
+
+- Validation failure (bad UUID, empty URI) → `ErrInvalidEntry`, no I/O.
+- Fetch failure → wrapped error matching `errors.Is(err, fetcherErr)`,
+  e.g. `archivestore.ErrNotFound`, `archivestore.ErrInvalidURI`.
+- Open failure → wrapped error.
+- Import failure → wrapped error matching `ErrCorruptArchive` or
+  `ErrTargetNotEmpty`.
+- LogAppend failure → wrapped error; **the import succeeded**, so the
+  data is in but the audit didn't land. The caller can retry just the
+  audit emit with the same payload shape (the audit emit is idempotent
+  at the keeper-log level).
+- Context cancel → wrapped `context.Canceled` /
+  `context.DeadlineExceeded`.
+
+Wiring this helper INTO any specific harness (a `wk notebook import` CLI
+subcommand, the auto-inheritance policy, or a TS shellout) is deferred
+to follow-ups; M2b.6 ships only the library function.
+
 ## Out of scope (still deferred)
 
 - Watchmaster `promote_to_keep` — see M2b.8.
