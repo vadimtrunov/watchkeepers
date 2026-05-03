@@ -408,3 +408,31 @@ Extended `core/pkg/keepclient/` with three typed read methods (Search, GetManife
 - Docs: `docs/ROADMAP-phase1.md` §M2 → M2.8 → M2.8.b
 
 ---
+
+## 2026-05-03 — M2.8.c: keepclient write endpoints (Store, LogAppend, PutManifestVersion)
+
+**PR**: [#15](https://github.com/vadimtrunov/watchkeepers/pull/15)
+**Merged**: 2026-05-03 09:23
+
+### Context
+
+Extended `core/pkg/keepclient/` with three typed write methods (Store, LogAppend, PutManifestVersion) that wrap stable server-side endpoints, completing the read+write surface. Each method reuses M2.8.a's transport helper `do()` and follows M2.8.b's per-method test matrices. Subscribe and async streaming deferred to M2.8.d.
+
+### Pattern
+
+**Three endpoints, one shared `do()` helper confirmed for the third time**: Store/LogAppend/PutManifestVersion are each ~50 LOC of typed models + a one-liner `do(ctx, method, path, body, out)` call. Layout: one `write_<endpoint>.go` + one `write_<endpoint>_test.go` per method. The `do()` helper absorbed all token injection, error mapping, and JSON marshalling by design; write endpoints inherit the same shape.
+
+**Path-parametric endpoints with belt-and-suspenders validation**: `PutManifestVersion` uses `PUT /v1/manifests/{manifest_id}/versions`. Client interpolates the id with `url.PathEscape(manifestID)` and pre-validates it as a canonical UUID (regex `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`). The server also rejects malformed ids — client validation is not trust, just early feedback.
+
+**Server JSON-shape mirroring with deliberate `omitempty` divergence**: Client request structs add `omitempty` on optional fields (subject, correlation_id, jsonb fields, personality, language) while the server has none. Intentional — server defaults fire when a field is absent, and `DisallowUnknownFields` rejects unknown KEYS, not absent ones. Future write-endpoint clients should document this divergence in struct godoc: "omitempty tags allow callers to omit optional fields; server applies defaults."
+
+**No new error sentinels needed for write endpoints**: Existing `ErrConflict` (409) covers `version_conflict` from Put manifest uniqueness violation. 413/415 surface as raw `*ServerError` via `errors.As` (no sentinel needed). Client-shape errors return 400; server doesn't surface new write-specific codes.
+
+**Test-file commit shape constrained by lefthook pre-commit golangci-lint**: The strict "failing-test commit, then impl commit" cadence is physically impossible — undefined-symbol references fail the `golangci-lint typecheck` stage before the impl lands. Practical layout: combine test+impl per endpoint into one commit, mentioning the constraint in the commit body. Fixer can then land follow-up cleanup separately.
+
+### References
+
+- Files: `core/pkg/keepclient/{write_store,write_logappend,write_putmanifestversion}.go`(\_test.go), `core/cmd/keep/keepclient_write_smoke_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M2 → M2.8 → M2.8.c
+
+---

@@ -445,3 +445,29 @@ Planner's "fits one PR" heuristic was correct — the three methods shared the M
 - Total wall time from /rdd to merge: approx 5–6 hours
 
 ---
+
+## 2026-05-03 — M2.8.c: keepclient write endpoints (Store, LogAppend, PutManifestVersion)
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/15
+**Phases with incidents**: 7 (git-master merge mode)
+
+### What worked
+
+Auto-approved gates (operator's `/loop /rdd` variant-c blanket-yes) made the loop continuous; no checkpoint stalls. Phase 4 converged at iteration 0 (zero blocker/important) — TDD discipline + per-method status matrices from M2.8.b template carried over cleanly. Phase 6 polling Monitor with `bucket`+`state` allowlist worked exactly as written; CHECKS_COMPLETE arrived on schedule.
+
+### What wasted effort
+
+**Phase 7 git-master `merge`-mode agent truncation**: The `oh-my-claudecode:git-master` agent in `merge` mode produced a truncated report saying only "Found the line. Flipping M2.8.c only…" The actual steps (ROADMAP flip → commit → push) were NOT executed by the agent. Orchestrator had to perform the toggle, commit, and push directly (acceptable per SKILL.md Hard rule 1, but the agent should have completed step 4–5 of its brief). The agent reported success incompletely rather than surfacing the truncation as a failure — subtle but costly for trust.
+
+### Suggested skill changes
+
+- In `references/agent-briefs/git-master.md` mode=merge, add a "Verification before report" sub-step: require the agent to run `git log --oneline -1 origin/main` and `grep "M#.k.* \[x\]"` to prove its ROADMAP commit landed before claiming success. This ensures the agent surfaces a failure if the push didn't fire.
+
+### Metrics
+
+- Review iterations: 1 (converged)
+- PR-fix iterations: 0 (no fixer dispatched)
+- Operator interventions outside of gates: 1 (orchestrator self-corrected missing ROADMAP commit/push)
+- Total wall time from /rdd to merge: ~25 min
+
+---
