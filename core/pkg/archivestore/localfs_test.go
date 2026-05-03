@@ -3,6 +3,7 @@ package archivestore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"os"
@@ -14,8 +15,23 @@ import (
 	"testing"
 	"time"
 
+	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	_ "github.com/mattn/go-sqlite3"
+
 	"github.com/vadimtrunov/watchkeepers/core/pkg/notebook"
 )
+
+func init() {
+	// Register sqlite-vec as a SQLite auto-extension for this test binary.
+	// The notebook package's openAt calls sqlitevec.Auto() via its own
+	// vecOnce, but the embedding-bytes assertion opens the imported file
+	// via a raw sql.Open in this package, which shares the same process-
+	// global auto-extension table. Calling Auto() here ensures vec0
+	// virtual tables are accessible even if openAt has not yet been
+	// invoked. sqlitevec.Auto() is idempotent when called repeatedly
+	// from the same process.
+	sqlitevec.Auto()
+}
 
 // newTmpLocalFS returns a [*LocalFS] rooted under `t.TempDir()` with a
 // deterministic clock that ticks one second per Put. The deterministic
@@ -151,13 +167,7 @@ func TestLocalFS_RoundTripWithNotebook(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = src.Close() })
 
-	type seed struct {
-		id        string
-		category  string
-		content   string
-		embedding []float32
-	}
-	seeds := []seed{
+	seeds := []seedEntry{
 		{"11111111-1111-1111-1111-111111111111", notebook.CategoryLesson, "lesson row", makeEmbedding(1)},
 		{"22222222-2222-2222-2222-222222222222", notebook.CategoryPreference, "preference row", makeEmbedding(2)},
 		{"33333333-3333-3333-3333-333333333333", notebook.CategoryObservation, "observation row", makeEmbedding(3)},
@@ -223,6 +233,58 @@ func TestLocalFS_RoundTripWithNotebook(t *testing.T) {
 		}
 		if results[0].Content != s.content {
 			t.Fatalf("Recall(%s) content = %q, want %q", s.category, results[0].Content, s.content)
+		}
+	}
+
+	// AC8: embedding bytes must survive the Put→Get→Import round-trip
+	// byte-for-byte. openNotebookAt places the actual SQLite file at
+	// <filepath.Dir(dstPath)>/notebook/<pathToUUID("dst.sqlite")>.sqlite;
+	// we close dst first (MaxOpenConns=1 blocks a second handle) then
+	// open the file directly to SELECT entry_vec.embedding.
+	actualDstPath := filepath.Join(
+		filepath.Dir(dstPath), "notebook",
+		pathToUUID(filepath.Base(dstPath))+".sqlite",
+	)
+	if err := dst.Close(); err != nil {
+		t.Fatalf("close dst before raw open: %v", err)
+	}
+	assertEmbeddingBytesRoundTrip(ctx, t, actualDstPath, seeds)
+}
+
+type seedEntry struct {
+	id        string
+	category  string
+	content   string
+	embedding []float32
+}
+
+// assertEmbeddingBytesRoundTrip opens the imported SQLite file at sqlitePath
+// via a raw database/sql handle (sqlite-vec loaded via init's sqlitevec.Auto),
+// SELECTs entry_vec.embedding for each seed, and fails if the bytes don't
+// match sqlitevec.SerializeFloat32(seed.embedding). Extracted to keep
+// TestLocalFS_RoundTripWithNotebook's cyclomatic complexity within the
+// gocyclo threshold.
+func assertEmbeddingBytesRoundTrip(ctx context.Context, t *testing.T, sqlitePath string, seeds []seedEntry) {
+	t.Helper()
+	rawDB, err := sql.Open("sqlite3", "file:"+sqlitePath+"?mode=ro&_foreign_keys=on")
+	if err != nil {
+		t.Fatalf("raw sql.Open(%q): %v", sqlitePath, err)
+	}
+	defer func() { _ = rawDB.Close() }()
+
+	for _, s := range seeds {
+		want, err := sqlitevec.SerializeFloat32(s.embedding)
+		if err != nil {
+			t.Fatalf("SerializeFloat32(%s): %v", s.id, err)
+		}
+		var got []byte
+		if err := rawDB.QueryRowContext(ctx,
+			"SELECT embedding FROM entry_vec WHERE id = ?", s.id,
+		).Scan(&got); err != nil {
+			t.Fatalf("SELECT entry_vec.embedding for %s: %v", s.id, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("entry %s: embedding bytes differ after round-trip: got %x want %x", s.id, got, want)
 		}
 	}
 }
