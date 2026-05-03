@@ -21,9 +21,7 @@ package main_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -88,36 +86,45 @@ func bootKeepSubscribeSmoke(t *testing.T, env *testEnv) (string, *exec.Cmd, func
 // publishOutboxEvent writes one row into watchkeeper.outbox under the
 // supplied scope; the running outbox worker (KEEP_OUTBOX_POLL_INTERVAL
 // override) picks it up within the next tick and fans it out via the
-// publish.Registry to active subscribers. The returned event_type is the
-// canonical wire shape an SSE consumer observes via Event.EventType.
-func publishOutboxEvent(t *testing.T, env *testEnv, scope, eventType, payloadJSON string) {
+// publish.Registry to active subscribers. Returns the inserted row id so
+// the caller can register a t.Cleanup to delete it and prevent leftover
+// unstamped rows from polluting subsequent tests.
+func publishOutboxEvent(t *testing.T, env *testEnv, scope, eventType, payloadJSON string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := env.pool.Exec(ctx, `
+	var id string
+	if err := env.pool.QueryRow(ctx, `
 		INSERT INTO watchkeeper.outbox (
 		    aggregate_type, aggregate_id, event_type, payload, scope
 		) VALUES ($1, $2, $3, $4::jsonb, $5)
-	`, "watchkeeper", env.watchkeeperID, eventType, payloadJSON, scope); err != nil {
+		RETURNING id
+	`, "watchkeeper", env.watchkeeperID, eventType, payloadJSON, scope).Scan(&id); err != nil {
 		t.Fatalf("publish outbox %q: %v", eventType, err)
 	}
+	return id
 }
 
 // closingTransport is a custom http.RoundTripper that wraps an inner
 // transport and forcibly closes the response body of the FIRST response
-// after the configured event count has been read. Used by
+// after the configured number of complete SSE frames have been read.
+// Frames are detected by counting "\n\n" boundaries in the byte stream.
+// Using a frame count rather than a byte threshold makes the drop
+// deterministic across environments: a bytes-based threshold can be
+// skipped entirely when TCP buffering delivers all events in a single
+// read before the threshold is ever checked. Used by
 // TestKeepclientSubscribe_ReconnectSmoke to inject a transport-level
 // drop without restarting the server.
 type closingTransport struct {
-	inner          http.RoundTripper
-	dropped        atomic.Bool
-	dropAfterBytes int64
+	inner           http.RoundTripper
+	dropped         atomic.Bool
+	dropAfterFrames int
 }
 
 // RoundTrip returns the response with its Body wrapped so that, on the
-// first call, after reading more than dropAfterBytes the body returns an
-// error (simulating a connection reset). Subsequent calls pass straight
-// through (no-op).
+// first call, after observing dropAfterFrames complete SSE frames the
+// body returns io.EOF on the next Read, forcing the keepclient to
+// reconnect. Subsequent calls pass straight through (no-op).
 func (t *closingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.inner.RoundTrip(req)
 	if err != nil {
@@ -126,41 +133,66 @@ func (t *closingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if t.dropped.Load() {
 		return resp, nil
 	}
-	resp.Body = &countingBodyCloser{
-		inner:          resp.Body,
-		dropAfterBytes: t.dropAfterBytes,
-		mark:           &t.dropped,
+	resp.Body = &frameCountingBody{
+		inner:           resp.Body,
+		dropAfterFrames: t.dropAfterFrames,
+		mark:            &t.dropped,
 	}
 	return resp, nil
 }
 
-// countingBodyCloser counts bytes read; once the threshold is crossed it
-// closes the underlying body AND returns an error, so the keepclient
-// scanner surfaces a transport-level read failure (not a clean EOF).
-type countingBodyCloser struct {
-	inner          io.ReadCloser
-	dropAfterBytes int64
-	read           int64
-	mark           *atomic.Bool
-	closed         bool
+// frameCountingBody counts complete SSE frames (delimited by "\n\n") as
+// data streams through Read. Once dropAfterFrames frames have been
+// observed it returns io.EOF on the next call, simulating a clean
+// connection drop that the keepclient resilient layer must reconnect from.
+type frameCountingBody struct {
+	inner           io.ReadCloser
+	dropAfterFrames int
+	frames          int
+	tail            byte // last byte of the previous read, for "\n\n" split detection
+	mark            *atomic.Bool
+	closed          bool
 }
 
-func (c *countingBodyCloser) Read(p []byte) (int, error) {
+func (c *frameCountingBody) Read(p []byte) (int, error) {
 	if c.closed {
-		return 0, io.ErrUnexpectedEOF
+		return 0, io.EOF
 	}
-	if c.read >= c.dropAfterBytes {
+	n, err := c.inner.Read(p)
+	// Count "\n\n" frame boundaries in the bytes just read. We track the
+	// last byte of the previous read (c.tail) to catch a boundary split
+	// across two consecutive Read calls.
+	chunk := p[:n]
+	prev := c.tail
+	for i, b := range chunk {
+		var prevB byte
+		if i == 0 {
+			prevB = prev
+		} else {
+			prevB = chunk[i-1]
+		}
+		if prevB == '\n' && b == '\n' {
+			c.frames++
+		}
+	}
+	if n > 0 {
+		c.tail = chunk[n-1]
+	}
+	if c.frames >= c.dropAfterFrames {
 		c.closed = true
 		_ = c.inner.Close()
 		c.mark.Store(true)
-		return 0, &net.OpError{Op: "read", Err: errors.New("simulated connection reset")}
+		// Return the bytes already read in this call so the client sees the
+		// complete frame, then EOF on the very next read.
+		if n > 0 {
+			return n, nil
+		}
+		return 0, io.EOF
 	}
-	n, err := c.inner.Read(p)
-	c.read += int64(n)
 	return n, err
 }
 
-func (c *countingBodyCloser) Close() error {
+func (c *frameCountingBody) Close() error {
 	c.closed = true
 	return c.inner.Close()
 }
@@ -199,7 +231,8 @@ func TestKeepclientSubscribe_Smoke(t *testing.T) {
 		{"smoke.third", `{"i":3}`},
 	}
 	for _, ev := range want {
-		publishOutboxEvent(t, env, "org", ev.eventType, ev.payload)
+		id := publishOutboxEvent(t, env, "org", ev.eventType, ev.payload)
+		t.Cleanup(func() { deleteOutboxRow(t, env.pool, id) })
 	}
 
 	for i, w := range want {
@@ -248,11 +281,12 @@ func TestKeepclientSubscribe_ReconnectSmoke(t *testing.T) {
 
 	tr := &closingTransport{
 		inner: http.DefaultTransport,
-		// Drop after enough bytes to have read the first complete SSE
-		// frame (id + event + data + blank line). Real frames are well
-		// under 256 bytes for these tiny payloads, so 256 is past the
-		// first frame but well before any second one would arrive.
-		dropAfterBytes: 256,
+		// Drop after the first complete SSE frame has been delivered.
+		// Counting frames (by "\n\n" boundaries) is deterministic across
+		// CI and local environments because it doesn't depend on TCP
+		// buffering or payload size: the body returns EOF on the read
+		// immediately after the first "\n\n" terminator is seen.
+		dropAfterFrames: 1,
 	}
 	httpClient := &http.Client{Transport: tr}
 
@@ -278,7 +312,8 @@ func TestKeepclientSubscribe_ReconnectSmoke(t *testing.T) {
 	// Brief settle so the subscriber registers before the first publish.
 	time.Sleep(200 * time.Millisecond)
 
-	publishOutboxEvent(t, env, "org", "reconnect.first", `{"step":1}`)
+	id1 := publishOutboxEvent(t, env, "org", "reconnect.first", `{"step":1}`)
+	t.Cleanup(func() { deleteOutboxRow(t, env.pool, id1) })
 
 	readCtx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
 	ev1, err := stream.Next(readCtx1)
@@ -290,12 +325,13 @@ func TestKeepclientSubscribe_ReconnectSmoke(t *testing.T) {
 		t.Errorf("first Event.EventType = %q, want reconnect.first", ev1.EventType)
 	}
 
-	// Wait briefly so the closingTransport has time to register the read
-	// past the threshold (the first frame plus the next inbound chunk),
-	// then publish a second event. The transport will trip the drop on
-	// the very next read, which forces the client into reconnect.
-	time.Sleep(100 * time.Millisecond)
-	publishOutboxEvent(t, env, "org", "reconnect.second", `{"step":2}`)
+	// The frameCountingBody will have already marked the drop after
+	// delivering the first complete frame; the reconnect happens
+	// transparently inside SubscribeResilient before the next Next call.
+	// Publish the second event now — it will be delivered on the
+	// reconnected stream.
+	id2 := publishOutboxEvent(t, env, "org", "reconnect.second", `{"step":2}`)
+	t.Cleanup(func() { deleteOutboxRow(t, env.pool, id2) })
 
 	readCtx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	ev2, err := stream.Next(readCtx2)
