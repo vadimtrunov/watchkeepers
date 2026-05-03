@@ -92,6 +92,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS entry_vec USING vec0(
   id TEXT PRIMARY KEY,
   embedding float[1536]
 );
+
+-- Partial indexes added by M2b.2.a. The IF NOT EXISTS clauses make the
+-- schema-init idempotent across upgrades: an existing M2b.1 file picks up
+-- the indexes the first time it is opened by an M2b.2.a binary.
+CREATE INDEX IF NOT EXISTS entry_category_active
+  ON entry(category) WHERE superseded_by IS NULL;
+CREATE INDEX IF NOT EXISTS entry_active_after
+  ON entry(active_after) WHERE superseded_by IS NULL;
 `
 
 // EmbeddingDim is the embedding dimension used by the `entry_vec` virtual
