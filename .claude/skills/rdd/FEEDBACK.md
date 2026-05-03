@@ -583,3 +583,30 @@ The first executor session committed only the migration and returned a truncated
 - Total wall time from /rdd to merge: ~30 min
 
 ---
+
+## 2026-05-03 — M2b.2.a: Notebook in-process CRUD (Remember/Recall/Forget/Stats)
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/20
+**Phases with incidents**: 1 (git auth halt mid-decomposition)
+
+### What worked
+
+Reviewer caught zero blockers and zero importants on the first iteration — the TASK brief was specific enough (named the indexes, documented sqlite-vec MATCH+k pattern, listed the sentinels, cited M2b.1 sync-contract docs) that the executor had no design ambiguity. Executor truncation guard (added after M2.9.a incident) worked: structured report delivered before Stop, no continuation needed. Decomposition rule from `references/roadmap-migration.md` §"Decomposition at Gate 1" applied cleanly: nested as sub-bullets under M2b.2, commit `docs(roadmap): decompose M2b.2 into sub-items`, took M2b.2.a.
+
+### What wasted effort
+
+**Phase 1 git auth halt mid-decomposition**: The `gh` CLI active account had silently switched from `vadimtrunov` (admin) to `vadym-trunov_wbt` (no write access) between prior iterations. The decomposition push hit a 403. Preflight Check 3 caught it on FIRST run earlier in the session, but the `/rdd` loop does not re-run preflight Check 3 between iterations. Without operator intervention, a `/loop` variant would have stalled silently on every push thereafter. Cost: ~30 seconds of operator attention for account switch.
+
+### Suggested skill changes
+
+- `references/preflight.md` Check 3 should be re-run on EVERY `/rdd` invocation, not just the first of the session. Auth state can change between loops (account switch, token expiry, MFA reauth). Currently preflight runs at Phase 0 of each `/rdd`, but in /loop variant-c the operator may not see the failure until a push hits 403. Consider adding a self-healing step: if `gh auth status` shows the configured-admin account as "inactive", `gh auth switch --user <admin>` automatically and continue.
+- The git-master pr/merge agents could `gh auth status` before push as a guard, halting with a clear message rather than failing with 403 inside lefthook output. Currently the failure mode is the lefthook output dump (which we have to grep through).
+
+### Metrics
+
+- Review iterations: 1 (converged immediately)
+- PR-fix iterations: 0 (CI green on first push)
+- Operator interventions outside of gates: 1 (gh auth switch)
+- Total wall time from /rdd to merge: ~25 min
+
+---

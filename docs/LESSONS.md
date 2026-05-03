@@ -547,3 +547,31 @@ Established the Notebook library's storage substrate using SQLite + sqlite-vec f
 - Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.1. **M2b.1 substrate ready**; M2b.2 owns the `Remember`/`Recall`/`Forget`/`Archive`/`Import`/`Stats` public API and Recall-supporting indexes.
 
 ---
+
+## 2026-05-03 — M2b.2.a: Notebook in-process CRUD (Remember/Recall/Forget/Stats)
+
+**PR**: [#20](https://github.com/vadimtrunov/watchkeepers/pull/20)
+**Merged**: 2026-05-03 (squash commit `6de9be1`)
+
+### Context
+
+Implemented the Notebook library's public CRUD API layer atop the M2b.1 substrate. Four endpoints (`Remember`, `Recall`, `Forget`, `Stats`) operationalize the sync contract between the `entry` and `entry_vec` tables. Phase 1 planner verdict was "too large"; decomposed M2b.2 into M2b.2.a (CRUD) and M2b.2.b (Archive/Import). M2b.2.a includes 18 tests passing under `-race`, schema migrations for partial indexes, and support for KNN recall with post-filtering. Code-reviewer converged at iteration 1 with zero blockers and zero importants (4 nits deferred to Follow-up).
+
+### Pattern
+
+**Sync-contract enforcement via single-tx wrapper**: M2b.1 documented the `entry`/`entry_vec` sync contract in godoc; M2b.2.a operationalized it — every public method that touches either table wraps the work in `BeginTx` + `defer tx.Rollback()` + explicit `tx.Commit()`. The `Remember` and `Forget` paths each touch both tables in one tx; rollback fires automatically on any error. Pattern: when a "sync contract" between two SQL artifacts is documented in the substrate, the layer above MUST wrap every mutation in a transaction so a partial failure doesn't leave the contract broken.
+
+**sqlite-vec canonical query shape: `WHERE embedding MATCH ? AND k = ?`**: NOT `ORDER BY vec_distance_cosine(...) LIMIT ?`. The MATCH+k form uses the vec0 index; the ORDER BY+LIMIT form does a full scan. Tested via `TestRecall_TopK` against ≥5 rows. Always use the indexed form for Recall/KNN queries.
+
+**Partial indexes for hot Recall predicates**: `CREATE INDEX entry_category_active ON entry(category) WHERE superseded_by IS NULL` and `entry_active_after ON entry(active_after) WHERE superseded_by IS NULL` are the canonical partial-index pattern for "active rows only" filters. Added via `CREATE INDEX IF NOT EXISTS` in the schema-init constant so existing M2b.1-era files transparently migrate on the next `Open` (verified by `TestSchema_IndexesAddedOnReopen`). Pattern reusable for any append-mostly table where most queries filter by a "is active" predicate.
+
+**`COUNT(*) FILTER (WHERE ...)` requires SQLite 3.30+**: mattn driver bundles 3.46+ so this is fine. The pattern lets `Stats` compute totals + active + superseded in one query without a CASE WHEN dance.
+
+**Pre-DB validation symmetric with substrate constraints**: `validate(*Entry)` checks `Category` ∈ enum (matches the DB CHECK constraint), `Content != ""` (matches NOT NULL), `len(Embedding) == 1536` (matches vec0 dim). All three rejections return `ErrInvalidEntry` synchronously before BeginTx, so a malformed Entry never opens a transaction.
+
+### References
+
+- Files: `core/pkg/notebook/{entry,errors,remember,recall,forget,stats}.go` + `_test.go`, `core/pkg/notebook/schema_test.go`, `core/pkg/notebook/db.go` (schema-init delta), `core/pkg/notebook/README.md`
+- Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.2 → M2b.2.a. **M2b.2.b owns** Archive/Import (snapshot lifecycle).
+
+---
