@@ -296,7 +296,12 @@ func (s *ResilientStream) Next(ctx context.Context) (Event, error) {
 
 		ev, err := stream.Next(ctx)
 		if err == nil {
-			s.lastID = ev.ID
+			// Per the W3C SSE spec, the "last event ID" state must only be
+			// updated when the frame actually carries an `id:` field; frames
+			// with no `id:` line must not overwrite a previously-recorded ID.
+			if ev.ID != "" {
+				s.lastID = ev.ID
+			}
 			if s.cfg.dedup != nil && s.cfg.dedup(ev.ID) {
 				continue
 			}

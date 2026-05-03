@@ -663,6 +663,77 @@ func TestSubscribeResilient_CloseIdempotent(t *testing.T) {
 	}
 }
 
+// TestSubscribeResilient_EmptyIDDoesNotClobberLastID — a frame without an
+// `id:` line must not overwrite the previously-recorded last-event-ID.
+// Connection #1 emits `id: evt-a` then an id-less frame, then closes (EOF).
+// Connection #2 must receive `Last-Event-ID: evt-a`, not an empty string.
+func TestSubscribeResilient_EmptyIDDoesNotClobberLastID(t *testing.T) {
+	t.Parallel()
+
+	var (
+		callCnt     int32
+		mu          sync.Mutex
+		secondReqID string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCnt, 1)
+		writeSSEHeaders(t, w)
+		switch n {
+		case 1:
+			// Frame with id: — establishes last-event-ID = "evt-a".
+			sseFlusher(t, w, "id: evt-a\nevent: x\ndata: {}\n\n")
+			// Frame WITHOUT an id: line — must NOT clobber "evt-a".
+			sseFlusher(t, w, "event: y\ndata: {}\n\n")
+			// Clean EOF forces a reconnect.
+		case 2:
+			mu.Lock()
+			secondReqID = r.Header.Get("Last-Event-ID")
+			mu.Unlock()
+			sseFlusher(t, w, "id: evt-c\nevent: z\ndata: {}\n\n")
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c := resilientTestClient(t, srv.URL)
+	sl := &fakeSleeper{}
+	stream, err := c.SubscribeResilient(context.Background(),
+		withSleeperOption(sl), withRandOption(fixedRand))
+	if err != nil {
+		t.Fatalf("SubscribeResilient: %v", err)
+	}
+	t.Cleanup(func() { _ = stream.Close() })
+
+	// Drain all three events (two from conn #1, one from conn #2).
+	wantEvents := []struct{ id, eventType string }{
+		{"evt-a", "x"},
+		{"", "y"}, // id-less frame: ev.ID will be empty
+		{"evt-c", "z"},
+	}
+	for i, want := range wantEvents {
+		ev, err := stream.Next(context.Background())
+		if err != nil {
+			t.Fatalf("Next(%d): %v", i, err)
+		}
+		if ev.ID != want.id {
+			t.Errorf("Event[%d].ID = %q, want %q", i, ev.ID, want.id)
+		}
+		if ev.EventType != want.eventType {
+			t.Errorf("Event[%d].EventType = %q, want %q", i, ev.EventType, want.eventType)
+		}
+	}
+
+	// The critical assertion: second request must carry the id from evt-a,
+	// not an empty string (which the id-less frame would have caused before
+	// the guard was added).
+	mu.Lock()
+	got := secondReqID
+	mu.Unlock()
+	if got != "evt-a" {
+		t.Errorf("second request Last-Event-ID = %q, want %q", got, "evt-a")
+	}
+}
+
 // TestSubscribeResilient_OptionDefaults — verify the implicit defaults
 // resolve via the public option constructors. Pure unit-level guard
 // against accidental constant drift.
