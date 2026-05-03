@@ -610,3 +610,30 @@ Reviewer caught zero blockers and zero importants on the first iteration — the
 - Total wall time from /rdd to merge: ~25 min
 
 ---
+
+## 2026-05-03 — M2b.2.b: Notebook Archive + Import snapshot lifecycle
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/21
+**Phases with incidents**: 4 (1 important fixer iter)
+
+### What worked
+
+Reviewer caught the embedding-bytes coverage gap that the executor's "happy path looks fine" test would have masked. The byte-equality check was explicit in the AC ("match by ID/category/content/embedding-bytes") but easy to miss when implementing — pattern: when an AC names specific match criteria, the reviewer must spot-check that the test asserts each one explicitly, not just "Recall returns the row". Truncation guard from FEEDBACK 2026-05-03 still holding — both executor sessions on this branch printed structured reports before exit.
+
+### What wasted effort
+
+Iter-1 reviewer flagged 4 nits (`TestImport_AtomicRename` name oversells, `&immutable=1` DSN suggestion, comment duplication, dead `IsAbs` check) — none of these are real bugs, all deferred to Follow-up. The reviewer brief asked for "real defects only — name nits sparingly", and yet 4 nits landed. Not a process failure (nits are correctly classified), but worth noting that the bar for "report a nit at all" is lower than ideal — each nit is a small distraction the operator must decide to defer.
+
+### Suggested skill changes
+
+- `references/agent-briefs/code-reviewer.md` — clarify that nit count >= 3 on a converged-iter-1 review usually indicates the reviewer is reaching for content; consider raising the bar to "report only nits that change a future maintainer's behaviour, not pure preference". OR introduce a per-iteration nit budget.
+- `references/agent-briefs/code-reviewer.md` — add a checklist item: "if an AC names specific match criteria (e.g. 'match by X/Y/Z'), the reviewer must enumerate each criterion and verify the test asserts it explicitly". This would have caught the embedding-bytes gap on iter 1 even faster (it did, but explicit checklist accelerates).
+
+### Metrics
+
+- Review iterations: 2 (iter 1: 0/1/4; iter 2: converged)
+- PR-fix iterations: 0 (CI green on first push)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~50 min
+
+---

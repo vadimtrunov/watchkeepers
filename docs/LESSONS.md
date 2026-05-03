@@ -575,3 +575,31 @@ Implemented the Notebook library's public CRUD API layer atop the M2b.1 substrat
 - Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.2 → M2b.2.a. **M2b.2.b owns** Archive/Import (snapshot lifecycle).
 
 ---
+
+## 2026-05-03 — M2b.2.b: Notebook Archive + Import snapshot lifecycle
+
+**PR**: [#21](https://github.com/vadimtrunov/watchkeepers/pull/21)
+**Merged**: 2026-05-03 (squash commit `4013de0`)
+
+### Context
+
+Implemented the Notebook library's snapshot lifecycle: `Archive` exports the live `entry`/`entry_vec` tables to a standalone SQLite file via `VACUUM INTO`, and `Import` atomically replaces the live file with a spool-validated copy, maintaining single-writer isolation and exact embedding-byte preservation. Two distinct sync contexts (`archiveMu` for atomic reads, `importMu` per-receiver) and WAL/SHM sidecar cleanup ensure clean replacements. Reviewer iteration 1 surfaced one `important`: embedding-byte round-trip test coverage gap (AC5 explicitly required "embedding-bytes" match, but test used Recall ranking instead of direct `SELECT`).
+
+### Pattern
+
+**`VACUUM INTO` DDL escaping via `os.CreateTemp` + single-quote escape**: SQLite `VACUUM INTO 'path'` is DDL, not DML, so prepared-statement `?` placeholders do not apply. Safe pattern: (1) call `os.CreateTemp(dirPath, ".prefix-*")` to generate a path from a trusted system call; (2) validate it's absolute + NUL-free; (3) escape any single quotes via `'` → `''` (the SQL escape for string literals); (4) concatenate into the query string. Defense-in-depth: the path comes from a trusted source (CreateTemp) AND explicit quote-escaping guards against edge cases. Annotate the gosec G202 finding with a rationale comment citing this contract.
+
+**Atomic file replacement requires same-FS rename**: Cross-device `os.Rename` fails on POSIX systems. For `Import` to atomically swap the live SQLite file, the spool-temp MUST be created in the SAME directory as the live file — use `os.CreateTemp(filepath.Dir(target), ".prefix-*")` instead of `os.TempDir()`. Using a temp-dir on a different filesystem breaks across mountpoint boundaries. Verified by `TestImport_AtomicRename`.
+
+**WAL/SHM sidecar removal before rename**: SQLite WAL journal mode leaves `<file>-wal` and `<file>-shm` files next to the live DB. After a `Close()` (which checkpoints WAL via mattn driver) but BEFORE `os.Rename`, explicitly remove `-wal` and `-shm` so the new connection doesn't inherit stale journal pages. Belt-and-suspenders because Close should checkpoint, but the files may linger; verified by `TestImport_CleansSidecars`.
+
+**`sync.Once` reset trick for re-openable resources**: M2b.1's `closeOne sync.Once` makes Close idempotent, but `Import` reopens the underlying `*sql.DB`. Pattern: under the receiver's `importMu` lock, swap the `*sql.DB` field, assign a fresh `sync.Once{}` to the close-once field, AND clear the cached `closeErr`. A subsequent `Close()` then runs once on the new connection. This is the canonical "re-init a once-guarded resource" Go pattern.
+
+**Embedding-bytes round-trip requires direct `SELECT` + `bytes.Equal`**: Recall's KNN ranking is not the same as byte-for-byte embedding equality. To verify `Archive` → `Import` preserves embedding data exactly, the test must `SELECT entry_vec.embedding FROM entry_vec WHERE id = ?` and `bytes.Equal` against `vec.SerializeFloat32(seed.embedding)`. Without direct byte comparison, a vec0 truncation or zeroing bug would silently pass the KNN-ranking test. Pattern: when an AC names specific match criteria (ID, category, content, embedding-bytes), the test must assert each one explicitly, not just "Recall returns the row".
+
+### References
+
+- Files: `core/pkg/notebook/{archive,import,validate_archive}.go` + `_test.go`, `core/pkg/notebook/{db,errors,README.md}` (deltas)
+- Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.2 (now `[x]`). **M2b.3 owns ArchiveStore** — wraps Archive/Import with LocalFS + S3Compatible backends.
+
+---
