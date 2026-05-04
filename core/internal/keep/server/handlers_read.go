@@ -400,3 +400,185 @@ func isJSONContentType(ct string) bool {
 	}
 	return mediaType == "application/json"
 }
+
+// -----------------------------------------------------------------------
+// GET /v1/watchkeepers/{id} — handleGetWatchkeeper
+// GET /v1/watchkeepers       — handleListWatchkeepers
+// -----------------------------------------------------------------------
+
+// Watchkeeper list pagination bounds. The default limit matches log_tail
+// (50); the cap matches log_tail (200) so any single authenticated caller
+// cannot request megabyte-scale list responses. The cursor field on the
+// response envelope is reserved for a future seek-pagination follow-up.
+const (
+	defaultWatchkeeperListLimit = 50
+	maxWatchkeeperListLimit     = 200
+)
+
+// watchkeeperRow mirrors the JSON shape of one watchkeeper.watchkeeper row.
+// Nullable timestamps and the nullable foreign key use *time.Time / *string
+// so the wire shape carries `null` rather than the Go zero value when the
+// column was actually NULL in Postgres.
+type watchkeeperRow struct {
+	ID                      string     `json:"id"`
+	ManifestID              string     `json:"manifest_id"`
+	LeadHumanID             string     `json:"lead_human_id"`
+	ActiveManifestVersionID *string    `json:"active_manifest_version_id"`
+	Status                  string     `json:"status"`
+	SpawnedAt               *time.Time `json:"spawned_at"`
+	RetiredAt               *time.Time `json:"retired_at"`
+	CreatedAt               time.Time  `json:"created_at"`
+}
+
+// listWatchkeepersResponse is the envelope returned by GET /v1/watchkeepers.
+// `next_cursor` is reserved for a future seek-pagination follow-up; M3.2.a
+// always returns `null` so the wire shape is forward-compatible.
+type listWatchkeepersResponse struct {
+	Items      []watchkeeperRow `json:"items"`
+	NextCursor *string          `json:"next_cursor"`
+}
+
+// handleGetWatchkeeper serves GET /v1/watchkeepers/{id}. It returns the full
+// row JSON; an unknown id surfaces as 404 not_found.
+//
+// Documented limitation: row-level security on `watchkeeper.watchkeeper` is
+// not enabled at this milestone (see migration 011), so any authenticated
+// caller can fetch any row. A future migration adds an RLS policy keyed off
+// the same `app.scope` GUC the existing knowledge_chunk policy uses.
+func handleGetWatchkeeper(r scopedRunner) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		claim, ok := ClaimFromContext(req.Context())
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		id := req.PathValue("id")
+		if id == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		if !uuidPattern.MatchString(id) {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+
+		var out watchkeeperRow
+		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `
+                SELECT id, manifest_id, lead_human_id,
+                       active_manifest_version_id, status,
+                       spawned_at, retired_at, created_at
+                FROM watchkeeper.watchkeeper
+                WHERE id = $1
+            `, id).Scan(
+				&out.ID, &out.ManifestID, &out.LeadHumanID,
+				&out.ActiveManifestVersionID, &out.Status,
+				&out.SpawnedAt, &out.RetiredAt, &out.CreatedAt,
+			)
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "not_found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "get_watchkeeper_failed")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, out)
+	})
+}
+
+// handleListWatchkeepers serves GET /v1/watchkeepers. It supports
+// `?status=pending|active|retired` filtering and `?limit=<n>` (default 50,
+// max 200, reject 0/negative/oversize). Rows are returned in
+// `created_at DESC` order. The response envelope's `next_cursor` is reserved
+// for a future seek-pagination follow-up; this milestone always returns null.
+//
+// Documented limitation: row-level security on `watchkeeper.watchkeeper` is
+// not enabled at this milestone (see migration 011); future TASK adds an
+// RLS policy.
+func handleListWatchkeepers(r scopedRunner) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		claim, ok := ClaimFromContext(req.Context())
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		statusFilter := req.URL.Query().Get("status")
+		switch statusFilter {
+		case "", "pending", "active", "retired":
+			// allowed
+		default:
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+
+		limit := defaultWatchkeeperListLimit
+		if raw := req.URL.Query().Get("limit"); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n <= 0 || n > maxWatchkeeperListLimit {
+				writeError(w, http.StatusBadRequest, "invalid_request")
+				return
+			}
+			limit = n
+		}
+
+		out := make([]watchkeeperRow, 0, limit)
+		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
+			// Two SQL variants instead of a single conditional WHERE clause
+			// keep the pgx parameter binding straightforward — pgx does not
+			// support an "ignore-when-NULL" filter pattern without extra
+			// CASE plumbing, and a duplicated short query is cheaper to
+			// read than a conditional one.
+			var (
+				rows pgx.Rows
+				err  error
+			)
+			if statusFilter == "" {
+				rows, err = tx.Query(ctx, `
+                    SELECT id, manifest_id, lead_human_id,
+                           active_manifest_version_id, status,
+                           spawned_at, retired_at, created_at
+                    FROM watchkeeper.watchkeeper
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                `, limit)
+			} else {
+				rows, err = tx.Query(ctx, `
+                    SELECT id, manifest_id, lead_human_id,
+                           active_manifest_version_id, status,
+                           spawned_at, retired_at, created_at
+                    FROM watchkeeper.watchkeeper
+                    WHERE status = $1
+                    ORDER BY created_at DESC
+                    LIMIT $2
+                `, statusFilter, limit)
+			}
+			if err != nil {
+				return fmt.Errorf("list_watchkeepers query: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var rec watchkeeperRow
+				if err := rows.Scan(
+					&rec.ID, &rec.ManifestID, &rec.LeadHumanID,
+					&rec.ActiveManifestVersionID, &rec.Status,
+					&rec.SpawnedAt, &rec.RetiredAt, &rec.CreatedAt,
+				); err != nil {
+					return fmt.Errorf("list_watchkeepers scan: %w", err)
+				}
+				out = append(out, rec)
+			}
+			return rows.Err()
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list_watchkeepers_failed")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, listWatchkeepersResponse{Items: out, NextCursor: nil})
+	})
+}

@@ -62,6 +62,10 @@ func NewRouter(v auth.Verifier, pool *pgxpool.Pool, reg *publish.Registry, heart
 		mux.Handle("POST /v1/knowledge-chunks", authed(handleStore(runner)))
 		mux.Handle("POST /v1/keepers-log", authed(handleLogAppend(runner)))
 		mux.Handle("PUT /v1/manifests/{manifest_id}/versions", authed(handlePutManifestVersion(runner)))
+		mux.Handle("POST /v1/watchkeepers", authed(handleInsertWatchkeeper(runner)))
+		mux.Handle("PATCH /v1/watchkeepers/{id}/status", authed(handleUpdateWatchkeeperStatus(runner)))
+		mux.Handle("GET /v1/watchkeepers/{id}", authed(handleGetWatchkeeper(runner)))
+		mux.Handle("GET /v1/watchkeepers", authed(handleListWatchkeepers(runner)))
 		if reg != nil {
 			mux.Handle("GET /v1/subscribe", authed(handleSubscribe(reg, heartbeat)))
 		}

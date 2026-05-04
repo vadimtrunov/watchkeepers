@@ -462,3 +462,253 @@ func stringOrNil(s string) any {
 	}
 	return s
 }
+
+// -----------------------------------------------------------------------
+// POST /v1/watchkeepers — handleInsertWatchkeeper
+// -----------------------------------------------------------------------
+
+// insertWatchkeeperRequest is the JSON body accepted by POST /v1/watchkeepers.
+// `status`, `spawned_at`, `retired_at` are intentionally absent: a fresh
+// watchkeeper is always inserted with status='pending', and the timestamps
+// are stamped server-side on the documented status transitions. Any of those
+// fields in the body is rejected by DisallowUnknownFields.
+type insertWatchkeeperRequest struct {
+	ManifestID              string `json:"manifest_id"`
+	LeadHumanID             string `json:"lead_human_id"`
+	ActiveManifestVersionID string `json:"active_manifest_version_id,omitempty"`
+}
+
+// insertWatchkeeperResponse is the 201 body returned by POST /v1/watchkeepers.
+type insertWatchkeeperResponse struct {
+	ID string `json:"id"`
+}
+
+// parseInsertWatchkeeperRequest validates the Content-Type, caps the body
+// size, decodes the JSON payload, and enforces UUID shape on the required
+// fields. Mirrors the parseStoreRequest envelope so the 415 / 413 / 400
+// surface stays uniform across write endpoints.
+func parseInsertWatchkeeperRequest(w http.ResponseWriter, req *http.Request) (insertWatchkeeperRequest, bool) {
+	var body insertWatchkeeperRequest
+
+	if !isJSONContentType(req.Header.Get("Content-Type")) {
+		writeErrorReason(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "expected_application_json")
+		return body, false
+	}
+
+	req.Body = http.MaxBytesReader(w, req.Body, maxRequestBodyBytes)
+	dec := json.NewDecoder(req.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeErrorReason(w, http.StatusRequestEntityTooLarge, "request_too_large", "body_too_large")
+			return body, false
+		}
+		writeError(w, http.StatusBadRequest, "invalid_body")
+		return body, false
+	}
+	if !uuidPattern.MatchString(body.ManifestID) {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return body, false
+	}
+	if !uuidPattern.MatchString(body.LeadHumanID) {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return body, false
+	}
+	if body.ActiveManifestVersionID != "" && !uuidPattern.MatchString(body.ActiveManifestVersionID) {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return body, false
+	}
+	return body, true
+}
+
+// handleInsertWatchkeeper serves POST /v1/watchkeepers. It validates the body,
+// inserts one row into watchkeeper.watchkeeper under the scoped tx with
+// status='pending' and NULL spawned_at/retired_at, and returns the new id.
+// The status and timestamps are stamped server-side: clients cannot supply
+// them via the request body (DisallowUnknownFields rejects those keys).
+func handleInsertWatchkeeper(r scopedRunner) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		claim, ok := ClaimFromContext(req.Context())
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		body, ok := parseInsertWatchkeeperRequest(w, req)
+		if !ok {
+			return
+		}
+
+		// active_manifest_version_id is nullable; pass SQL NULL when empty
+		// so the FK-typed column holds NULL rather than an empty-string
+		// value that would fail the uuid cast.
+		activeManifestVersionID := stringOrNil(body.ActiveManifestVersionID)
+
+		var id string
+		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `
+                INSERT INTO watchkeeper.watchkeeper (
+                    manifest_id, lead_human_id, active_manifest_version_id,
+                    status, spawned_at, retired_at
+                )
+                VALUES ($1, $2, $3, 'pending', NULL, NULL)
+                RETURNING id
+            `, body.ManifestID, body.LeadHumanID, activeManifestVersionID).Scan(&id)
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "insert_watchkeeper_failed")
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, insertWatchkeeperResponse{ID: id})
+	})
+}
+
+// -----------------------------------------------------------------------
+// PATCH /v1/watchkeepers/{id}/status — handleUpdateWatchkeeperStatus
+// -----------------------------------------------------------------------
+
+// updateWatchkeeperStatusRequest is the JSON body accepted by
+// PATCH /v1/watchkeepers/{id}/status. `spawned_at` / `retired_at` are
+// intentionally absent: those columns are stamped server-side on each
+// documented transition. Any of those keys in the body is rejected by
+// DisallowUnknownFields.
+type updateWatchkeeperStatusRequest struct {
+	Status string `json:"status"`
+}
+
+// parseUpdateWatchkeeperStatusRequest validates the envelope and the
+// requested target status. It does NOT validate the transition rule: that
+// requires reading the current row, which happens inside the scoped tx.
+func parseUpdateWatchkeeperStatusRequest(w http.ResponseWriter, req *http.Request) (updateWatchkeeperStatusRequest, bool) {
+	var body updateWatchkeeperStatusRequest
+
+	if !isJSONContentType(req.Header.Get("Content-Type")) {
+		writeErrorReason(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "expected_application_json")
+		return body, false
+	}
+
+	req.Body = http.MaxBytesReader(w, req.Body, maxRequestBodyBytes)
+	dec := json.NewDecoder(req.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeErrorReason(w, http.StatusRequestEntityTooLarge, "request_too_large", "body_too_large")
+			return body, false
+		}
+		writeError(w, http.StatusBadRequest, "invalid_body")
+		return body, false
+	}
+	if body.Status != "active" && body.Status != "retired" {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return body, false
+	}
+	return body, true
+}
+
+// handleUpdateWatchkeeperStatus serves PATCH /v1/watchkeepers/{id}/status.
+// It enforces the watchkeeper lifecycle:
+//
+//	pending → active   (server stamps spawned_at = now())
+//	active  → retired  (server stamps retired_at = now())
+//
+// Any other transition (e.g. retired→active, pending→retired) is rejected
+// with 400 invalid_status_transition. An unknown id surfaces as 404
+// not_found. The status check + UPDATE happen inside the same scoped tx so
+// concurrent transitions are serialised by Postgres' row-level lock semantics
+// (the SELECT … FOR UPDATE pattern); see migration 002 for the table CHECK
+// constraint that backs this at the storage layer.
+func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		claim, ok := ClaimFromContext(req.Context())
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		id := req.PathValue("id")
+		if id == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		if !uuidPattern.MatchString(id) {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+
+		body, ok := parseUpdateWatchkeeperStatusRequest(w, req)
+		if !ok {
+			return
+		}
+
+		// transitionResult lets the closure signal the handler that the row
+		// existed but the requested transition is not allowed, so the
+		// outer code can map that to a 400 invalid_status_transition
+		// without conflating it with a generic DB error.
+		type transitionResult struct {
+			notFound          bool
+			invalidTransition bool
+		}
+		var res transitionResult
+
+		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
+			// Lock the row so a concurrent PATCH cannot race the
+			// transition validation. SELECT … FOR UPDATE blocks any
+			// other tx that targets the same row until ours commits.
+			var current string
+			row := tx.QueryRow(ctx, `
+                SELECT status
+                FROM watchkeeper.watchkeeper
+                WHERE id = $1
+                FOR UPDATE
+            `, id)
+			if err := row.Scan(&current); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					res.notFound = true
+					return nil
+				}
+				return err
+			}
+
+			// Allowed transitions only:
+			//   pending → active
+			//   active  → retired
+			// Everything else is rejected without touching the row.
+			switch {
+			case current == "pending" && body.Status == "active":
+				_, err := tx.Exec(ctx, `
+                    UPDATE watchkeeper.watchkeeper
+                    SET status = 'active', spawned_at = now()
+                    WHERE id = $1
+                `, id)
+				return err
+			case current == "active" && body.Status == "retired":
+				_, err := tx.Exec(ctx, `
+                    UPDATE watchkeeper.watchkeeper
+                    SET status = 'retired', retired_at = now()
+                    WHERE id = $1
+                `, id)
+				return err
+			default:
+				res.invalidTransition = true
+				return nil
+			}
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "update_watchkeeper_status_failed")
+			return
+		}
+		if res.notFound {
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		if res.invalidTransition {
+			writeError(w, http.StatusBadRequest, "invalid_status_transition")
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+}

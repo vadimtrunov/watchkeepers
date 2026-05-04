@@ -6,10 +6,48 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/auth"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/publish"
 )
+
+// FakeTxFns lets watchkeeper handler tests stage a multi-step pgx.Tx
+// (SELECT … FOR UPDATE then UPDATE / Exec, or a Query that walks rows).
+// Any nil field uses the underlying fakeTx default behaviour.
+type FakeTxFns struct {
+	QueryRow func(ctx context.Context, sql string, args ...any) pgx.Row
+	Query    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// NewFakeTx builds a multi-method pgx.Tx fake from caller-supplied fns. Used
+// by handlers_watchkeeper_test.go to drive transition + list paths without
+// a real database. Exported only via this _test seam.
+func NewFakeTx(fns FakeTxFns) pgx.Tx {
+	return newFakeTxWithFns(fns.QueryRow, fns.Query, fns.Exec)
+}
+
+// NewFakeRow builds a pgx.Row whose Scan is delegated to the supplied closure.
+// Lets tests stage multi-column rows for the SELECT … FOR UPDATE step in
+// handleUpdateWatchkeeperStatus.
+func NewFakeRow(scan func(dest ...any) error) pgx.Row {
+	return fakeRow{scanFn: scan}
+}
+
+// NewFakeRowErr builds a pgx.Row whose Scan returns the supplied error
+// verbatim. Used by tests that exercise the pgx.ErrNoRows path of the
+// Update / Get handlers.
+func NewFakeRowErr(err error) pgx.Row {
+	return fakeRow{err: err}
+}
+
+// NewFakeRows builds a pgx.Rows whose Next walks `scans` once each and whose
+// Scan delegates to the matching closure. The optional rowsErr surfaces from
+// Rows.Err() after iteration completes.
+func NewFakeRows(scans []func(dest ...any) error, rowsErr error) pgx.Rows {
+	return &fakeRows{scans: scans, rowsErr: rowsErr}
+}
 
 // SubscribeHandlerForTest returns the bare /v1/subscribe handler (not
 // wrapped in AuthMiddleware) so _test files can exercise the handler's
@@ -83,6 +121,10 @@ func NewRouterWithRunner(v auth.Verifier, runner *FakeScopedRunner) http.Handler
 		mux.Handle("POST /v1/knowledge-chunks", authed(handleStore(runner)))
 		mux.Handle("POST /v1/keepers-log", authed(handleLogAppend(runner)))
 		mux.Handle("PUT /v1/manifests/{manifest_id}/versions", authed(handlePutManifestVersion(runner)))
+		mux.Handle("POST /v1/watchkeepers", authed(handleInsertWatchkeeper(runner)))
+		mux.Handle("PATCH /v1/watchkeepers/{id}/status", authed(handleUpdateWatchkeeperStatus(runner)))
+		mux.Handle("GET /v1/watchkeepers/{id}", authed(handleGetWatchkeeper(runner)))
+		mux.Handle("GET /v1/watchkeepers", authed(handleListWatchkeepers(runner)))
 	}
 	return mux
 }
