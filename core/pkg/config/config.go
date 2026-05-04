@@ -25,8 +25,11 @@ import (
 //   - `yaml:"-"` — exclude from YAML serialisation. Used on resolved
 //     secret-value fields so the literal cannot leak via a config dump.
 //
-// The `*_secret` convention: a field whose YAML key ends in `_secret`
-// holds a secret-reference name (e.g. `DB_PASSWORD`). The loader
+// The `*Secret` convention: a string field whose Go name ends in
+// `Secret` holds a secret-reference name (e.g. `DB_PASSWORD`). By
+// convention the YAML key SHOULD also end in `_secret` (e.g.
+// `token_secret`) for human clarity, but detection is name-based —
+// the Go field name is what matters, not the YAML tag. The loader
 // resolves the reference through the configured [secrets.SecretSource]
 // and stores the resolved value in the sibling field (the field WITHOUT
 // the `Secret` suffix). The reference name itself is preserved so
@@ -363,6 +366,8 @@ func walkSecrets(ctx context.Context, v reflect.Value, pathPrefix string, src se
 		if field.Kind() != reflect.String {
 			continue
 		}
+		// Detection is by Go field-name suffix ("Secret"); YAML-key
+		// alignment (e.g. `yaml:"token_secret"`) is by convention only.
 		if !strings.HasSuffix(structField.Name, secretFieldSuffix) {
 			continue
 		}

@@ -16,10 +16,12 @@ The loader applies four layers, from lowest to highest precedence:
    rejects unknown keys with `ErrUnknownField`. Empty path → skip.
 3. **Env-var overrides** — fields with an `env:"NAME"` struct tag are
    overridden by the named env var. Empty values do NOT override.
-4. **`*_secret` resolution** — string fields whose name ends in `Secret`
-   are treated as secret-reference names and resolved through the
-   configured `secrets.SecretSource` (M3.4.a). The resolved value lands
-   in the sibling field (the field WITHOUT the `Secret` suffix).
+4. **`*Secret` resolution** — string fields whose **Go name** ends in
+   `Secret` are treated as secret-reference names and resolved through
+   the configured `secrets.SecretSource` (M3.4.a). By convention the
+   YAML key SHOULD also end in `_secret`, but detection is name-based.
+   The resolved value lands in the sibling field (the field WITHOUT the
+   `Secret` suffix).
 
 After the four layers run, the loader validates that required fields are
 populated; missing required fields surface as `ErrMissingRequired`
@@ -111,9 +113,26 @@ need per-tenant config without touching a YAML file.
 
 ## Secret resolution
 
-The `*_secret` resolution layer walks `Config` recursively, looking for
-string fields whose name ends in `Secret`. For each non-empty value, the
-loader:
+The `*Secret` resolution layer walks `Config` recursively, looking for
+string fields whose **Go name** ends in `Secret` (e.g. `TokenSecret`).
+Detection is name-based — the YAML tag is irrelevant for triggering
+resolution. By convention the YAML key SHOULD also end in `_secret`
+(e.g. `yaml:"token_secret"`) for human clarity, but it is not required.
+
+Worked example:
+
+```go
+type KeepConfig struct {
+    TokenSecret string `yaml:"token_secret"` // Go name ends in "Secret" → resolved
+    Token       string `yaml:"-"`            // sibling: receives resolved value
+}
+```
+
+A field with Go name `MyAPIToken` would NOT trigger resolution even if
+its YAML tag ends in `_secret`, because the Go name does not end in
+`Secret`.
+
+For each non-empty `*Secret` field, the loader:
 
 1. Calls `src.Get(ctx, value)` on the configured `secrets.SecretSource`.
 2. On success, populates the sibling field (`KeepConfig.Token` for the

@@ -20,11 +20,13 @@
 //     NOT override earlier layers — set the variable to a non-empty
 //     string to take effect. [WithEnvPrefix] lets multi-tenant
 //     deployments namespace the variable names.
-//  4. `*_secret` resolution. For each string field whose YAML key ends in
-//     `_secret`, the value is treated as a secret-reference name and
-//     passed to the configured [secrets.SecretSource] (wired via
-//     [WithSecretSource]); the resolved value lands in the sibling
-//     non-secret field (the field WITHOUT the `Secret` suffix).
+//  4. `*Secret` resolution. For each string field whose Go name ends in
+//     `Secret` (e.g. `TokenSecret`), the value is treated as a
+//     secret-reference name and passed to the configured
+//     [secrets.SecretSource] (wired via [WithSecretSource]); the
+//     resolved value lands in the sibling non-secret field (the field
+//     WITHOUT the `Secret` suffix). By convention the YAML key SHOULD
+//     also end in `_secret`, but detection is name-based.
 //
 // After the four layers run, the loader validates that all required
 // fields are populated; missing required fields return
