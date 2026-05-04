@@ -757,3 +757,29 @@ Wired `notebook.Remember` and `notebook.Forget` to emit audit events via the Kee
 - Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.7. Keep is the single audit authority; Notebook has no audit surface of its own.
 
 ---
+
+## 2026-05-04 — M2b.8: promote_to_keep helper for Watchmaster proposal flow
+
+**PR**: [#28](https://github.com/vadimtrunov/watchkeepers/pull/28)
+**Merged**: 2026-05-04 (squash commit `5bcaa80`)
+
+### Context
+
+Implemented `keep.PromoteToKeep(ctx, db, proposal)` as a read-only helper that emits a `notebook_promotion_proposed` audit event when a Watchmaster user proposes promoting a Notebook entry to Keep status. No side effects on the Keep database — the helper reads the entry, validates it meets Promote criteria (category, language, embedding present), and emits an audit event for orchestration downstream (M6.2 final-write). Phase 1 planner verdict: "fits" (~4–6 files, ≤ 1 day, deps M2b.1–M2b.7 closed); executor (opus) delivered 2 commits (+264 LOC in promote.go, +471 LOC in promote_test.go, +82 lines in README.md). Phase 4 iter 1 converged 0/0/5 nits. Phase 6 CI green 9/9, 0 blocking review threads. Phase 7 PR squash-merged (`5bcaa80`); ROADMAP M2b.8 marked `[x]` (`5c75bce`); entire M2b milestone now complete (`[x]`).
+
+### Pattern
+
+**Proposal struct shape mirrors upstream schema columns without importing upstream**: M2b.8 defines `keep.Proposal` with `AgentID`, `EntryID`, `Category`, `EmbeddingVector` — the same columns as `notebook.Entry` in `deploy/migrations/004_knowledge_chunk.sql`. Rather than importing `notebook.Entry` (which would create the same archivestore→notebook one-way-import cycle), the consumer (keep) mirrors the minimal shape it needs. Pattern: when a downstream package interfaces with an upstream schema, define a struct locally that captures only the columns you read or validate — avoid the upstream import; let the caller do the mapping if they own both.
+
+**Two-stage promotion event taxonomy: proposal vs final-write**: M2b.8 emits `notebook_promotion_proposed` (proposal stage); M6.2 will emit `notebook_promoted_to_keep` (final-write stage). When a workflow has "request → approval → action" shape, give each stage its own event type. Pattern: audit consumers can build state machines without inferring intent from context ("did the proposal succeed? check if there's a final-write event yet") — each event type is a terminal fact at its stage.
+
+**Embedding round-trip via binary.LittleEndian mirrors sqlitevec.SerializeFloat32**: The keep binding does not expose a public Deserialize helper. Consumer-side decoder reads 4-byte LE floats directly via `binary.LittleEndian.Uint32()` cast to `float32`. Doc-comment cites the encoding contract (`sqlitevec.SerializeFloat32` uses LE) so a future sqlite-vec major version bump triggers a visible test failure rather than silent corruption. Pattern: when a dependency's serialization contract is not explicitly public-API, doc-comment the consumer's decoding logic with a citation so the coupling is visible.
+
+**Read-only audit emit (no transaction required)**: M2b.7 emit-after-tx-commit was about durability; M2b.8 emits-after-read because PromoteToKeep has no write side-effect. The return shape and error-handling remain identical: `(populated, fmt.Errorf("audit emit: %w", err))` vs `(fmt.Errorf("audit emit: %w", err))` per whether there's an id to return. Only the gate condition changes (post-Commit vs post-SELECT). Pattern: audit emit shape and error contract are the same regardless of write/read; only the pre-condition changes.
+
+### References
+
+- Files: `core/pkg/keep/promote.go`, `core/pkg/keep/promote_test.go`, `core/pkg/keep/README.md`
+- Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.8. **M2b complete**: all 8 leaves now `[x]`. Phase 1 Notebook surface is feature-complete.
+
+---

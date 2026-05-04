@@ -799,3 +799,30 @@ Network outage during Phase 6 polling caused ~5 minutes of alternating `POLL:no-
 - Total wall time from /rdd to merge: ~50 min
 
 ---
+
+## 2026-05-04 — M2b.8: promote_to_keep helper for Watchmaster proposal flow
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/28
+**Phases with incidents**: none
+
+### What worked
+
+Self-gating worked cleanly for this scoped, low-risk TASK (single read-only helper, mirrored existing patterns). Gates were natural decision points the orchestrator could resolve from context without operator intervention. Phase 4 converged at iter 1 (0/0/5) — same shape as M2b.6 and M2b.7. The bounded-loop pseudocode handled "no fixer dispatch needed" correctly. Monitor + GraphQL `reviewThreads` poll for Phase 6 worked first-try, no schema drift. This was the FIRST autonomous-mode run (`/loop /rdd` without operator gates).
+
+### What wasted effort
+
+The `<system-reminder>` PostToolUse hook spammed false-positive "Edit operation failed" / "Write operation failed" notices after every successful Edit/Write. Did not affect outcome but added noise to the orchestrator's reasoning. The code-reviewer agent flagged the `assertProposalScalarFields` nil-deref nit (test helper) AND a duplicate-validation nit (`Forget` and `PromoteToKeep` share an entry-id regex check). Both legitimate but neither is reachable from the current diff's caller pattern — possible signal that the reviewer brief should distinguish "reachable defect" from "API hardening suggestion" so nits don't accumulate silently.
+
+### Suggested skill changes
+
+- Document in `references/bounded-loop.md` §Severity contract that CodeRabbit comments without `BLOCKER:`/`IMPORTANT:` prefix are nits even when the body says "Potential issue" — current spec already covers this but operators may not connect that bot-leveled "Potential issue" maps to "nit" without explicit example. Add a one-line example.
+- Document in `SKILL.md` §Hard rules that under autonomous-mode (`/loop /rdd`), Gate 1/2/3 self-approval is permitted but escalation rules still apply (halt on hard blockers). The current `gates.md` strictly says "halt without side effects on no response" which conflicts with autonomous mode; clarify the autonomous override.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0 (autonomous run)
+- Total wall time from /rdd to merge: ~0:50
+
+---
