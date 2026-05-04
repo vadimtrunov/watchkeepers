@@ -142,7 +142,10 @@ func TestServerError_Error(t *testing.T) {
 
 // TestServerError_Unwrap exhaustively verifies the AC3 status -> sentinel map.
 // Cases include the explicit table rows, a 5xx that maps to ErrInternal, and
-// an "other 4xx" that must Unwrap to nil (per the TASK locked-in choice).
+// an "other 4xx" that must Unwrap to an empty/nil chain (per the TASK
+// locked-in choice). Unwrap returns []error since M3.2.a; matching is via
+// errors.Is so adding a per-code sentinel (e.g. ErrInvalidStatusTransition)
+// stays backward compatible.
 func TestServerError_Unwrap(t *testing.T) {
 	t.Parallel()
 
@@ -169,8 +172,14 @@ func TestServerError_Unwrap(t *testing.T) {
 			t.Parallel()
 			se := &ServerError{Status: tc.status}
 			got := se.Unwrap()
-			if got != tc.want {
-				t.Errorf("Unwrap() = %v, want %v", got, tc.want)
+			if tc.want == nil {
+				if len(got) != 0 {
+					t.Errorf("Unwrap() = %v, want empty/nil chain", got)
+				}
+				return
+			}
+			if !errors.Is(se, tc.want) {
+				t.Errorf("errors.Is(se, %v) = false; Unwrap chain = %v", tc.want, got)
 			}
 		})
 	}

@@ -32,7 +32,21 @@ var (
 	// both [errors.Is](err, ErrReconnectExhausted) and
 	// [errors.As](err, &netErr) on the same value.
 	ErrReconnectExhausted = errors.New("keepclient: reconnect attempts exhausted")
+	// ErrInvalidStatusTransition — server returned 400 with
+	// `{"error":"invalid_status_transition"}` from
+	// PATCH /v1/watchkeepers/{id}/status. The watchkeeper lifecycle only
+	// allows pending→active and active→retired; any other transition
+	// (e.g. retired→active, pending→retired direct) surfaces this code.
+	// Match with [errors.Is]; the same *ServerError also matches
+	// [ErrInvalidRequest] (the underlying status is 400) so callers that
+	// only need "request rejected" do not have to special-case it.
+	ErrInvalidStatusTransition = errors.New("keepclient: invalid status transition")
 )
+
+// invalidStatusTransitionCode is the stable on-wire error code the server
+// returns for a forbidden watchkeeper status transition. Kept as a const so
+// the test suite and Unwrap stay in lockstep.
+const invalidStatusTransitionCode = "invalid_status_transition"
 
 // ServerError carries the parsed envelope from a non-2xx response. Status is
 // always populated; Code and Reason are populated when the body matched the
@@ -71,7 +85,8 @@ func (e *ServerError) Error() string {
 // Unwrap maps the response status to one of the package sentinels per the
 // AC3 table:
 //
-//	400        -> ErrInvalidRequest
+//	400        -> ErrInvalidRequest (and ErrInvalidStatusTransition when
+//	              Code == "invalid_status_transition")
 //	401        -> ErrUnauthorized
 //	403        -> ErrForbidden
 //	404        -> ErrNotFound
@@ -79,24 +94,31 @@ func (e *ServerError) Error() string {
 //	5xx        -> ErrInternal
 //	other 4xx  -> nil (generic *ServerError, no sentinel match)
 //
-// A nil Unwrap means callers can still match the type with [errors.As] but
-// `errors.Is(err, ErrSomething)` will return false — a deliberate signal
-// that the response did not fit a documented sentinel.
-func (e *ServerError) Unwrap() error {
+// An empty/nil slice from Unwrap means callers can still match the type with
+// [errors.As] but `errors.Is(err, ErrSomething)` will return false — a
+// deliberate signal that the response did not fit a documented sentinel.
+//
+// 400 returns a slice so a caller can match either the generic
+// [ErrInvalidRequest] or the more specific [ErrInvalidStatusTransition]
+// with [errors.Is] on the same *ServerError value.
+func (e *ServerError) Unwrap() []error {
 	switch e.Status {
 	case 400:
-		return ErrInvalidRequest
+		if e.Code == invalidStatusTransitionCode {
+			return []error{ErrInvalidRequest, ErrInvalidStatusTransition}
+		}
+		return []error{ErrInvalidRequest}
 	case 401:
-		return ErrUnauthorized
+		return []error{ErrUnauthorized}
 	case 403:
-		return ErrForbidden
+		return []error{ErrForbidden}
 	case 404:
-		return ErrNotFound
+		return []error{ErrNotFound}
 	case 409:
-		return ErrConflict
+		return []error{ErrConflict}
 	}
 	if e.Status >= 500 && e.Status < 600 {
-		return ErrInternal
+		return []error{ErrInternal}
 	}
 	return nil
 }
