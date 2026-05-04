@@ -826,3 +826,30 @@ The `<system-reminder>` PostToolUse hook spammed false-positive "Edit operation 
 - Total wall time from /rdd to merge: ~0:50
 
 ---
+
+## 2026-05-04 — M3.1: In-process event bus (pub/sub) with handler registration, ordered per-topic delivery, and backpressure
+
+**PR**: [#29](https://github.com/vadimtrunov/watchkeepers/pull/29)
+**Phases with incidents**: 4 (2 fixer iters)
+
+### What worked
+
+Self-gating held for a heavier TASK (8 ACs vs M2b.8's 7). Phase 4's bounded loop correctly escalated through 2 iterations without operator input. Debugger sub-agent (spawned after fixer timeout mid-iter 1) found the deep `publishWG.sema` race in one cycle — tier escalation worked (Sonnet executor surfaced the race in a regression test, Opus debugger root-caused it). SendMessage to resume paused agent (Phase 6 fixer) preserved its in-flight investigation (it had already diagnosed the pre-existing test flake; resume just told it which path to commit). Saved a full re-spawn cycle. Phase 6 iter 2 converged clean with 0 unresolved threads.
+
+### What wasted effort
+
+Phase 4 fixer timed out (Stream idle timeout) mid-investigation — required orchestrator detection of uncommitted changes + fresh debugger spawn. Could be tightened: when fixer timeout is detected, the standard recovery should be (a) inspect git working tree, (b) spawn a fresh agent with the detected delta as context. Currently ad-hoc; document in SKILL.md or `references/bounded-loop.md`. Strict Phase 6 severity rule ("bot comments without `BLOCKER:`/`IMPORTANT:` prefix → nit") would have shipped a real `🟠 Major` race-defect to main if followed literally. CodeRabbit reclassified as 2 important + 1 nit because they described real defects: Subscribe-vs-Close race on EXISTING topic, AC4 doc/impl mismatch (dispatch-time vs enqueue-time snapshot). Operator's "fix as much as possible" autonomy mandate overrode strict spec. Worth documenting: when CodeRabbit escalates a finding to `🟠 Major` or `🔴 Critical`, the orchestrator SHOULD reclassify to important regardless of prefix-based rule.
+
+### Suggested skill changes
+
+- Add to `references/bounded-loop.md` §Phase 6 §Severity contract: explicit clause for CodeRabbit-style severity emoji (`🔴 Critical` → blocker, `🟠 Major` → important, `🟡 Minor` → nit). Current bot-comments-are-nits rule is too coarse.
+- Add to `SKILL.md` §Hard rules or to `references/bounded-loop.md` §Recovery: when an `executor` (or any) agent times out mid-task, standard recovery is `git status` + spawn fresh agent with delta context. Currently orchestrator improvises this each time.
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 1
+- Operator interventions outside of gates: 0 (autonomous run)
+- Total wall time from /rdd to merge: ~1:30
+
+---

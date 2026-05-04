@@ -783,3 +783,35 @@ Implemented `keep.PromoteToKeep(ctx, db, proposal)` as a read-only helper that e
 - Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.8. **M2b complete**: all 8 leaves now `[x]`. Phase 1 Notebook surface is feature-complete.
 
 ---
+
+## 2026-05-04 — M3.1: In-process event bus (pub/sub) with handler registration, ordered per-topic delivery, and backpressure
+
+**PR**: [#29](https://github.com/vadimtrunov/watchkeepers/pull/29)
+**Merged**: 2026-05-04 (squash commit `4bcb955`)
+
+### Context
+
+Implemented `core/pkg/eventbus/Bus` — a minimal in-process pub/sub system with per-topic worker goroutines, bounded buffered channels, sequential handler dispatch within a topic, and backpressure via blocking Publish that honors context cancellation. Phase 1 planner verdict: "fits" (handler registration + ordered delivery + backpressure are co-designed properties of one minimal Bus API; splitting would ship a half-built bus); executor (opus) delivered 1 commit (+1304 LOC, 8 ACs, 16 test cases). Phase 4 converged at iteration 2 (critical race conditions found and fixed in iter 1). Phase 6 CI green 9/9, converged iter 2 with 0 unresolved review threads. Phase 7 PR squash-merged (`4bcb955`); ROADMAP M3.1 marked `[x]` (`693d69b`).
+
+### Pattern
+
+**Pub/sub bus shape: per-topic worker goroutine + bounded channel = sequential dispatch with backpressure**: `Bus.Subscribe(topic, handler) (unsub, err)`, `Publish(ctx, topic, event) error`, `Close() error`. Each topic has ONE dedicated worker goroutine reading from a bounded buffered channel; it calls each handler sequentially. Publish blocks if the channel is full, respecting ctx cancellation. Close stops accepting new publishes, drains the channel, and returns errors only after all handlers have finished. Pattern: per-topic workers avoid a global lock on the dispatch path while preserving ordering within each topic; topics are independent.
+
+**Subscribe atomicity under concurrent Close**: Subscribe must hold `b.mu` across `closed-check + topic install/lookup + ts.mu.Lock acquisition`, releasing `b.mu` only AFTER `ts.mu` is held. Anything less leaves a TOCTOU window where Close can race past the check, store `true` in `closed`, and tear down the topic — leaving a dead subscription with the contract violated. The `getOrCreateTopic` helper was insufficient; Subscribe must inline the closed-check and re-check inside the lock after acquiring `ts.mu`.
+
+**WaitGroup.Add race-instrumentation serialization**: `sync.WaitGroup` race-instrumentation reads sema on `Add(0→1)` and writes on `Wait(0→first-waiter)`. If a goroutine calls `Add(0→1)` while another is in `Wait`, the race detector flags it even though WaitGroup operations are themselves atomic. Fix: serialize the Add side (in Publish) and the closed-flag store (in Close) through a shared mutex so both see consistent state. Without this, `-race` fails on a tight loop without any actual data races.
+
+**Late-subscriber dispatch-time-snapshot semantics**: Snapshotting `ts.subs` at DISPATCH time (the worker reads the slice header once per envelope) gives a WEAKER guarantee than callers may assume — a subscriber added between Publish-return and dispatch-start WILL receive events whose Publish completed before Subscribe returned. To express the stronger guarantee in tests, gate the late-subscribe behind a sentinel handler that fires AFTER all prior envelopes finished dispatching (AC4 `TestBus_LateSubscriberMissesPriorEvents` uses Path A: subscribe drain BEFORE publish "A" so `drained=true` proves worker finished).
+
+**Aggressive race-regression tests with polling-deadline assertions**: 50 goroutines × 5 publishes vs Close needs polling-deadline assertions on `runtime.NumGoroutine()` (not fixed sleeps), with explicit slack (e.g. `+4`) to absorb framework-spawned goroutines. Channel-based error collection (NOT `t.Errorf` from racer goroutines) avoids racing testing.T's internal sync.Once.
+
+### Anti-pattern
+
+Embedding `sync.WaitGroup` directly in the bus struct and calling `Add` across subsystem boundaries (Publish, Close) without holding a lock. Race-instrumentation will flag benign concurrency if the operations serialize against a different mutex. Solution: serialize all side effects of one subsystem through one lock.
+
+### References
+
+- Files: `core/pkg/eventbus/{bus,errors,doc,README}.go` + `_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M3 → M3.1. Mirrors foundational pattern from `core/pkg/{notebook,archivestore,keepclient}`.
+
+---
