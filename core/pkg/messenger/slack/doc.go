@@ -2,32 +2,46 @@
 // [github.com/vadimtrunov/watchkeepers/core/pkg/messenger.Adapter]
 // interface. ROADMAP §M4 → M4.2.
 //
-// # Scope (M4.2.a — foundation only)
+// # Scope (M4.2.a foundation + M4.2.b SendMessage / SetBotProfile)
 //
-// This iteration ships the FOUNDATION other M4.2 sub-bullets build on:
+// The package currently ships:
 //
-//   - A tier-aware [RateLimiter] that respects Slack's per-method
-//     burst+sustained budgets (tier-1 .. tier-4 — see
-//     https://api.slack.com/apis/rate-limits).
-//   - A low-level [Client] HTTP wrapper around Slack Web API (`https://
-//     slack.com/api/<method>`) with bearer-token auth, JSON encoding,
-//     Slack `{ok: false, error: "..."}` envelope decoding, and
-//     `Retry-After`-aware HTTP 429 handling.
-//   - A sentinel-error vocabulary mapping common Slack `error` codes
-//     onto matchable [errors.Is] sentinels.
+//   - M4.2.a — a tier-aware [RateLimiter] that respects Slack's
+//     per-method burst+sustained budgets (tier-1 .. tier-4 — see
+//     https://api.slack.com/apis/rate-limits); a low-level [Client]
+//     HTTP wrapper around Slack Web API (`https://slack.com/api/
+//     <method>`) with bearer-token auth, JSON encoding, Slack
+//     `{ok: false, error: "..."}` envelope decoding, and
+//     `Retry-After`-aware HTTP 429 handling; a sentinel-error
+//     vocabulary mapping common Slack `error` codes onto matchable
+//     [errors.Is] sentinels.
+//   - M4.2.b — [Client.SendMessage] (`chat.postMessage`) and
+//     [Client.SetBotProfile] (`users.profile.set`). Both are layered
+//     on [Client.Do] and consume the rate-limiter / sentinel-error
+//     foundation. The [messenger.Message.ThreadID] typed field maps
+//     to `thread_ts`; documented Slack-specific knobs (mrkdwn, parse,
+//     link_names, unfurl_links, unfurl_media, icon_emoji, icon_url,
+//     username, reply_broadcast for SendMessage; status_emoji,
+//     status_expiration, real_name, … for SetBotProfile) ride in
+//     [messenger.Message.Metadata] and [messenger.BotProfile.Metadata]
+//     respectively.
 //
 // What this package does NOT yet do (deferred to later M4.2 sub-bullets):
 //
-//   - M4.2.b — `SendMessage` / `SetBotProfile` (`chat.postMessage`,
-//     `users.profile.set`, `bots.info`).
+//   - M4.2.b follow-ups — [messenger.Message.Attachments] support
+//     (Slack `blocks` for hosted-URL attachments + `files.upload` for
+//     inline bytes); [messenger.BotProfile.AvatarPNG] support
+//     (`users.setPhoto` multipart). Both currently return
+//     [messenger.ErrUnsupported] so the contract reserves the field
+//     rather than silently dropping it.
 //   - M4.2.c — `Subscribe` via Socket Mode (WebSocket event intake).
-//   - M4.2.d — `CreateApp` / `InstallApp` (Slack Manifest API + OAuth
-//     install flow).
+//   - M4.2.d — `CreateApp` / `InstallApp` / `LookupUser` (Slack
+//     Manifest API + OAuth install flow + `users.info` / `bots.info`).
 //
-// The [Client] therefore does NOT yet implement
-// [messenger.Adapter] — the compile-time assertion lands in M4.2.d once
-// all six methods exist. M4.2.b/c/d build their adapter methods on top
-// of [Client.Do] and the [RateLimiter].
+// The [Client] therefore does NOT yet implement [messenger.Adapter] in
+// full — the compile-time assertion lands in M4.2.d once all six
+// methods exist. M4.2.c/d build their adapter methods on top of
+// [Client.Do] and the [RateLimiter] in the same shape M4.2.b uses.
 //
 // # Design choices
 //
