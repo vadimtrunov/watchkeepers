@@ -1061,3 +1061,18 @@ actually starts → Stop() → assert clean shutdown`. If Start() after the fail
 - Docs: `docs/ROADMAP-phase1.md` §M2 (verification audit). Template applies to all future milestone toggle PRs.
 
 ---
+
+## 2026-05-04 — M2b verification: gap-aware toggle PRs (Outcome C is fine)
+
+**PR**: [#39](https://github.com/vadimtrunov/watchkeepers/pull/39)
+**Merged**: 2026-05-04
+
+### Pattern
+
+**Partial coverage is normal in milestone audits — toggle what has evidence, leave gaps `[ ]` with rationale, recommend a dedicated PR for each gap**: when auditing milestone-level acceptance bullets, not every bullet will have matching test evidence. The right move is to toggle the covered ones and leave the rest `[ ]` with a documented rationale and a recommended-next-step. Do not bundle gap-filling work into the audit PR — it inflates scope and dilutes the audit's evidentiary purpose. Bullet 216 (sub-ms recall latency at 10k entries, benchmark gated) required a dedicated benchmark PR (~150 lines: seed + p99 latency assertion + build-tag gating + Makefile target) and was correctly left `[ ]`. Reviewers verify both: that toggled bullets have evidence AND that untoggled bullets have a recommended-next-step. Audit PRs are about discipline, not maximum-toggle-count.
+
+### References
+
+- Docs: `docs/ROADMAP-phase1.md` §M2b (verification audit). Pattern applies to all future milestone toggle PRs.
+
+---
