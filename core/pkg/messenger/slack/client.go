@@ -100,6 +100,18 @@ type clientConfig struct {
 	rateLimiter *RateLimiter
 	logger      Logger
 	clock       func() time.Time
+
+	// socketHelloTimeout caps the wait for the Socket Mode `hello`
+	// envelope after dialling the WSS URL. Configured via
+	// [WithSocketModeHelloTimeout]; zero falls back to the package
+	// default ([defaultHelloTimeout]).
+	socketHelloTimeout time.Duration
+
+	// socketDialer overrides the WSS dial step. Configured via
+	// [WithSocketModeDialer]; nil falls back to coder/websocket's
+	// [websocket.Dial]. Tests substitute an in-process pair so the
+	// happy-path runs without a real handshake.
+	socketDialer socketModeDialer
 }
 
 // ClientOption configures a [Client] at construction time. Pass
