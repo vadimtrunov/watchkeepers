@@ -1,0 +1,8 @@
+# Test fixture: every required field populated, secret reference set.
+# Used by TestLoad_FullYAMLPopulatesConfig and the env-override / empty-env
+# tests (the latter mutate WATCHKEEPER_KEEP_BASE_URL via t.Setenv at run time).
+keep:
+  base_url: "http://yaml-base-url.example.com"
+  token_secret: "DB_PASSWORD"
+notebook:
+  data_dir: "/var/lib/watchkeeper/notebook"
