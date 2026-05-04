@@ -235,7 +235,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M3.2.b** lifecycle: Spawn/Retire/Health/List manager over keepclient — consumes the new keepclient methods via a LocalKeepClient interface; logical lifecycle only (process supervision deferred to M5.3).
 - [x] **M3.3** Cron scheduler (robfig/cron) that emits events onto the bus.
 - [ ] **M3.4** Config loader (env + `config.yaml`); secrets pluggable interface (env-first for Phase 1, Vault-ready).
-  - [ ] **M3.4.a** Secrets pluggable interface: `core/pkg/secrets/` defining `SecretSource` interface, `EnvSource` implementation (env-first for Phase 1, Vault-ready abstraction); functional-options constructor; cross-package compile-time interface check.
+  - [x] **M3.4.a** Secrets pluggable interface: `core/pkg/secrets/` defining `SecretSource` interface, `EnvSource` implementation (env-first for Phase 1, Vault-ready abstraction); functional-options constructor; cross-package compile-time interface check.
   - [ ] **M3.4.b** Config loader: `core/pkg/config/` loading env vars + `config.yaml` via `gopkg.in/yaml.v3` into a strongly-typed Config struct with per-service sub-structs; validates required fields at Load time; resolves `*_secret` fields through the M3.4.a SecretSource interface (depends on M3.4.a).
 - [ ] **M3.5** Capability broker: issues scoped, short-lived tokens to tools and to `keepclient` / `notebook` / `archivestore` calls; validates on invocation; enforces TTL.
 - [ ] **M3.6** Keeper's Log writer (thin wrapper on `keepclient.log_append`): structured event schema, correlation IDs, trace context propagation.
