@@ -2,8 +2,18 @@ package notebook
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
+
+	"github.com/vadimtrunov/watchkeepers/core/pkg/keepclient"
 )
+
+// forgetEventType is the `event_type` column written to keepers_log for
+// the per-Forget audit event emitted by [DB.Forget] when a [Logger] has
+// been wired in via [WithLogger]. Held as a const so tests pin against
+// the same string the production code emits.
+const forgetEventType = "notebook_entry_forgotten"
 
 // Forget deletes the entry with the given id from both `entry` and
 // `entry_vec` in a single transaction. The id must be a canonical UUID;
@@ -51,6 +61,31 @@ func (d *DB) Forget(ctx context.Context, id string) error {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("notebook: commit forget tx: %w", err)
+	}
+
+	// Audit emit (M2b.7). The transaction is committed — the row is gone
+	// — before we touch the logger. Pre-commit failures (ErrInvalidEntry,
+	// ErrNotFound, tx errors) return earlier and never reach this point.
+	//
+	// Payload omits PII / large fields by design (AC5): only the agent
+	// id, the entry id, and the wall-clock at which the row went away.
+	if d.logger != nil {
+		payload, err := json.Marshal(map[string]any{
+			"agent_id":     d.agentID,
+			"entry_id":     id,
+			"forgotten_at": time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		if err != nil {
+			return fmt.Errorf("audit marshal: %w", err)
+		}
+		if _, err := d.logger.LogAppend(ctx, keepclient.LogAppendRequest{
+			EventType: forgetEventType,
+			Payload:   payload,
+		}); err != nil {
+			// The row IS gone — caller can retry just the audit emit with
+			// the same id (mirrors the M2b.4 partial-failure shape).
+			return fmt.Errorf("audit emit: %w", err)
+		}
 	}
 	return nil
 }

@@ -126,12 +126,47 @@ var vecOnce sync.Once
 // must NOT invoke [DB.Import] concurrently with other methods on the same
 // receiver — Import closes the underlying connection and swaps it for a new
 // one, and a Recall in flight would race the swap.
+//
+// `agentID` is the canonical UUID identifying which agent this notebook
+// belongs to. M2b.7's mutation-audit emit reads it to populate the
+// `agent_id` field of `notebook_entry_remembered` /
+// `notebook_entry_forgotten` payloads.
+//
+// `logger`, when non-nil, is the audit-emit sink wired in via the
+// [WithLogger] option. M2b.7's mutation-audit path on [DB.Remember] /
+// [DB.Forget] checks for nil before calling LogAppend, so a notebook
+// opened without [WithLogger] preserves the legacy no-op audit behavior.
 type DB struct {
 	sql      *sql.DB
 	path     string
+	agentID  string
+	logger   Logger
 	importMu sync.Mutex
 	closeOne sync.Once
 	closeErr error
+}
+
+// DBOption configures the [*DB] returned by [Open] / [openAt]. Functional
+// options keep the [Open] signature stable as new optional dependencies
+// (audit loggers, metrics sinks, …) are wired in without forcing existing
+// callers to thread nil arguments through every call site.
+type DBOption func(*DB)
+
+// WithLogger wires an audit-emit sink onto the returned [*DB]. When set,
+// [DB.Remember] and [DB.Forget] post-tx-commit emit a correlated event
+// (`notebook_entry_remembered` / `notebook_entry_forgotten`) to Keeper's
+// Log via the supplied [Logger]. When unset (the default) those methods
+// run their pre-M2b.7 no-op audit behavior — the LogAppend call site is
+// guarded by a `db.logger != nil` check so existing callers that pass
+// `Open(ctx, agentID)` without options are unaffected.
+//
+// `*keepclient.Client` satisfies [Logger] structurally; see
+// [archive_on_retire.go] for the interface definition shared with
+// [ArchiveOnRetire] / [PeriodicBackup].
+func WithLogger(logger Logger) DBOption {
+	return func(d *DB) {
+		d.logger = logger
+	}
 }
 
 // Open opens (or creates) the SQLite file backing the given agent's
@@ -141,18 +176,30 @@ type DB struct {
 //
 // `agentID` must be a canonical UUID; otherwise [ErrInvalidAgentID] is
 // returned without any filesystem touch.
-func Open(ctx context.Context, agentID string) (*DB, error) {
+//
+// `opts` are applied to the returned [*DB] before it is handed back; see
+// [WithLogger] for the M2b.7 audit-emit option. Open without any opts is a
+// signature-compatible superset of the pre-M2b.7 form `Open(ctx,
+// agentID)` (variadic addition), so existing call sites continue to
+// compile and behave identically.
+func Open(ctx context.Context, agentID string, opts ...DBOption) (*DB, error) {
 	path, err := agentDBPath(agentID)
 	if err != nil {
 		return nil, err
 	}
-	return openAt(ctx, path)
+	db, err := openAt(ctx, path, opts...)
+	if err != nil {
+		return nil, err
+	}
+	db.agentID = agentID
+	return db, nil
 }
 
 // openAt is the test-friendly seam used by [Open] and the unit tests; it
 // skips agent-id validation and the path resolver so tests can point at a
-// `t.TempDir()` file directly.
-func openAt(ctx context.Context, path string) (*DB, error) {
+// `t.TempDir()` file directly. Tests can still wire up M2b.7 audit emit
+// via [WithLogger] by passing it through `opts`.
+func openAt(ctx context.Context, path string, opts ...DBOption) (*DB, error) {
 	// Register sqlite-vec as a SQLite auto-extension on first call. Must
 	// happen before sql.Open opens the first connection. sql.Open itself is
 	// lazy, but the subsequent PingContext/Exec calls below would race with
@@ -214,7 +261,11 @@ func openAt(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("notebook: schema init on %q: %w", path, err)
 	}
 
-	return &DB{sql: sqlDB, path: path}, nil
+	db := &DB{sql: sqlDB, path: path}
+	for _, opt := range opts {
+		opt(db)
+	}
+	return db, nil
 }
 
 // Close closes the underlying [database/sql.DB]. Safe to call multiple times

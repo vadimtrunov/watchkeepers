@@ -3,12 +3,21 @@ package notebook
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/google/uuid"
+
+	"github.com/vadimtrunov/watchkeepers/core/pkg/keepclient"
 )
+
+// rememberEventType is the `event_type` column written to keepers_log for
+// the per-Remember audit event emitted by [DB.Remember] when a [Logger]
+// has been wired in via [WithLogger]. Held as a const so tests pin
+// against the same string the production code emits.
+const rememberEventType = "notebook_entry_remembered"
 
 // Remember inserts a new entry into both `entry` and `entry_vec` in a single
 // transaction, generating a UUID v7 id when [Entry.ID] is empty and defaulting
@@ -81,6 +90,35 @@ func (d *DB) Remember(ctx context.Context, e Entry) (string, error) {
 
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("notebook: commit remember tx: %w", err)
+	}
+
+	// Audit emit (M2b.7). The transaction is committed — data is durable —
+	// before we touch the logger, so a LogAppend failure cannot rollback
+	// the insert. Pre-commit failures (validation, tx) return earlier and
+	// never reach this point, so rolled-back operations never emit.
+	//
+	// Payload omits PII / large fields by design (AC5): only the opaque
+	// id, the category, and the timestamps. The data itself is recoverable
+	// from the DB if a downstream subscriber needs more context.
+	if d.logger != nil {
+		payload, err := json.Marshal(map[string]any{
+			"agent_id":   d.agentID,
+			"entry_id":   e.ID,
+			"category":   e.Category,
+			"created_at": time.Unix(0, e.CreatedAt*int64(time.Millisecond)).UTC().Format(time.RFC3339Nano),
+		})
+		if err != nil {
+			return e.ID, fmt.Errorf("audit marshal: %w", err)
+		}
+		if _, err := d.logger.LogAppend(ctx, keepclient.LogAppendRequest{
+			EventType: rememberEventType,
+			Payload:   payload,
+		}); err != nil {
+			// The entry IS in the DB — surface the id alongside the error
+			// so the caller can retry just the audit emit (mirrors the
+			// M2b.4 partial-failure shape).
+			return e.ID, fmt.Errorf("audit emit: %w", err)
+		}
 	}
 
 	return e.ID, nil
