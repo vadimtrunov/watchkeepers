@@ -985,3 +985,38 @@ The TASK's AC did not specify validation-order precedence between empty-key chec
 - Total wall time from /rdd to merge: ~30 min
 
 ---
+
+## 2026-05-04 — M3.4.b: Config loader (env + config.yaml + secrets resolution)
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/34>
+**Phases with incidents**: 4 (2 review iters), 6 (1 CodeRabbit iter)
+
+### What worked
+
+**Phase 4 iter 1 caught two real important contract gaps** (test coverage for redaction via WithLogger, naming-convention drift: Go field-name vs YAML tag detection). Phase 4 iter 2 converged clean. Two-iteration Phase 4 is the steady state for medium-novelty TASKs in this run.
+
+**Phase 6 reclassification rule fired correctly**: two CodeRabbit `🟠 Major` findings (silent multi-doc YAML acceptance, raw-err logging in redaction-sensitive path) were reclassified from "nit per strict spec" to "important per defect content". Both were real defects that would have shipped silently. Without the override, the strict spec would have left them in Follow-up. The autonomous loop's robustness depends on this override.
+
+**The orchestrator's `.gitignore` check at M3.4.b start passed cleanly** — no `config/` rule suppression. The check is reflexive after one bite from M3.4.a; demonstrates the LESSONS-FEEDBACK feedback loop is enabling rapid learning.
+
+**Phase 6 iter 2 converged at iter 0** — CodeRabbit auto-resolved all threads after Phase 6 iter 1 fixes. Demonstrates Phase 6's stability when Phase 4 iter 2 is genuinely clean.
+
+### What wasted effort
+
+Phase 6 iter 1 added 3 fixes in 1 commit (multi-doc rejection, err-type logging, fakeSecretSource ctx-check). The fakeSecretSource ctx-check fix was nit-level (≤5 LOC) but folded into the same commit. The loop spec puts it nit-level — the agent's judgement to fold was correct. Pattern: when a nit is trivially scope-able into the same fix commit AND improves test cleanliness, fold it; don't defer to Follow-up just because the spec defaults that way.
+
+The redaction-leak (raw `err` logging) was MISSED by Phase 4 iter 1's code-reviewer. The reviewer correctly flagged "WithLogger has no test", which led to adding a test asserting the redaction contract — but the test asserted only that the resolved VALUE doesn't leak, not that the err OBJECT doesn't leak. Phase 6's CodeRabbit caught the wider invariant. The code-reviewer brief should explicitly call out: "for every contract that says 'never logs sensitive X', verify tests cover not just direct value-passing but ALSO the err-object pathway — `logger.Log(ctx, msg, "err", err)` is a redaction-leak vector."
+
+### Suggested skill changes
+
+- Add to `references/agent-briefs/code-reviewer.md` §What to scrutinize: "For redaction-discipline contracts ('logger never sees secret values'), verify tests cover not just direct value-passing but ALSO the err-object pathway — `logger.Log(ctx, msg, "err", err)` is a redaction-leak vector if `err.Error()` includes context."
+- Add to `references/bounded-loop.md` §Phase 6 §Severity contract: explicit rule that CodeRabbit `🟠 Major` findings with concrete suggested-fix code SHOULD be reclassified to important regardless of the bot-comments-are-nits default. The current spec leaves the override implicit.
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 1
+- Operator interventions outside of gates: 0 (autonomous run)
+- Total wall time from /rdd to merge: ~50 min
+
+---

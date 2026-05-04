@@ -925,3 +925,29 @@ Implemented the secrets package with a pluggable `SecretSource` interface and a 
 - Docs: `docs/ROADMAP-phase1.md` §M3.4.a. First decomposed sub-item of M3.4.
 
 ---
+
+## 2026-05-04 — M3.4.b: Config loader (env + config.yaml + secrets resolution)
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/34>
+**Merged**: 2026-05-04 (squash sha `5b4d67f`)
+
+### Context
+
+Implemented the config package providing layered configuration resolution: defaults → YAML file → environment-variable overrides → secret-reference resolution. Second decomposed milestone from M3.4 consuming the secrets pluggable interface from M3.4.a. Unifies all configuration sources into a single `KeepConfig` struct for downstream consumers.
+
+### Pattern
+
+**Layered config-loader pattern with cumulative state**: defaults are materialized as a `KeepConfig` struct literal; YAML unmarshaling uses strict-mode `KnownFields(true)` to reject unknown keys; environment-variable overrides walk struct fields via reflection checking `Tag.Get("env")` for override-names (fallback to recursing into nested structs); secret-resolution applies after all prior layers, replacing any value tagged `secret:"true"` with a `SecretSource.Get()` call. Each layer modifies the in-memory struct; later layers see cumulative state from earlier layers. Document the precedence rule and the distinction when two phases consult the same env-var (e.g., Phase 1 defaults vs. Phase 3 tag-declared overrides). Limitation: pointers-to-struct not currently recursed; document explicitly.
+
+**`yaml.v3` multi-document defense**: `Decoder.Decode()` is document-aware and returns only the first document from a stream. A file with trailing `---` document separators is silently accepted as single-document. Defense pattern: after successful `Decode`, immediately perform a second `Decode(&extra)` and require `io.EOF` — any other result (second decode success OR non-EOF error) becomes `ErrParseYAML: extra yaml document`. Without this, a misconfigured operator silently receives partial-config.
+
+**Redaction discipline applies to error logging**: log calls like `logger.Log(ctx, msg, "err", err)` pass raw error objects through Logger serialization. Redaction depends on every Logger impl's handling of every error type's `.Error()` output, including wrapped contexts. Pattern: for sensitive operations, log only the error TYPE — `"err_type", fmt.Sprintf("%T", err)`. The type name is provably non-sensitive; the value cannot leak through Logger impls.
+
+**Test fakes must honor interface contracts**: `secrets.SecretSource` contract requires `ctx.Err()` pre-check; test fakes MUST do the same. When defining a fake for a public interface, the fake's behavior is a strict subset of the contract — never weaker. Otherwise tests pass against the fake and fail (or pass for the wrong reason) against real impls.
+
+### References
+
+- Files: `core/pkg/config/{config,loader,errors,README}.go` + `_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M3.4.b. Completes M3.4 decomposition (M3.4.a + M3.4.b).
+
+---
