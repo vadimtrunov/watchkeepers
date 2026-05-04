@@ -952,3 +952,36 @@ Phase 5's PR title was 60 chars and within commitlint, but the manual title-leng
 - Total wall time from /rdd to merge: ~30 min
 
 ---
+
+## 2026-05-04 — M3.4.a: Secrets pluggable interface (SecretSource + EnvSource)
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/33>
+**Phases with incidents**: 4 (2 fixer iters), 6 (0 CodeRabbit comments)
+
+### What worked
+
+**Sixth in-flight decomposition this session** (after M3.2 in iter 3, M3.4 in iter 6). The planner's "and also" title detection and decomposition logic is reliable at scale. The bounded-loop's decomposition affordance handles repeated decompositions within one session without operator help.
+
+**Phase 4 iter 1 surfaced two real contract gaps** (validation-order ambiguity, redaction-test robustness for non-string types) that would have shipped silent without the review pass. Iter 2 verified both were fixed cleanly. Two-iteration Phase 4 is the steady-state for medium-novelty TASKs (M3.1–M3.4.a all converged at iter 2).
+
+**The executor caught a `.gitignore` blocker** (bare `secrets/` pattern suppressing the entire `core/pkg/secrets/` subtree) that would have created a ghost-package situation (code committed, files invisible). The hermetic build/test cycle surfaced this immediately without operator intervention. The bounded-loop's "executor commits + tests + lints" discipline is sufficient to catch path-matching issues.
+
+**Phase 6 converged at iter 0 again** — fourth occurrence in a row. When Phase 4 iter 2 is clean, CodeRabbit's noise floor stays low.
+
+### What wasted effort
+
+The TASK's AC did not specify validation-order precedence between empty-key check and ctx-check. The reviewer correctly flagged this as a contract-clarity gap. A pattern: when ACs prescribe behavior with multiple sub-conditions, list evaluation order explicitly. Updating `references/task-template.md` or the planner brief to suggest "list validation steps in order" for any AC mentioning both synchronous validation and ctx-check would prevent the next occurrence.
+
+### Suggested skill changes
+
+- Add to `references/agent-briefs/planner.md`: "When proposing decomposition for an 'and also' title, the planner SHOULD also flag any cross-implementation contract concerns (e.g. validation order, error-precedence rules) so the executor's TASK explicitly nails them down. Otherwise these surface as iter-1 review findings."
+- Add to `references/task-template.md` §AC section: "If an AC describes behavior with multiple validation or pre-check steps, list them in evaluation order explicitly (e.g. '1. Check key is non-empty; 2. Check ctx not cancelled')."
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0 (autonomous run)
+- Total wall time from /rdd to merge: ~30 min
+
+---

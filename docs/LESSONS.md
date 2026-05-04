@@ -897,3 +897,31 @@ Implemented the lifecycle manager package wrapping keepclient methods (Spawn, Re
 - Docs: `docs/ROADMAP-phase1.md` §M3.2.b. Completes M3.2 decomposition.
 
 ---
+
+## 2026-05-04 — M3.4.a: Secrets pluggable interface (SecretSource + EnvSource)
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/33>
+**Merged**: 2026-05-04 (squash sha `a553406`)
+
+### Context
+
+Implemented the secrets package with a pluggable `SecretSource` interface and a stdlib-only `EnvSource` implementation. First decomposed milestone from M3.4 (separated from M3.4.b config-management package per Phase 1 planner verdict). Establishes the secrets-retrieval contract for downstream packages (Vault, AWS SSM, etc.) to implement.
+
+### Pattern
+
+**Check `.gitignore` for path conflicts when introducing a greenfield package**: a bare directory pattern (`secrets/`, `dist/`, etc.) in the repo's `.gitignore` matches anywhere in the tree, including inside `core/pkg/`. M3.4.a's `core/pkg/secrets/` subtree was being silently suppressed by an existing `secrets/` rule meant to block top-level credential dumps. Anchored fix: change `secrets/` → `/secrets/` (leading slash anchors to the `.gitignore` file's directory). Always grep `.gitignore` for patterns matching the new package name BEFORE the first commit.
+
+**Redaction discipline for security-sensitive packages**: the secrets Logger contract forbids logging secret values. The test helper asserting redaction MUST cover non-string key-value types: `containsString` checks string-typed values explicitly AND `fmt.Sprintf("%+v", entry)` as defense-in-depth so a future log call passing the value via `[]byte`, `error`, or struct cannot leak silently. Pattern: when a contract forbids exposing a data class (PII, secrets, embeddings), the test helper MUST use a serialization-based check, not just type-assertion.
+
+**Validation-order precedence is part of the contract**: `Get(ctx, key)` performs both synchronous validation (empty-key check) and context pre-check. M3.4.a chose "empty-key first, ctx-cancelled second" so `Get(cancelledCtx, "")` returns `ErrInvalidKey` not `ctx.Err()`. Document this in godoc + README so future implementations (Vault, SSM) follow the same order. Pattern: when introducing an interface with multiple implementations, document the validation order explicitly.
+
+**Empty env-var-value treated as not-set**: `os.LookupEnv("FOO")` returns `(value="", found=true)` for `FOO=` (set-but-empty). The shell convention `FOO=` means unset; collapsing `!found` and `value == ""` into `ErrSecretNotFound` simplifies the contract and documents the intent. Document explicitly so callers don't expect to retrieve empty-string secrets.
+
+**Stdlib-only for tiny single-concern packages**: the secrets package has zero external dependencies (just `os`, `context`, `fmt`, `errors`). Mirrors the Phase 1 ethos — default to stdlib until a concrete need surfaces. New packages should not import external deps for the sake of it.
+
+### References
+
+- Files: `core/pkg/secrets/{secrets,envsource,errors,README}.go` + `_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M3.4.a. First decomposed sub-item of M3.4.
+
+---
