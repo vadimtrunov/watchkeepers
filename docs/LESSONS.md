@@ -1168,3 +1168,28 @@ implementing any HTTP wire adapter against a typed external API.
 - Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
 
 ---
+
+## 2026-05-04 — M4.2.c.1: ack BEFORE handler dispatch decouples external timeouts from local latency
+
+**PR**: [#44](https://github.com/vadimtrunov/watchkeepers/pull/44)
+**Merged**: 2026-05-04 (squash sha `9f2c6ba`)
+
+### Pattern
+
+When an external protocol mandates an ack within N seconds (Slack Socket Mode = 3s),
+ack ON RECEIPT before invoking any user-supplied handler. The handler runs AFTER ack,
+fire-and-forget. Coupling ack timing to handler completion is wrong because: (a) handler
+latency is unknowable (could be a slow DB call, an LLM round-trip, etc.); (b) at-least-once
+semantics live at the protocol layer — Slack will redeliver if we crash before ack, so the
+ack window is solely about "did the wire receive the event," not "did we successfully process
+it." Test discipline: pin the contract by running a deliberately slow handler (1.5s+) and
+asserting the ack arrives within Nms regardless. Apply when next implementing any
+event-protocol consumer (webhook receiver, Kafka consumer with manual commit, etc.).
+
+### References
+
+- Files: `core/pkg/messenger/slack/subscribe.go`, `core/pkg/messenger/slack/subscribe_envelope.go`,
+  `core/pkg/messenger/slack/subscribe_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
+
+---
