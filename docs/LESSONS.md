@@ -1117,3 +1117,28 @@ defining the next adapter interface (`RuntimeAdapter`, `LLMProvider`).
 - Docs: `docs/ROADMAP-phase1.md` §M4 → M4.1.
 
 ---
+
+## 2026-05-04 — M4.2.a Slack foundation: split sizable milestones into ".a foundation" PRs
+
+**PR**: [#42](https://github.com/vadimtrunov/watchkeepers/pull/42)
+**Merged**: 2026-05-04 (squash sha `34fec46`)
+
+### Pattern
+
+When a ROADMAP item is sizable (M4.2's full Slack adapter spans 5–7 days, 5
+sub-bullets, 3 verification gates), split BEFORE writing code: M4.2.a is the
+foundation (rate limiter + low-level HTTP client + sentinel taxonomy), M4.2.b/c/d
+are the actual `messenger.Adapter` method implementations layered on top. M4.2.a
+delivers nothing the operator can immediately use, but everything M4.2.b/c/d need.
+ROADMAP toggles wait until enough sub-tasks land that a milestone bullet becomes
+truthful — M4.2's checkbox stays `[ ]` after this PR. Reviewers verify the
+foundation is structurally complete (ctx cancel, race-cleanliness, redaction
+discipline, sentinel mapping) without demanding feature delivery. Apply when next
+sizable milestone (M5 runtime adapter, M11 secrets vault path) lands.
+
+### References
+
+- Files: `core/pkg/messenger/slack/client.go`, `core/pkg/messenger/slack/ratelimiter.go`, `core/pkg/messenger/slack/errors.go`
+- Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
+
+---
