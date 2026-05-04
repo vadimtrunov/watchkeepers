@@ -1142,3 +1142,29 @@ sizable milestone (M5 runtime adapter, M11 secrets vault path) lands.
 - Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
 
 ---
+
+## 2026-05-04 — M4.2.b: typed map envelopes lie about wire format; assert raw bytes
+
+**PR**: [#43](https://github.com/vadimtrunov/watchkeepers/pull/43)
+**Merged**: 2026-05-04 (squash sha `872b8a1`)
+
+### Pattern
+
+When an HTTP request body is constructed from a `map[string]string`, EVERY value
+goes on the wire as a JSON string — even fields the upstream API expects as
+integer/bool/etc. The first M4.2.b PR shipped Slack's `status_expiration` as
+`"1234567890"` (string), which Slack rejects as `invalid_profile`. Tests that
+decode into `json.Number` are insufficient because `json.Number` is
+`type Number string` — `Int64()` succeeds on a quoted string value too, giving
+false confidence. Assertions MUST check the raw wire bytes: required substring
+`"status_expiration":1234567890` (number literal) AND banned substring
+`"status_expiration":"1234567890"` (quoted form). When a typed envelope can't
+carry the right shape, switch to `map[string]any` and parse-on-store. Apply when
+implementing any HTTP wire adapter against a typed external API.
+
+### References
+
+- Files: `core/pkg/messenger/slack/bot_profile.go`, `core/pkg/messenger/slack/bot_profile_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
+
+---
