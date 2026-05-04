@@ -54,6 +54,12 @@ func NewEnvSource(opts ...Option) *EnvSource {
 //     return [ErrSecretNotFound].
 //  4. Found and non-empty → return (value, nil). No log entry.
 //
+// Empty-key validation (step 1) runs BEFORE the ctx pre-check (step 2),
+// so Get(cancelledCtx, "") returns ErrInvalidKey, not ctx.Err(). All
+// [SecretSource] implementations should follow this order so the contract
+// is backend-independent and callers receive consistent error types
+// regardless of which backing store is in use.
+//
 // The Logger (if wired) is called ONLY on error paths (steps 1–3 that
 // produce a log). Step 4 (success) is intentionally silent — chatty
 // success logging would expose access patterns and key names in

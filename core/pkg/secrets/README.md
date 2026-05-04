@@ -33,6 +33,8 @@ Sentinel errors in `errors.go`:
 
 `Get(ctx, key)` returns the secret value for `key`, or an error:
 
+Conditions are evaluated in listed order — earlier rows take precedence.
+
 | Condition                      | Return                              |
 | ------------------------------ | ----------------------------------- |
 | `key == ""`                    | `("", ErrInvalidKey)` — synchronous |

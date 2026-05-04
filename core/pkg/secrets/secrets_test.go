@@ -2,6 +2,8 @@ package secrets
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -43,31 +45,28 @@ func (l *fakeLogger) allEntries() []fakeLogEntry {
 	return out
 }
 
-// containsString reports whether any KV value in any log entry contains
-// the needle as a substring. Used to assert redaction: no log payload
-// must contain a secret value.
+// containsString reports whether any log entry contains needle as a
+// substring, checking both Msg and KV values. Used to assert redaction:
+// no log payload must contain a secret value.
+//
+// String-typed KV values are checked directly. As a defense-in-depth
+// measure the entire entry is also serialized via fmt.Sprintf so that
+// future log calls passing the value as a non-string type ([]byte, error,
+// concrete struct, etc.) are caught regardless of kv-value type.
 func containsString(entries []fakeLogEntry, needle string) bool {
 	for _, e := range entries {
-		if contains(e.Msg, needle) {
+		if strings.Contains(e.Msg, needle) {
 			return true
 		}
 		for _, v := range e.KV {
-			if s, ok := v.(string); ok && contains(s, needle) {
+			if s, ok := v.(string); ok && strings.Contains(s, needle) {
 				return true
 			}
 		}
+		// Defense-in-depth: catch leaks via non-string kv-value types.
+		if strings.Contains(fmt.Sprintf("%+v", e), needle) {
+			return true
+		}
 	}
 	return false
-}
-
-func contains(s, substr string) bool {
-	return len(substr) > 0 && len(s) >= len(substr) &&
-		func() bool {
-			for i := 0; i <= len(s)-len(substr); i++ {
-				if s[i:i+len(substr)] == substr {
-					return true
-				}
-			}
-			return false
-		}()
 }
