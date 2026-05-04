@@ -246,7 +246,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 **Verification**
 
 - [ ] Integration test: spawn a mock Watchkeeper, fire a cron event, Watchkeeper receives it, Keeper's Log contains both the cron-fired and the handler-ran events with matching correlation IDs.
-- [ ] Capability token expires exactly at TTL; use after expiry rejected.
+- [x] Capability token expires exactly at TTL; use after expiry rejected.
 - [x] Outbox consumer is at-least-once and idempotent under forced redeliveries.
 
 **Dependencies**: M2.
