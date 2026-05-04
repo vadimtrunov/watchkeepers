@@ -233,7 +233,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [x] **M3.2** Lifecycle manager: `Spawn`, `Retire`, `Health`, `List` for Watchkeeper processes; state persisted in `watchkeeper` table **via `keepclient`, not direct DB access**.
   - [x] **M3.2.a** keepclient watchkeeper resource CRUD (Insert/UpdateStatus/Get/List) — adds a thin client surface for the watchkeeper table mirroring the manifest/knowledge_chunk pattern.
   - [x] **M3.2.b** lifecycle: Spawn/Retire/Health/List manager over keepclient — consumes the new keepclient methods via a LocalKeepClient interface; logical lifecycle only (process supervision deferred to M5.3).
-- [ ] **M3.3** Cron scheduler (robfig/cron) that emits events onto the bus.
+- [x] **M3.3** Cron scheduler (robfig/cron) that emits events onto the bus.
 - [ ] **M3.4** Config loader (env + `config.yaml`); secrets pluggable interface (env-first for Phase 1, Vault-ready).
 - [ ] **M3.5** Capability broker: issues scoped, short-lived tokens to tools and to `keepclient` / `notebook` / `archivestore` calls; validates on invocation; enforces TTL.
 - [ ] **M3.6** Keeper's Log writer (thin wrapper on `keepclient.log_append`): structured event schema, correlation IDs, trace context propagation.
