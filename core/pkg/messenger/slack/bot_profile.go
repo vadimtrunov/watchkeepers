@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger"
 )
@@ -18,8 +19,16 @@ const usersProfileSetMethod = "users.profile.set"
 // object; the rest of the envelope (`name`, `value`, `user`) targets
 // admin-side single-field updates we do not use in the bot-profile
 // path.
+//
+// Profile is typed `map[string]any` rather than `map[string]string`
+// because Slack documents some leaves as numeric (notably
+// `status_expiration` — Unix-timestamp INTEGER). Marshalling those
+// as JSON strings (which a `map[string]string` would do) produces
+// `invalid_profile` on real workspaces. The `any` type lets each
+// known field land on the wire with the correct JSON type;
+// [buildProfileBody] is the only writer.
 type usersProfileSetRequest struct {
-	Profile map[string]string `json:"profile"`
+	Profile map[string]any `json:"profile"`
 }
 
 // recognisedProfileMetadataKeys is the closed set of Slack-specific
@@ -78,6 +87,12 @@ var recognisedProfileMetadataKeys = []string{
 // unnecessary. M4.2.d's [messenger.Adapter.LookupUser] will own
 // `bots.info` when bot-user resolution becomes a feature requirement.
 func (c *Client) SetBotProfile(ctx context.Context, profile messenger.BotProfile) error {
+	// ctx cancellation takes precedence over input-shape validation —
+	// matches the convention of most Go HTTP-style adapters (caller's
+	// "abandon work" signal trumps any precondition).
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(profile.AvatarPNG) > 0 {
 		return fmt.Errorf("slack: %s: avatar: %w", usersProfileSetMethod, messenger.ErrUnsupported)
 	}
@@ -98,8 +113,17 @@ func (c *Client) SetBotProfile(ctx context.Context, profile messenger.BotProfile
 // users.profile.set, applying the "empty leaves unchanged" contract:
 // only fields the caller populated land on the wire. The map is nil
 // when nothing changes (caller can short-circuit the API round-trip).
-func buildProfileBody(p messenger.BotProfile) map[string]string {
-	body := make(map[string]string, 4)
+//
+// The map is typed `map[string]any` so leaves can land on the wire
+// with their documented JSON types: `status_expiration` is a
+// Unix-timestamp INT64; every other recognised key is a string. A
+// non-numeric `status_expiration` is silently dropped (mirroring the
+// optionalBool fall-through-on-bad-input discipline in
+// send_message.go — adapter does not panic on malformed caller input,
+// and forwarding garbage produces a less actionable error than
+// omitting the field).
+func buildProfileBody(p messenger.BotProfile) map[string]any {
+	body := make(map[string]any, 4)
 	if p.DisplayName != "" {
 		body["display_name"] = p.DisplayName
 	}
@@ -107,9 +131,19 @@ func buildProfileBody(p messenger.BotProfile) map[string]string {
 		body["status_text"] = p.StatusText
 	}
 	for _, key := range recognisedProfileMetadataKeys {
-		if v, ok := p.Metadata[key]; ok && v != "" {
-			body[key] = v
+		v, ok := p.Metadata[key]
+		if !ok || v == "" {
+			continue
 		}
+		if key == "status_expiration" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				continue
+			}
+			body[key] = n
+			continue
+		}
+		body[key] = v
 	}
 	if len(body) == 0 {
 		return nil

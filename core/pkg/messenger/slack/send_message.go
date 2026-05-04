@@ -100,6 +100,12 @@ type chatPostMessageResponse struct {
 // is_archived, no_text) surface as [*APIError] with the Code field
 // populated.
 func (c *Client) SendMessage(ctx context.Context, channelID string, msg messenger.Message) (messenger.MessageID, error) {
+	// ctx cancellation takes precedence over input-shape validation —
+	// matches the convention of most Go HTTP-style adapters (caller's
+	// "abandon work" signal trumps any precondition).
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if channelID == "" {
 		return "", fmt.Errorf("slack: %s: %w", chatPostMessageMethod, messenger.ErrChannelNotFound)
 	}

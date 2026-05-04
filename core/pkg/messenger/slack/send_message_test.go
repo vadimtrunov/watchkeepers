@@ -506,6 +506,46 @@ func TestSendMessage_CtxCancellation(t *testing.T) {
 	}
 }
 
+// TestSendMessage_CtxCancelled_BeforeValidation asserts that ctx
+// cancellation takes precedence over input-shape validation: a
+// cancelled ctx with both empty channelID AND non-empty Attachments
+// surfaces ctx.Err() rather than ErrChannelNotFound or
+// ErrUnsupported. Mirrors the convention of most Go HTTP-style
+// adapters (ctx is the canonical "abandon work" signal and trumps
+// any input precondition).
+func TestSendMessage_CtxCancelled_BeforeValidation(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(
+		WithBaseURL(srv.URL),
+		WithTokenSource(StaticToken("t")),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := c.SendMessage(ctx, "", messenger.Message{
+		Attachments: []messenger.Attachment{{Name: "x.png"}},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false, want true; got %v", err)
+	}
+	if errors.Is(err, messenger.ErrChannelNotFound) {
+		t.Errorf("err = %v, must NOT be messenger.ErrChannelNotFound when ctx is cancelled", err)
+	}
+	if errors.Is(err, messenger.ErrUnsupported) {
+		t.Errorf("err = %v, must NOT be messenger.ErrUnsupported when ctx is cancelled", err)
+	}
+	if calls != 0 {
+		t.Errorf("server saw %d calls, want 0", calls)
+	}
+}
+
 // TestSendMessage_LoggerRedacted asserts the M4.2.a redaction
 // discipline carries through the higher-level helper: the bearer
 // token, the message text (which may contain user PII), and the
