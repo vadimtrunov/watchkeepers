@@ -357,15 +357,20 @@ func (c *Consumer) Start(ctx context.Context) error {
 // Stop on a never-Started consumer returns [ErrNotStarted].
 func (c *Consumer) Stop() error {
 	c.mu.Lock()
-	state := c.state
+	if c.state == stateNotStarted {
+		// Programmer-error path: do NOT advance the state. The
+		// consumer is still pristine and a subsequent Start MUST
+		// remain valid. Mutating to stateStopped here would brick
+		// the linear `not-started → started → stopped` machine
+		// that the godoc advertises.
+		c.mu.Unlock()
+		return ErrNotStarted
+	}
 	cancel := c.cancel
 	doneCh := c.doneCh
 	c.state = stateStopped
 	c.mu.Unlock()
 
-	if state == stateNotStarted {
-		return ErrNotStarted
-	}
 	c.stopOnce.Do(func() {
 		if cancel != nil {
 			cancel()
@@ -586,11 +591,11 @@ func backoffFor(attempt int, initial, maxDelay time.Duration, randFn func() floa
 	return jittered
 }
 
-// lruDedup is a tiny fixed-size last-N seen-IDs cache. The consumer
-// runs the receive→publish loop on a single goroutine, so the cache is
-// touched by exactly one writer; no locking required. (The `sync`
-// fields here are reserved for a future multi-worker variant; current
-// code paths never take the lock.)
+// lruDedup is a tiny fixed-size last-N seen-IDs cache. The current
+// single-worker consumer touches the cache from exactly one goroutine,
+// but [lruDedup.seen] and [lruDedup.record] take the mutex defensively
+// so a future multi-worker variant cannot introduce data races without
+// an explicit audit of this type.
 type lruDedup struct {
 	mu    sync.Mutex
 	size  int

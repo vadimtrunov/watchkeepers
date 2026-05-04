@@ -791,6 +791,103 @@ func TestConsumer_StopBeforeStart_ErrNotStarted(t *testing.T) {
 	}
 }
 
+// TestConsumer_StopBeforeStart_DoesNotBrickStart — regression for the
+// state-machine bug where Stop on a never-Started consumer mutated the
+// state to stopped before checking the early-return, leaving Start
+// permanently locked behind ErrAlreadyStopped. The contract is the
+// linear `not-started → started → stopped` machine: a Stop that
+// reports ErrNotStarted MUST NOT advance the state. After such a Stop,
+// a fresh Start must succeed and drive the receive loop.
+func TestConsumer_StopBeforeStart_DoesNotBrickStart(t *testing.T) {
+	t.Parallel()
+
+	stream := newFakeStream()
+	sub := newFakeSubscriber(stream)
+	bus := &fakeBus{}
+	c := New(sub, bus)
+
+	// Programmer-error Stop on a never-Started consumer must report
+	// ErrNotStarted but leave the state un-advanced.
+	if err := c.Stop(); !errors.Is(err, ErrNotStarted) {
+		t.Fatalf("Stop before Start err = %v, want errors.Is ErrNotStarted", err)
+	}
+
+	// Subsequent Start must succeed (the bug surfaced as
+	// ErrAlreadyStopped here).
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start after Stop-before-Start err = %v, want nil", err)
+	}
+
+	// Verify the run loop is actually live: push an event and wait for
+	// the bus to receive it.
+	stream.push(keepclient.Event{
+		ID:        "evt-1",
+		EventType: "topic.x",
+		Payload:   json.RawMessage(`{}`),
+	})
+	pollUntil(t, 2*time.Second, "bus to record the event after revived Start", func() bool {
+		return bus.callCount() >= 1
+	})
+
+	// Final Stop should now exit cleanly (nil).
+	if err := c.Stop(); err != nil {
+		t.Fatalf("final Stop err = %v, want nil", err)
+	}
+}
+
+// TestConsumer_OptionsFallbackToDefaults — pins the documented contract
+// that WithPublishTimeout, WithMaxPublishRetries, WithRetryInitialDelay,
+// and WithRetryMaxDelay silently keep the package default when given a
+// non-positive argument. A future predicate flip (e.g. `> 0` → `>= 0`)
+// would silently change behavior; this test fences it. WithLogger(nil)
+// and WithIdempotencyCacheSize have separate dedicated tests.
+func TestConsumer_OptionsFallbackToDefaults(t *testing.T) {
+	t.Parallel()
+
+	type want struct {
+		publishTimeout    time.Duration
+		maxPublishRetries int
+		retryInitialDelay time.Duration
+		retryMaxDelay     time.Duration
+	}
+	defaults := want{
+		publishTimeout:    defaultPublishTimeout,
+		maxPublishRetries: defaultMaxPublishRetries,
+		retryInitialDelay: defaultRetryInitialDelay,
+		retryMaxDelay:     defaultRetryMaxDelay,
+	}
+
+	cases := []struct {
+		name string
+		opt  Option
+	}{
+		{"WithPublishTimeout(0)", WithPublishTimeout(0)},
+		{"WithPublishTimeout(-1s)", WithPublishTimeout(-time.Second)},
+		{"WithMaxPublishRetries(0)", WithMaxPublishRetries(0)},
+		{"WithMaxPublishRetries(-1)", WithMaxPublishRetries(-1)},
+		{"WithRetryInitialDelay(0)", WithRetryInitialDelay(0)},
+		{"WithRetryInitialDelay(-1ms)", WithRetryInitialDelay(-time.Millisecond)},
+		{"WithRetryMaxDelay(0)", WithRetryMaxDelay(0)},
+		{"WithRetryMaxDelay(-1s)", WithRetryMaxDelay(-time.Second)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := New(newFakeSubscriber(newFakeStream()), &fakeBus{}, tc.opt)
+			got := want{
+				publishTimeout:    c.cfg.publishTimeout,
+				maxPublishRetries: c.cfg.maxPublishRetries,
+				retryInitialDelay: c.cfg.retryInitialDelay,
+				retryMaxDelay:     c.cfg.retryMaxDelay,
+			}
+			if got != defaults {
+				t.Fatalf("non-positive %s mutated config: got %+v, want %+v", tc.name, got, defaults)
+			}
+		})
+	}
+}
+
 // TestConsumer_StopIdempotent — Stop twice; second returns the same
 // (nil) result without re-running the shutdown sequence.
 func TestConsumer_StopIdempotent(t *testing.T) {
