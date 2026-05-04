@@ -981,3 +981,33 @@ Implemented the capability broker package providing a scoped-token primitive: is
 - Docs: `docs/ROADMAP-phase1.md` §M3.5. Completes M3 (5 of 7 leaves).
 
 ---
+
+## 2026-05-04 — M3.6: Keeper's Log writer (thin wrapper on keepclient.LogAppend)
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/36>
+**Merged**: 2026-05-04 (squash sha `92f6917`)
+
+### Context
+
+Implemented `core/pkg/keeperslog` as a thin wrapper around `keepclient.LogAppend` with
+structured event schema, correlation IDs, and OTel trace context propagation. The writer
+exposes a `Writer` type built with functional options, a `Logger` interface, and an
+`IDGenerator` type alias — the same constructor pattern established across M3.2.b, M3.3,
+M3.5, and this milestone.
+
+### Pattern
+
+**OTel trace fields must be OMITTED (not empty-stringed) when no span is active**: when
+extracting `trace_id`/`span_id`/`trace_flags` from context, only populate those fields if
+a real span is present. Empty-string trace IDs (`""`) pollute downstream tooling — log
+consumers cannot distinguish "no tracing" from "tracing misconfigured". Use `span.IsRecording()`
+or check `traceID.IsValid()` before setting the field; omit otherwise via `omitempty`.
+Absence is unambiguous; empty-string is not.
+
+### References
+
+- Files: `core/pkg/keeperslog/{writer,context,errors,doc}.go` + `_test.go`,
+  `core/pkg/keeperslog/fake_keepclient_test.go`, `core/pkg/keeperslog/README.md`
+- Docs: `docs/ROADMAP-phase1.md` §M3 → M3.6.
+
+---
