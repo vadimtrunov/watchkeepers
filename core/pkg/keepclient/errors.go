@@ -94,9 +94,9 @@ func (e *ServerError) Error() string {
 //	5xx        -> ErrInternal
 //	other 4xx  -> nil (generic *ServerError, no sentinel match)
 //
-// A nil Unwrap means callers can still match the type with [errors.As] but
-// `errors.Is(err, ErrSomething)` will return false — a deliberate signal
-// that the response did not fit a documented sentinel.
+// An empty/nil slice from Unwrap means callers can still match the type with
+// [errors.As] but `errors.Is(err, ErrSomething)` will return false — a
+// deliberate signal that the response did not fit a documented sentinel.
 //
 // 400 returns a slice so a caller can match either the generic
 // [ErrInvalidRequest] or the more specific [ErrInvalidStatusTransition]
