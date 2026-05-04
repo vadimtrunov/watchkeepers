@@ -8,6 +8,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/minio/minio-go/v7 v7.1.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/testcontainers/testcontainers-go/modules/minio v0.42.0
 )
 
