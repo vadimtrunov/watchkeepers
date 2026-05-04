@@ -376,6 +376,87 @@ rolled-back operations are invisible to the audit log by construction.
 - Auditing `Archive` (read-only) and `Open` / `Close` (lifecycle, not
   data mutation).
 
+## PromoteToKeep
+
+M2b.8 ships a Notebook-side helper that packages a single Notebook
+`entry` into a Keep-writable proposal payload for later Watchmaster
+approval. The helper is read-only on the Notebook DB — it loads the
+entry by id and the embedding bytes from `entry_vec` in a single SELECT,
+deserialises the embedding back into `[]float32`, and stamps fresh
+provenance fields (UUID v7 `ProposalID`, default `Scope = "org"`, current
+epoch ms `ProposedAt`).
+
+```go
+client := keepclient.NewClient(...)
+db, _ := notebook.Open(ctx, agentID, notebook.WithLogger(client))
+
+p, err := db.PromoteToKeep(ctx, entryID)
+if err != nil {
+    // ErrInvalidEntry / ErrNotFound — proposal is nil.
+    // 'audit emit: ...' — proposal IS populated; only the audit
+    //   emit failed. Caller may retry just the audit with the same
+    //   payload shape (M2b.7 partial-failure shape).
+}
+// hand `p` to the M6.2 Watchmaster-side approval flow.
+```
+
+### `Proposal` shape
+
+The struct mirrors `watchkeeper.knowledge_chunk` columns one-to-one for
+the four Keep-bound fields (`Subject`, `Content`, `Embedding`,
+`ToolVersion`) plus seven provenance fields the proposal stage needs
+(`ProposalID`, `AgentID`, `NotebookEntryID`, `Category`, `Scope`,
+`SourceCreatedAt`, `ProposedAt`). `Scope` defaults to `ScopeOrg = "org"`;
+`ScopeUserPrefix` / `ScopeAgentPrefix` are exported for callers that
+want a narrower scope (`"user:<uuid>"` / `"agent:<uuid>"` per the Keep
+schema CHECK constraint in
+`deploy/migrations/004_knowledge_chunk.sql`).
+
+### Audit event
+
+When `WithLogger(...)` is wired on the `*DB`, `PromoteToKeep` emits a
+single `notebook_promotion_proposed` event AFTER the read completes
+(this is a read-only op, so no transaction wraps the audit emit).
+Payload shape:
+
+| Field         | Type   | Source                                |
+| ------------- | ------ | ------------------------------------- |
+| `agent_id`    | string | `*DB.agentID`                         |
+| `entry_id`    | string | the entry id passed to PromoteToKeep  |
+| `proposal_id` | string | freshly-minted UUID v7                |
+| `category`    | string | `entry.category`                      |
+| `proposed_at` | string | RFC3339Nano UTC, mirrors `ProposedAt` |
+
+The payload **excludes** `content`, `embedding`, and `subject` —
+mirrors the M2b.7 PII / large-field discipline. The audit log answers
+"a promotion was proposed", not "here is what was proposed". Recovering
+the proposal contents from the audit log alone is intentionally
+impossible; downstream subscribers re-read the local notebook by id
+when they need more context.
+
+### Separation from the future M6.2 event
+
+`notebook_promotion_proposed` (this milestone) is the **proposal-stage**
+event — emitted by an agent that wants to share an entry. The future
+M6.2 event `notebook_promoted_to_keep` is the **write-completion** event
+— emitted by the Watchmaster after it has actually inserted the row
+into `watchkeeper.knowledge_chunk`. The two events are deliberately
+disjoint: subscribers can distinguish "agent wants X" from "Watchmaster
+approved and persisted X" without re-reading the audit-log payload.
+M2b.8 does NOT introduce the M6.2 event type; that event ships with the
+M6.2 write path.
+
+### Out-of-scope behaviors
+
+- Filtering superseded entries. `PromoteToKeep` does NOT skip entries
+  with non-NULL `superseded_by`. The caller's responsibility to decide
+  whether a superseded entry is still worth promoting; M6.2 may apply
+  that policy on the Watchmaster side.
+- Persisting into `knowledge_chunk`. The helper returns the proposal
+  struct — the M6.2 path is the one that actually writes to Keep.
+- Retry / backoff on audit-emit failure. The partial-failure shape
+  (`(p, err)`) lets the caller decide.
+
 ## Out of scope (still deferred)
 
-- Watchmaster `promote_to_keep` — see M2b.8.
+- Watchmaster `promote_to_keep` write path — see M6.2.
