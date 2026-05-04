@@ -212,11 +212,11 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Verification**
 
-- [ ] `Remember` + `Recall` cycle returns correct top-K.
+- [x] `Remember` + `Recall` cycle returns correct top-K.
 - [ ] Recall latency stays sub-millisecond at 10k entries (benchmark gated).
-- [ ] `Archive` to `LocalFS` and to an `S3Compatible` endpoint (docker test container); `Import` from each restores identical state.
-- [ ] Cross-agent isolation: process A cannot open process B's file (filesystem perms).
-- [ ] Every mutation produces a correlated Keeper's Log entry.
+- [x] `Archive` to `LocalFS` and to an `S3Compatible` endpoint (docker test container); `Import` from each restores identical state.
+- [x] Cross-agent isolation: process A cannot open process B's file (filesystem perms).
+- [x] Every mutation produces a correlated Keeper's Log entry.
 
 **Dependencies**: M2.
 **Magnitude**: 3–5 days.
