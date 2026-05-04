@@ -106,6 +106,7 @@ func TestHealth_ProjectsRow(t *testing.T) {
 		RetiredAt:               &retired,
 		CreatedAt:               created,
 	}
+	// Status intentionally has no ActiveManifestVersionID field — AC6 drops it.
 	fake := &fakeKeepClient{getResp: row}
 	m := New(fake)
 

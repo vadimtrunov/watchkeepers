@@ -280,8 +280,7 @@ func (m *Manager) List(ctx context.Context, filter ListFilter) ([]*keepclient.Wa
 	}
 	out := make([]*keepclient.Watchkeeper, len(resp.Items))
 	for i := range resp.Items {
-		wk := resp.Items[i]
-		out[i] = &wk
+		out[i] = &resp.Items[i]
 	}
 	return out, nil
 }

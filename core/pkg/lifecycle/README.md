@@ -64,9 +64,8 @@ Three outcomes:
 err))`. No row exists; retry the whole call.
 - **Update fails** → `(id, fmt.Errorf("lifecycle: spawn: activate:
 %w", err))`. The row IS in the database in `pending` state, so the
-  caller can retry just `Manager.Retire`-then-Update or
-  `keepclient.UpdateWatchkeeperStatus(id, "active")` against the
-  populated id without re-running the Insert.
+  caller can retry `keepclient.UpdateWatchkeeperStatus(id, "active")`
+  against the populated id without re-running the Insert.
 
 This shape mirrors M2b.4 (`importPayload` / spool-then-rename) and
 M2b.7 (mutation-audit `(id, err)` on LogAppend failure): when an
@@ -129,15 +128,12 @@ import (
     "github.com/vadimtrunov/watchkeepers/core/pkg/lifecycle"
 )
 
-func wire(ctx context.Context, ts keepclient.TokenSource) (*lifecycle.Manager, error) {
-    kc, err := keepclient.New(
+func wire(ctx context.Context, ts keepclient.TokenSource) *lifecycle.Manager {
+    kc := keepclient.NewClient(
         keepclient.WithBaseURL("https://keep.example.com"),
         keepclient.WithHTTPClient(http.DefaultClient),
         keepclient.WithTokenSource(ts),
     )
-    if err != nil {
-        return nil, err
-    }
-    return lifecycle.New(kc), nil
+    return lifecycle.New(kc)
 }
 ```
