@@ -1046,3 +1046,18 @@ actually starts → Stop() → assert clean shutdown`. If Start() after the fail
 - Docs: `docs/ROADMAP-phase1.md` §M3 → M3.7.
 
 ---
+
+## 2026-05-04 — M2 verification batch: toggle-only PRs need evidence at file:line, not by name
+
+**PR**: [#38](https://github.com/vadimtrunov/watchkeepers/pull/38)
+**Merged**: 2026-05-04 (squash sha `af31554`)
+
+### Pattern
+
+**Every flipped acceptance bullet must cite a specific file:line range, not a test name**: milestone-level acceptance bullets often become QA debt because they remain `[ ]` even when tests already exist that prove them. When toggling such bullets in a follow-up audit, the PR body must cite a specific file:line range for each bullet, not just a test name. Test names can be misleading — e.g. `TestKeepClient_Smoke_LogTail_OrderingAndFilter` hedges in its own doc comment that it is a "closest available proxy", and the actual round-trip proof for the bullet lives in a different HTTP-layer test. Reviewers must read the cited lines, not the names. Bake this into the toggle-PR template: every flipped bullet ↔ test file:line + one-sentence reasoning.
+
+### References
+
+- Docs: `docs/ROADMAP-phase1.md` §M2 (verification audit). Template applies to all future milestone toggle PRs.
+
+---
