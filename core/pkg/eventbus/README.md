@@ -75,10 +75,22 @@ single goroutine.
 
 ### Late subscribers
 
-A subscriber added during a topic's worker iteration does NOT
-retroactively receive the in-flight event. The worker takes a snapshot of
-the subscriber list per envelope; new subscribers see only events
-published AFTER the `Subscribe` call returns.
+The worker takes a snapshot of the subscriber list **at dispatch time**
+(per envelope), NOT at the time `Publish` enqueues the event. The
+guarantee is therefore the weaker one:
+
+> A late subscriber does NOT retroactively receive an event whose
+> dispatch has already begun.
+
+It is **not** the stronger "subscribers receive only events whose
+`Publish` completed strictly after `Subscribe` returned." Concretely: if
+`Publish` enqueues event `E` at `t=0`, `Subscribe` returns at `t=1`, and
+the worker dispatches `E` at `t=2`, the new subscriber WILL observe `E`
+because the snapshot taken at `t=2` already includes it.
+
+If you need strict "events published after Subscribe" semantics, quiesce
+publishers across the Subscribe call yourself (e.g., gate Publishes on a
+flag flipped after Subscribe returns).
 
 ## Backpressure
 

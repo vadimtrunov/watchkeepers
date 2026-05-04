@@ -166,6 +166,14 @@ func (b *Bus) getOrCreateTopic(topic string) *topicState {
 // sequentially in registration order. The loop exits when the channel is
 // closed by [Bus.Close] (after which range drains any buffered envelopes
 // and then returns).
+//
+// The subscriber-list snapshot is taken at DISPATCH time (here), NOT at
+// enqueue time (in Publish). Consequence for late subscribers: a Subscribe
+// that returns AFTER an envelope was enqueued by Publish but BEFORE this
+// loop pops + dispatches it WILL observe that envelope. The guarantee is
+// therefore "no retroactive delivery of events whose dispatch has already
+// begun," not the stronger "no delivery of events whose Publish completed
+// before Subscribe returned." See [Bus.Subscribe] godoc.
 func (b *Bus) runTopic(ts *topicState) {
 	defer b.wg.Done()
 	for env := range ts.ch {
@@ -190,10 +198,15 @@ func (b *Bus) runTopic(ts *topicState) {
 // subsequent calls are no-ops (no panic, no error). The returned function
 // is safe to call from any goroutine.
 //
-// New subscribers do NOT retroactively receive events whose dispatch has
-// already begun (AC4): they observe events whose Publish completes
-// strictly after the Subscribe call returns. This is implemented via a
-// copy-on-write subscriber-list snapshot taken once per envelope.
+// Late-subscriber semantics (AC4): the bus snapshots the subscriber list
+// at DISPATCH time, not enqueue time. A subscriber added between an event's
+// Publish (which only enqueues) and the worker's dispatch of that event
+// WILL receive the event. The guarantee Subscribe provides is therefore
+// the weaker one: a subscriber does NOT retroactively receive an event
+// whose dispatch has already begun, but events still queued behind earlier
+// envelopes are visible to it. Callers needing strict
+// "events published strictly AFTER my Subscribe returns" semantics must
+// quiesce publishers themselves.
 //
 // Returns [ErrClosed] if the bus has been [Bus.Close]d, [ErrInvalidTopic]
 // if `topic` is the empty string, [ErrInvalidHandler] if `handler` is nil.
@@ -211,18 +224,36 @@ func (b *Bus) Subscribe(topic string, handler Handler) (func(), error) {
 		return noop, ErrClosed
 	}
 
-	ts := b.getOrCreateTopic(topic)
-	// Close-race fence: getOrCreateTopic returns nil if Close ran between
-	// the fast-path closed-flag check above and the under-lock re-check
-	// inside the helper. Without this, a fresh topicState + worker would
-	// be spawned after Close had already snapshotted+closed the channel
-	// set, leaking the worker on a never-closed channel.
-	if ts == nil {
+	// Hold b.mu across the closed-check, topic install/lookup, AND the
+	// ts.mu.Lock acquisition. This serialises Subscribe-against-Close for
+	// BOTH new and existing topics: without locking ts.mu before releasing
+	// b.mu, a Subscribe on an existing topic could pass the closed-check,
+	// release b.mu, then race a Close that snapshots channels, drains
+	// publishWG, closes channels, and waits for workers to exit — the
+	// resulting subscription would land on a dead topic with the worker
+	// already gone (a silent contract break, not just a leak).
+	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
 		return noop, ErrClosed
 	}
+	ts, ok := b.topics[topic]
+	if !ok {
+		ts = &topicState{
+			ch: make(chan envelope, b.cfg.bufferSize),
+		}
+		b.topics[topic] = ts
+		b.wg.Add(1)
+		go b.runTopic(ts)
+	}
+	ts.mu.Lock()
+	// Release b.mu only after ts.mu is held — Close cannot snapshot+close
+	// this topic's channel while ts.mu is held by Subscribe because Close
+	// itself takes b.mu first; the b.mu→ts.mu nesting here is one-way (no
+	// AB/BA cycle: ts.mu is never taken before b.mu anywhere else).
+	b.mu.Unlock()
 
 	id := b.nextSubID.Add(1)
-	ts.mu.Lock()
 	// Copy-on-write append: a fresh slice replaces the field so any
 	// in-flight runTopic dispatch holding the previous header keeps
 	// iterating its snapshot without seeing the new entry (AC4).

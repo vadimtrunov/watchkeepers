@@ -77,7 +77,9 @@ func TestBus_PublishSubscribe_DeliveredInOrder(t *testing.T) {
 	}, 5*time.Millisecond, 3*time.Second)
 	if !ok {
 		mu.Lock()
-		t.Fatalf("got %d events, want %d", len(seen), n)
+		got := len(seen)
+		mu.Unlock()
+		t.Fatalf("got %d events, want %d", got, n)
 	}
 
 	mu.Lock()
@@ -301,26 +303,32 @@ func TestBus_PublishNoSubscribers_NoError(t *testing.T) {
 }
 
 // TestBus_LateSubscriberMissesPriorEvents — AC4: publish event A,
-// subscribe (after publish has been processed), publish event B, assert
-// subscriber sees only B. Polls on the topic's empty-queue condition
-// before subscribing so we know event A was dispatched against the
-// (empty) subscriber list before the late Subscribe runs.
+// subscribe late (after A is confirmed dispatched), publish event B,
+// assert late subscriber sees only B.
+//
+// The drain sentinel is subscribed BEFORE "A" is published, so the
+// sentinel's drained=true fires only once the worker has finished
+// dispatching "A" to the drain handler. At that point the worker has
+// moved past every previously-enqueued envelope — so unsubscribing
+// drain and subscribing late immediately after drained=true means that
+// no in-flight envelope can include late in its snapshot. The late
+// subscriber must then see only "B".
+//
+// This also validates the bus's actual subscriber-snapshot guarantee:
+// the snapshot is taken at dispatch time; a handler registered strictly
+// after the last in-flight dispatch cannot observe that dispatch.
 func TestBus_LateSubscriberMissesPriorEvents(t *testing.T) {
 	t.Parallel()
 
 	b := New()
 	t.Cleanup(func() { _ = b.Close() })
 
-	// Publish A to a topic with zero subscribers. The worker pops it
-	// and dispatches to the empty list, draining the queue.
-	if err := b.Publish(context.Background(), "t1", "A"); err != nil {
-		t.Fatalf("Publish A: %v", err)
-	}
-
-	// Wait for the queue to drain — confirmed by the fact that a fresh
-	// publish below will be observed by a freshly-subscribed handler.
-	// Use a sentinel-subscribe / sentinel-publish to confirm queue is
-	// idle before installing the real late subscriber.
+	// Subscribe drain BEFORE publishing "A" so that the drain handler
+	// fires as the worker dispatches "A". drained=true therefore means
+	// "the worker has finished dispatching all envelopes published up to
+	// and including 'A'."  This eliminates the prior flake where the
+	// worker could snapshot ts.subs=[drain] on the "A" envelope if the
+	// scheduler happened to run Subscribe before the first dispatch.
 	var drained atomic.Bool
 	unsubDrain, err := b.Subscribe("t1", func(_ context.Context, _ any) {
 		drained.Store(true)
@@ -328,16 +336,18 @@ func TestBus_LateSubscriberMissesPriorEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Subscribe drain: %v", err)
 	}
-	if err := b.Publish(context.Background(), "t1", "drain"); err != nil {
-		t.Fatalf("Publish drain: %v", err)
+
+	if err := b.Publish(context.Background(), "t1", "A"); err != nil {
+		t.Fatalf("Publish A: %v", err)
 	}
+
+	// Wait until the drain handler has fired: worker is past "A".
 	if !pollUntil(drained.Load, 5*time.Millisecond, 3*time.Second) {
 		t.Fatal("drain sentinel never fired")
 	}
 	unsubDrain()
 
-	// Now install the real late subscriber. It must NOT see "A" (which
-	// was dispatched before any subscriber existed) and MUST see "B".
+	// All prior envelopes are dispatched. Subscribe late and publish B.
 	var (
 		mu   sync.Mutex
 		seen []string
@@ -671,7 +681,9 @@ func TestBus_ConcurrentPublishersPreserveOrderPerTopic(t *testing.T) {
 	}, 5*time.Millisecond, 5*time.Second)
 	if !ok {
 		mu.Lock()
-		t.Fatalf("got %d events, want %d", len(seen), total)
+		got := len(seen)
+		mu.Unlock()
+		t.Fatalf("got %d events, want %d", got, total)
 	}
 
 	mu.Lock()
@@ -764,6 +776,117 @@ func TestBus_RaceCloseVsSubscribeNewTopic(t *testing.T) {
 	// Post-Close, all worker goroutines (whether installed before or
 	// during the race window) must have exited. Slack absorbs goroutines
 	// transiently spawned by the testing framework / race runtime.
+	const slack = 4
+	ok := pollUntil(func() bool {
+		return goroutineBaseline() <= baseline+slack
+	}, 10*time.Millisecond, 3*time.Second)
+	if !ok {
+		t.Fatalf("goroutine count %d still exceeds baseline %d (+%d slack) after Close — leaked worker?",
+			runtime.NumGoroutine(), baseline, slack)
+	}
+}
+
+// TestBus_RaceCloseVsSubscribeExistingTopic — AC5 regression: hammer
+// Subscribe against Close on a topic that ALREADY has prior subscribers
+// (i.e., the b.topics map HIT branch in Subscribe). Prior to the
+// b.mu-held-across-ts.mu fix, Subscribe on an existing topic could:
+//
+//  1. Pass the fast-path b.closed.Load() check (false).
+//  2. Look up the existing topicState in b.topics WITHOUT re-checking
+//     b.closed under b.mu.
+//  3. Race a Close that snapshots channels, drains publishWG, closes
+//     channels, and joins worker goroutines.
+//  4. Append to ts.subs and return nil AFTER Close has fully returned —
+//     a silent contract break: the documented contract is that any
+//     Subscribe whose linearisation point is after Close.Done returns
+//     ErrClosed.
+//
+// The fix holds b.mu across both the closed-check AND the ts.mu.Lock
+// acquisition for both new AND existing topics. Once Close has taken b.mu
+// and flipped closed=true, every subsequent Subscribe sees ErrClosed
+// before it can append to ts.subs. Run under `-race -count=20`.
+//
+// What this test asserts (post-fix):
+//   - Every Subscribe whose return is observed AFTER Close.Done returns
+//     ErrClosed. No racer reports a nil-error post-Close.
+//   - No leaked workers (goroutine baseline check).
+//
+// Without the fix, the contract assertion is the one that fails: a racer
+// goroutine sees Subscribe return nil even though Close has already
+// returned, because the racer's b.topics map HIT slipped past the missing
+// re-check.
+func TestBus_RaceCloseVsSubscribeExistingTopic(t *testing.T) {
+	// Not t.Parallel: NumGoroutine snapshots are sensitive to other tests.
+	baseline := goroutineBaseline()
+
+	b := New()
+
+	// Pre-install topics with prior subscribers so subsequent Subscribes
+	// hit the b.topics map HIT branch in getOrCreateTopic — which is the
+	// path the existing-topic race specifically exercises.
+	const topics = 20
+	for i := 0; i < topics; i++ {
+		topic := fmt.Sprintf("topic-%d", i)
+		_, err := b.Subscribe(topic, func(_ context.Context, _ any) {})
+		if err != nil {
+			t.Fatalf("pre-Subscribe %s: %v", topic, err)
+		}
+	}
+
+	// closeReturned is set when Close.Done returns. Any Subscribe whose
+	// return is observed STRICTLY AFTER closeReturned is true MUST have
+	// returned ErrClosed — that is the contract the original code broke.
+	var closeReturned atomic.Bool
+
+	const racers = 50
+	const perRacer = 5
+	errs := make(chan error, racers*perRacer)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			// Each racer hammers a topic that ALREADY exists (mod-indexed
+			// into the pre-installed set), so every Subscribe call hits
+			// the existing-topic branch, NOT the create branch.
+			topic := fmt.Sprintf("topic-%d", i%topics)
+			for j := 0; j < perRacer; j++ {
+				_, err := b.Subscribe(topic, func(_ context.Context, _ any) {})
+				// Capture the post-Close-Done flag IMMEDIATELY after
+				// Subscribe returns. If Close has already finished AND we
+				// got nil back, the bus has silently registered a handler
+				// against a dead topic — the contract violation we are
+				// testing for.
+				if err == nil && closeReturned.Load() {
+					errs <- fmt.Errorf("Subscribe(%s) returned nil AFTER Close already returned — dead-sub contract break",
+						topic)
+					return
+				}
+				if err != nil && !errors.Is(err, ErrClosed) {
+					errs <- fmt.Errorf("Subscribe(%s): unexpected err %w", topic, err)
+					return
+				}
+			}
+		}(i)
+	}
+
+	close(start)
+	// Let some racers get into Subscribe, then race Close against them.
+	time.Sleep(1 * time.Millisecond)
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	closeReturned.Store(true)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	// Post-Close, all worker goroutines (whether the pre-installed ones
+	// or any spawned during the race window) must have exited.
 	const slack = 4
 	ok := pollUntil(func() bool {
 		return goroutineBaseline() <= baseline+slack

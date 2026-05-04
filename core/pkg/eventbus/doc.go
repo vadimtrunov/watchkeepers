@@ -13,9 +13,16 @@
 // Each topic is served by exactly one worker goroutine. Events flow
 // through a buffered channel — the topic queue — and the worker pops
 // them one at a time and dispatches to a subscriber-list snapshot taken
-// per envelope. This guarantees per-topic ordered delivery: events
-// published to one topic are delivered to each subscriber in publish
-// order. Across topics no order is preserved (each topic is independent).
+// per envelope at DISPATCH time. This guarantees per-topic ordered
+// delivery: events published to one topic are delivered to each subscriber
+// in publish order. Across topics no order is preserved (each topic is
+// independent).
+//
+// Because the subscriber snapshot is taken at dispatch time, NOT at
+// enqueue time, a Subscribe that returns AFTER an event was enqueued by
+// Publish but BEFORE the worker dispatches that event WILL receive the
+// event. The guarantee is "no retroactive delivery of events whose
+// dispatch has already begun" — see [Bus.Subscribe] for details.
 //
 // "Publish order" with concurrent publishers means **enqueue order**, not
 // call-time order: when two goroutines call Publish on the same topic
