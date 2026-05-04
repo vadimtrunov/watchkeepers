@@ -842,6 +842,36 @@ Implemented the watchkeeper resource server-side handlers and client methods to 
 
 ---
 
+## 2026-05-04 — M3.3: cron scheduler emitting events onto the bus
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/32>
+**Merged**: 2026-05-04 (squash sha `4504953`)
+
+### Context
+
+Implemented the cron scheduler package wrapping robfig/cron/v3 to emit correlated audit events onto the eventbus on each fire. Completes M3 milestone (scheduler + eventbus + notebook). The scheduler bridges time-driven work with the event-streaming architecture.
+
+### Pattern
+
+**`LocalPublisher` interface for cron-side decoupling**: `cron.LocalPublisher` (single-method `Publish(ctx, topic, event) error`) is structurally satisfied by `*eventbus.Bus`. Production `cron` code does NOT import `eventbus`; the compile-time check `var _ LocalPublisher = (*eventbus.Bus)(nil)` lives in `_test.go`. Mirrors the M3.2.b `LocalKeepClient` pattern — production packages consume eventbus through structural interfaces only, keeping import cycles clean.
+
+**`EventFactory` closure for per-fire freshness**: cron entries that need fresh payloads per fire (timestamps, correlation_ids) take `func(ctx context.Context) any` instead of static events. The factory is called inside the entry's worker on each fire. Pattern: when the same code-path fires repeatedly and downstream consumers need to distinguish events, give the producer a factory hook rather than a value — saves threading state through closures.
+
+**`robfig/cron/v3` with `cron.WithSeconds()` for testability**: 6-field cron specs (`* * * * * *`) let tests use sub-second granularity with polling-deadline assertions instead of fixed sleeps. Choose the parser mode that makes tests fast and deterministic, even if production specs use conservative intervals. Document in README that `WithSeconds` is always on.
+
+**Panic-recovered fire closure**: every cron entry's body wraps `factory(ctx) + pub.Publish(ctx, topic, event)` in `defer recover()` so a panicking factory or panicking publish handler does NOT kill the cron worker goroutine. Recovery emits structured log. Pattern: any long-lived worker goroutine calling user-supplied callbacks (factories, handlers, hooks) MUST recover panics — else a single bad input takes down the scheduler.
+
+**`Stop() context.Context` idempotency via cached return**: robfig's `Stop()` returns a fresh stop-context per call; our wrapper caches the first call's return value so subsequent `Stop()`s return the same already-done ctx. Pattern: when an underlying API gives fresh resources per call but the wrapper contract says idempotent, capture the first call's result under a mutex and return it thereafter.
+
+**`nolint:contextcheck` for ctx-less APIs**: robfig/cron's `Start()` is ctx-less; we accept `Start(ctx)` and store the ctx as the parent for fire-time closures. The linter sees a possibly-leaked ctx; documented + line-scoped `//nolint:contextcheck` is the right escape hatch when external libraries predate ctx-aware APIs.
+
+### References
+
+- Files: `core/pkg/cron/{cron,options,errors,README}.go` + `_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M3.3. Completes M3.
+
+---
+
 ## 2026-05-04 — M3.2.b: lifecycle manager (Spawn/Retire/Health/List over keepclient)
 
 **PR**: <https://github.com/vadimtrunov/watchkeepers/pull/31>

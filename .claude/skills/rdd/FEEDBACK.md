@@ -919,3 +919,36 @@ Skip-explore was the right call (iter-3 explore covered the keepclient surface),
 - Total wall time from /rdd to merge: ~40 min
 
 ---
+
+## 2026-05-04 — M3.3: cron scheduler emitting events onto the bus
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/32>
+**Phases with incidents**: none
+
+### What worked
+
+Phase 4 converged at iter 1 with 0/0/5 — strong signal that M3.3's design (driven by the planner's pre-resolution of 3 open questions in the verdict) was reviewable in one pass. When the planner does heavy lifting in Gate 1, Phase 4 stays cheap.
+
+Five nits in iter 1 were all genuinely small (README example helper, one-line godoc additions, minor refactors). The bounded-loop's "nits don't block" rule paid off — no fixer iteration needed for what amounts to comment-quality improvements.
+
+The `LocalPublisher` decoupling pattern, now applied across notebook (Logger), lifecycle (LocalKeepClient), and cron (LocalPublisher), is becoming the canonical M3-area shape. Each new package picks it up without ceremony. Fifth autonomous iteration in this session merged cleanly with no operator intervention. Self-gating (Gates 1, 2, 3) and bounded-loop discipline held over an extended autonomous run.
+
+### What wasted effort
+
+During Phase 3, the executor noticed a flaky pass-on-rerun of `TestBus_RaceCloseVsSubscribeExistingTopic` (the regression test added in M3.1 iter-2 to catch the WaitGroup-sema race). The fix landed; the test still occasionally trips the race detector under heavy `-count=N` loads. Nothing in M3.3 introduced the flake. The operator may want to promote this to a follow-up TASK ("M3.1 follow-up: stabilise the close-race regression test under -race -count=10+"). Skill caught this correctly (executor flagged it, orchestrator recorded it, didn't block the merge).
+
+Phase 5's PR title was 60 chars and within commitlint, but the manual title-length-check at PR-open could be automated with a `commitlint --validate` pre-step in `references/agent-briefs/git-master.md`. Currently the orchestrator picks the title and trusts it fits.
+
+### Suggested skill changes
+
+- Add to `references/agent-briefs/git-master.md` §pr mode actions: "Before `gh pr create`, run `echo \"<title>\" | npx commitlint` (or repo equivalent) to surface a title-length / format violation up-front. If commitlint config disabled, skip silently." Currently the agent visually estimates; for ≥70-char titles a real check is one shell line.
+- Add to `references/bounded-loop.md` §Stable-flake escalation: when an executor (or other agent) notices a pre-existing flake during a rerun (test passes on targeted run, fails on broad `-count=N`), the orchestrator should record it as a "follow-up TASK candidate" rather than just logging. Today the orchestrator records in TASK Progress log + writer's FEEDBACK; promoting to a separate TASK candidate would let the operator triage flakes systematically.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0 (autonomous run)
+- Total wall time from /rdd to merge: ~30 min
+
+---
