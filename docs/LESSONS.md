@@ -841,3 +841,29 @@ Implemented the watchkeeper resource server-side handlers and client methods to 
 - Docs: `docs/ROADMAP-phase1.md` §M3.2.a. Stable API surface consumed by M3.2.b lifecycle package.
 
 ---
+
+## 2026-05-04 — M3.2.b: lifecycle manager (Spawn/Retire/Health/List over keepclient)
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/31>
+**Merged**: 2026-05-04 (squash sha `bf94c46`)
+
+### Context
+
+Implemented the lifecycle manager package wrapping keepclient methods (Spawn, Retire, Health, List) to provide the high-level resource-management API for in-process Keep consumers. Second decomposed milestone from M3.2 — consumes the M3.2.a keepclient surface established in the prior PR.
+
+### Pattern
+
+**Local-interface decoupling for in-process consumer packages**: `lifecycle.LocalKeepClient` mirrors the notebook and archivestore pattern — production code never imports `*keepclient.Client` (only request/response types via interface signatures); a compile-time check `var _ LocalKeepClient = (*keepclient.Client)(nil)` lives in `_test.go` to enforce structural compatibility without import cycles. This unblocks unit tests with hand-rolled fakes (no mocking framework) and keeps the dependency graph clean.
+
+**Insert + Transition in one Spawn call**: the ROADMAP "register a new logical Watchkeeper and mark it active" maps cleanly to `Spawn = InsertWatchkeeper(pending) + UpdateWatchkeeperStatus(active)`. Partial-failure shape `(id, fmt.Errorf("step: %w", err))` lets callers retry just the activate against the populated id when the second step fails — caller never cleans up an orphaned pending row.
+
+**Pointer-slice from value-slice via index**: when a downstream API wants `[]*T` but upstream returns `[]T`, allocate `out := make([]*T, len(items)); for i := range items { out[i] = &items[i] }`. Pointers escape via the return value, so Go escape analysis keeps the backing array alive. The form `&items[i]` (NOT `&item`) avoids the pre-Go-1.22 loop-variable-aliasing pitfall.
+
+**Limit-bound lockstep across packages**: `Manager.Limit > 200` rejection mirrors keepclient's `maxWatchkeeperListLimit = 200`. Document the lockstep ("mirrors core/internal/keep/server/handlers_read.go:maxWatchkeeperListLimit; keep them in lockstep") so a future change surfaces a divergence prompt rather than silent drift.
+
+### References
+
+- Files: `core/pkg/lifecycle/{lifecycle,options,manager,errors,README}.go` + `_test.go`; `core/internal/keep/handlers_read.go` (maxWatchkeeperListLimit mirror)
+- Docs: `docs/ROADMAP-phase1.md` §M3.2.b. Completes M3.2 decomposition.
+
+---

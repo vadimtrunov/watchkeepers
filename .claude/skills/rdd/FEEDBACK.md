@@ -886,3 +886,36 @@ Planner heuristic flagged ~7 files for M3.2.a but actual landing was 13 files �
 - Total wall time from /rdd to merge: ~50 min
 
 ---
+
+## 2026-05-04 — M3.2.b: lifecycle manager (Spawn/Retire/Health/List over keepclient)
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/31>
+**Phases with incidents**: none
+
+### What worked
+
+M3.2.b demonstrated how a previously-decomposed sub-leaf flows smoothly: the planner's iter-3 decomposition pre-resolved the Gate 1 question, so Phase 1 was a quick `fits: true` verification rather than a full re-decomposition. Re-using the prior explore's findings (LocalKeepClient pattern, partial-failure shape) saved an explore dispatch.
+
+Phase 4 iter 1 caught two real doc bugs (broken README example: `keepclient.New` → `NewClient`; phantom error return) that would have shipped to main. The reviewer's specific call to "mentally type-check the example against keepclient/client.go" made the catch unmissable.
+
+Phase 4 iter 1 fixer addressed both important AND 3 of 5 nits in a single 3-file commit. Folding cheap nits saves a future cleanup PR; the bounded-loop only requires fixing important items, but the fixer's bundling judgment was operator-time-positive.
+
+Phase 6 zero-comment outcome on a 1106-LOC diff suggests CodeRabbit's noise floor is sensitive to code novelty: this PR was a thin wrapper around already-merged keepclient methods, so there was nothing surprising for the bot to flag.
+
+### What wasted effort
+
+Skip-explore was the right call (iter-3 explore covered the keepclient surface), but the orchestrator briefly considered re-running. Adding to `references/agent-briefs/explore.md` a note like "When the same code areas were explored in a recent prior /rdd iteration AND the TASK references the same surfaces, prefer reusing the prior explore output to dispatching a new one" would make the call deterministic.
+
+### Suggested skill changes
+
+- Add to `references/agent-briefs/planner.md`: when a previously-decomposed sub-leaf comes around (i.e. planner decomposed M3.2 in iter N and now picks M3.2.b in iter N+M), planner verification can be a one-shot re-affirmation rather than a full decomposition pass. Document this for future autonomous runs to skip redundant decomposition analysis.
+- Add to `references/agent-briefs/explore.md` §Use cases: explicit "skip if a recent prior iter explored the same surface area" clause, with operator judgement on what counts as "recent".
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0 (autonomous run)
+- Total wall time from /rdd to merge: ~40 min
+
+---
