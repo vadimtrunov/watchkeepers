@@ -414,8 +414,9 @@ func makeListScans(t *testing.T, statuses []string) []func(dest ...any) error {
 			// Stagger created_at by row index so the DESC order is
 			// observable end-to-end (the fake does not actually sort —
 			// it just returns rows in the order the test stages them).
-			_ = i
-			*(dest[7].(*time.Time)) = time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+			// Row 0 is the newest (largest created_at); row N is oldest.
+			base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+			*(dest[7].(*time.Time)) = base.Add(-time.Duration(i) * time.Hour)
 			return nil
 		})
 	}
@@ -584,6 +585,125 @@ func TestWatchkeeper_RunnerErrorBubblesUp(t *testing.T) {
 				t.Errorf("raw runner error leaked: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestListWatchkeepers_OrderedByCreatedAtDESC — stages 3 rows whose
+// created_at values are staggered (row 0 newest, row 2 oldest) and asserts
+// the handler returns them in descending order. The fake does not sort; the
+// test relies on makeListScans producing the rows in the expected order so
+// that any regression where the handler re-orders or skips rows is caught.
+func TestListWatchkeepers_OrderedByCreatedAtDESC(t *testing.T) {
+	statuses := []string{"pending", "active", "retired"}
+	query := func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+		return server.NewFakeRows(makeListScans(t, statuses), nil), nil
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{Query: query})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodGet, "/v1/watchkeepers", tok, nil, "")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Items) != 3 {
+		t.Fatalf("items len = %d, want 3; body=%s", len(got.Items), rec.Body.String())
+	}
+	// Parse created_at strings back to time.Time for comparison.
+	parseCreatedAt := func(item map[string]any) time.Time {
+		t.Helper()
+		s, ok := item["created_at"].(string)
+		if !ok {
+			t.Fatalf("created_at not a string: %v", item["created_at"])
+		}
+		ts, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			t.Fatalf("parse created_at %q: %v", s, err)
+		}
+		return ts
+	}
+	t0 := parseCreatedAt(got.Items[0])
+	t1 := parseCreatedAt(got.Items[1])
+	t2 := parseCreatedAt(got.Items[2])
+	if !t0.After(t1) {
+		t.Errorf("items[0].created_at (%v) should be after items[1].created_at (%v)", t0, t1)
+	}
+	if !t1.After(t2) {
+		t.Errorf("items[1].created_at (%v) should be after items[2].created_at (%v)", t1, t2)
+	}
+}
+
+// TestUpdateWatchkeeperStatus_BadTargetStatus_400 — body with a status value
+// that is not a valid target ("weird" is not a recognised status; "pending" is
+// not a permitted transition target) must be rejected with 400 before the
+// runner is invoked.
+func TestUpdateWatchkeeperStatus_BadTargetStatus_400(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+	}{
+		{"unknown_status", "weird"},
+		{"pending_not_valid_target", "pending"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &server.FakeScopedRunner{}
+			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+			tok := mustMintToken(t, ti, "org")
+
+			rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+				map[string]any{"status": tc.status}, "")
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if runner.FnInvoked {
+				t.Error("runner was invoked; expected rejection before tx")
+			}
+			var env struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if env.Error == "" {
+				t.Errorf("error field empty; want non-empty error code")
+			}
+		})
+	}
+}
+
+// TestUpdateWatchkeeperStatus_InvalidPathID_400 — a path segment that is not a
+// valid UUID must be rejected with 400 before the runner is invoked.
+func TestUpdateWatchkeeperStatus_InvalidPathID_400(t *testing.T) {
+	runner := &server.FakeScopedRunner{}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/not-a-uuid/status", tok,
+		map[string]any{"status": "active"}, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked; expected rejection before tx")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error == "" {
+		t.Errorf("error field empty; want non-empty error code")
 	}
 }
 

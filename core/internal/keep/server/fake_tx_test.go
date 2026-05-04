@@ -50,7 +50,6 @@ func (r fakeRow) Scan(dest ...any) error {
 type fakeRows struct {
 	scans   []func(dest ...any) error
 	idx     int
-	scanErr error
 	rowsErr error
 	closed  bool
 }
@@ -64,9 +63,6 @@ func (r *fakeRows) Next() bool {
 }
 
 func (r *fakeRows) Scan(dest ...any) error {
-	if r.scanErr != nil {
-		return r.scanErr
-	}
 	if r.idx == 0 || r.idx > len(r.scans) {
 		return errors.New("fakeRows: Scan called out of order")
 	}
