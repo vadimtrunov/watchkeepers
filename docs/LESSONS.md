@@ -1076,3 +1076,18 @@ actually starts → Stop() → assert clean shutdown`. If Start() after the fail
 - Docs: `docs/ROADMAP-phase1.md` §M2b (verification audit). Pattern applies to all future milestone toggle PRs.
 
 ---
+
+## 2026-05-04 — Autonomous loop: blocked bullets don't kill the loop, just the iteration
+
+**PR**: [#40](https://github.com/vadimtrunov/watchkeepers/pull/40)
+**Merged**: 2026-05-04
+
+### Pattern
+
+**When an autonomous ROADMAP loop hits a fundamental architectural block, the right discipline is HALT-WITH-RATIONALE — the executor stops, documents the gap, leaves the bullet `[ ]`, and reports back. The NEXT iteration's brief explicitly skips the blocked bullet and finds the next viable adjacent item.**: iteration 5 hit a real architectural block (sqlite-vec v0.1.6 brute-force at 10k×1536 makes bullet 216 unachievable on the current substrate) and halted cleanly. Iteration 6's brief explicitly skipped bullet 216 and picked the next viable adjacent item (bullet 249 capability TTL expiry, Outcome A toggle in 1 line). The loop survives architectural decisions that the operator hasn't yet made — it does NOT need to make those decisions on the operator's behalf. A halted iteration with a clear blocked-bullet rationale is not a failure; it is the correct output when the substrate can't satisfy the AC. The loop's health is preserved precisely because the executor did not overreach.
+
+### References
+
+- Docs: `docs/ROADMAP-phase1.md` §M2b bullet 216, §M3 bullet 249. Pattern applies to all future autonomous ROADMAP loop iterations.
+
+---
