@@ -1,0 +1,7 @@
+# Test fixture: keep.base_url is missing (commented out) — Load must
+# surface ErrMissingRequired wrapping the field path "Keep.BaseURL".
+keep:
+  # base_url intentionally absent
+  token_secret: ""
+notebook:
+  data_dir: "/var/lib/watchkeeper/notebook"
