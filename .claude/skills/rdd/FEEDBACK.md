@@ -1020,3 +1020,35 @@ The redaction-leak (raw `err` logging) was MISSED by Phase 4 iter 1's code-revie
 - Total wall time from /rdd to merge: ~50 min
 
 ---
+
+## 2026-05-04 — M3.5: Capability broker (scoped-token issue/validate/TTL primitive)
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/35>
+**Phases with incidents**: none
+
+### What worked
+
+**Cleanest end-to-end iteration of the session**: Phase 4 iter 1 converged 0/0/2; Phase 6 iter 0 converged 9/9 + 0 threads. Total ~30 min wall time for a security-sensitive 1426-LOC package. Pattern: when ACs are explicit about security invariants (redaction, boundary semantics, error-message rules), the executor delivers fewer review iterations.
+
+**Planner's reading-(a)-vs-(b) framing**: the planner verdict explicitly named the option-(b) "bundle wrappers" trap and recommended option (a) with documented deferred integrations. The TASK Scope captured this as "explicitly out of scope" rather than implicit. Phase 6 reviewer didn't flag scope creep because the boundary was nailed in Gate 2.
+
+**Test pattern reuse**: the `recordingLogger` + `fmt.Sprintf("%+v", entry)` defense-in-depth pattern from M3.4.a (secrets) → M3.4.b (config) → M3.5 (capability) is now the canonical redaction-test idiom across three security-sensitive packages. The pattern's effectiveness compounded: each subsequent leaf benefited from prior tests' precedent.
+
+**Scaffold-first discipline scaling**: 5 of 5 M3 leaves shipped so far have followed the same shape (primitive + tests; integrations deferred). The pattern is now the default expectation. M3.6 (Keeper's Log writer) and M3.7 (Outbox consumer) will follow.
+
+### What wasted effort
+
+The git-master pr-mode agent's verification log showed STALE local main reference (`3baf9c9` instead of `fe92aa9`). The PR was created correctly (target was actual remote main), so no functional impact, but the agent's "verification" output was misleading. The agent likely ran `git log` against unfetched local branch. Worth checking agent brief: should `git-master pr` always do `git fetch origin main` before verification log so comparison is against actual remote state?
+
+### Suggested skill changes
+
+- Add to `references/agent-briefs/git-master.md` §pr mode actions: insert before verification log step: "Run `git fetch origin main --quiet` so the verification log reflects the actual remote main, not a stale local view." This is cosmetic (PR creation already targets origin/main correctly), but the misleading output confuses operators.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0 (autonomous run)
+- Total wall time from /rdd to merge: ~30 min
+
+---

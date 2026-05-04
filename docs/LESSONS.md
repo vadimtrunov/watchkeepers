@@ -951,3 +951,33 @@ Implemented the config package providing layered configuration resolution: defau
 - Docs: `docs/ROADMAP-phase1.md` §M3.4.b. Completes M3.4 decomposition (M3.4.a + M3.4.b).
 
 ---
+
+## 2026-05-04 — M3.5: Capability broker (scoped-token issue/validate/TTL primitive)
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/35>
+**Merged**: 2026-05-04 (squash sha `eff4248`)
+
+### Context
+
+Implemented the capability broker package providing a scoped-token primitive: issue random opaque tokens, validate against scope/TTL, and optionally revoke. Security-sensitive; intentionally ships without integration into keepclient/notebook/archivestore — those wrappers defer to M5 consumer harness where call sites exist to reason about wiring.
+
+### Pattern
+
+**Capability-broker scaffold-first pattern**: when introducing a security primitive that will eventually integrate into multiple consumer packages, ship the primitive ALONE first. Document deferred integrations as TODO in README. The primitive can be reviewed for security correctness without dragging in 3 breaking-change wrappers; integrations land with concrete consumers where the wiring has a real call site. Mirrors M3.1 eventbus, M3.2 lifecycle, M3.4 secrets.
+
+**Token-generation with `crypto/rand` + `base64.RawURLEncoding`**: 256 bits via `crypto/rand.Read(b[:32])` produces 43 URL-safe chars (no padding). Pattern: stdlib only, no `math/rand`, no fallback. The `crypto/rand` error must propagate — test asserts the wrap.
+
+**Token-redaction discipline**: full token NEVER appears in logs or errors. Logger sees only first-8-char prefix via `tokenPrefix(token)` helper. Sentinel errors are bare (`ErrInvalidToken`, `ErrTokenExpired`, `ErrScopeMismatch` — no token-formatting). Extends M3.4.a/M3.4.b PII rules to security tokens. Test pattern: `recordingLogger` + `fmt.Sprintf("%+v", entry)` defense-in-depth grep plus positive control (8-char prefix MUST appear).
+
+**Boundary semantics for expiry: `!now.Before(expiry)` = `now >= expiry`**: when implementing TTL checks, document inclusivity explicitly. Test `TestBroker_ValidateAtExactExpiryRejects` asserts `now() == expiry` is expired. The Go idiom `!now.Before(expiry)` is preferred over `now.After(expiry) || now.Equal(expiry)`.
+
+**Lazy-cleanup-on-Validate + optional reaper goroutine**: `Validate`'s expiry path acquires write lock, re-checks entry still expired, deletes, returns `ErrTokenExpired`. Optional reaper runs full-table sweep at `WithReaperInterval(d)` if d > 0, using `b.clock()` so fakeClock drives both lazy and reaper paths through same logical-time. Pattern: any TTL-bounded resource gets both paths; reaper is opt-in for idle-memory pressure.
+
+**Optional-required-dep divergence**: most M3 constructors panic on nil required dep. The capability broker has NO required deps (just optional clock/logger/reaper) so `New()` with no args is fully functional. Document this divergence.
+
+### References
+
+- Files: `core/pkg/broker/{broker,options,errors,README}.go` + `_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M3.5. Completes M3 (5 of 7 leaves).
+
+---
