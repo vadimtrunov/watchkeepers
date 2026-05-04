@@ -205,7 +205,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [x] **M2b.4** Archive on retire: harness invokes `Archive` during graceful shutdown; resulting URI emitted to Keeper's Log via `keepclient.log_append` (`notebook_archived` event).
 - [x] **M2b.5** Periodic backup: cron-scheduled snapshot of live Notebook files to `ArchiveStore` (`notebook_backed_up` event). Cadence configurable.
 - [x] **M2b.6** Import: `notebook.Import(agent_id, archive_uri)` restores a predecessor's archive into a fresh agent file. Operator-driven in Phase 1 via CLI (see M10). Auto-inheritance policy → ⏸ Phase 2.
-- [ ] **M2b.7** Every mutating operation writes a correlated event to Keeper's Log via the Keep client — Notebook has no audit surface of its own; Keep is the single audit authority.
+- [x] **M2b.7** Every mutating operation writes a correlated event to Keeper's Log via the Keep client — Notebook has no audit surface of its own; Keep is the single audit authority.
 - [ ] **M2b.8** `promote_to_keep(entry_id)` helper that packages a Notebook entry for Watchmaster approval → Keep write (Watchmaster-side implementation in M6).
 
 **Artifacts**: Go `notebook/` library, `archivestore/` package with two implementations, contract tests, benchmark suite.
