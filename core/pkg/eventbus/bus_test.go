@@ -3,6 +3,7 @@ package eventbus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"strings"
 	"sync"
@@ -697,6 +698,140 @@ func TestBus_ConcurrentPublishersPreserveOrderPerTopic(t *testing.T) {
 		if last[p] != perPublisher-1 {
 			t.Fatalf("publisher %d: last seq %d, want %d", p, last[p], perPublisher-1)
 		}
+	}
+}
+
+// TestBus_RaceCloseVsSubscribeNewTopic — AC5 regression: hammer Subscribe
+// against Close on FRESH per-iteration topics. Prior to the close-race fix
+// in `getOrCreateTopic`, a Subscribe whose `b.closed.Load()` fast-path
+// observed `false` could still race the rest of Close to install a new
+// topicState + spawn its worker AFTER Close had snapshotted the channel
+// set; the new worker would then `range` a never-closed channel forever.
+// This test asserts the post-Close goroutine count returns to baseline,
+// which only holds when no leaked workers remain. Run under `-race
+// -count=10` to flush out the race window.
+//
+// Errors are collected through a buffered channel rather than `t.Errorf`
+// from racer goroutines: the race detector instruments testing-framework
+// internals, and a goroutine still inside `t.Errorf` when tRunner's
+// cleanup runs would itself flag a race that has nothing to do with the
+// bus. Channel-based collection plus a single main-goroutine drain keeps
+// the assertion clean.
+func TestBus_RaceCloseVsSubscribeNewTopic(t *testing.T) {
+	// Not t.Parallel: NumGoroutine snapshots are sensitive to other tests.
+	baseline := goroutineBaseline()
+
+	b := New()
+
+	const racers = 50
+	const perRacer = 5
+	errs := make(chan error, racers*perRacer)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			topic := fmt.Sprintf("topic-%d", i)
+			// Tight loop maximising the chance that some iteration
+			// crosses the Close boundary.
+			for j := 0; j < perRacer; j++ {
+				_, err := b.Subscribe(topic, func(_ context.Context, _ any) {})
+				// Either nil (subscribe won the race, topic exists) or
+				// ErrClosed (Close won the race) is acceptable. Anything
+				// else is a contract break.
+				if err != nil && !errors.Is(err, ErrClosed) {
+					errs <- fmt.Errorf("Subscribe(%s): unexpected err %w", topic, err)
+					return
+				}
+			}
+		}(i)
+	}
+
+	close(start)
+	// Let some racers get into Subscribe, then race Close against them.
+	time.Sleep(1 * time.Millisecond)
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	// Post-Close, all worker goroutines (whether installed before or
+	// during the race window) must have exited. Slack absorbs goroutines
+	// transiently spawned by the testing framework / race runtime.
+	const slack = 4
+	ok := pollUntil(func() bool {
+		return goroutineBaseline() <= baseline+slack
+	}, 10*time.Millisecond, 3*time.Second)
+	if !ok {
+		t.Fatalf("goroutine count %d still exceeds baseline %d (+%d slack) after Close — leaked worker?",
+			runtime.NumGoroutine(), baseline, slack)
+	}
+}
+
+// TestBus_RaceCloseVsPublishNewTopic — AC5 regression: hammer Publish
+// against Close on FRESH per-iteration topics. Same shape as the Subscribe
+// test above; protects the first-touch path in Publish where
+// `getOrCreateTopic` can install a new topicState + worker on an unseen
+// topic. Without the under-lock close re-check, a worker could be spawned
+// after Close had finished snapshotting + closing channels, leaking a
+// goroutine on a never-closed channel. Run under `-race -count=10`.
+//
+// See [TestBus_RaceCloseVsSubscribeNewTopic] for why errors are collected
+// via channel rather than `t.Errorf` directly from racer goroutines.
+func TestBus_RaceCloseVsPublishNewTopic(t *testing.T) {
+	// Not t.Parallel: NumGoroutine snapshots are sensitive to other tests.
+	baseline := goroutineBaseline()
+
+	b := New()
+
+	const racers = 50
+	const perRacer = 5
+	errs := make(chan error, racers*perRacer)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			topic := fmt.Sprintf("topic-%d", i)
+			for j := 0; j < perRacer; j++ {
+				err := b.Publish(context.Background(), topic, j)
+				// nil (enqueued before Close) or ErrClosed (Close won) are
+				// the only acceptable outcomes. A wrapped ctx error is not
+				// expected here because we use a never-cancelling ctx.
+				if err != nil && !errors.Is(err, ErrClosed) {
+					errs <- fmt.Errorf("Publish(%s): unexpected err %w", topic, err)
+					return
+				}
+			}
+		}(i)
+	}
+
+	close(start)
+	time.Sleep(1 * time.Millisecond)
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	const slack = 4
+	ok := pollUntil(func() bool {
+		return goroutineBaseline() <= baseline+slack
+	}, 10*time.Millisecond, 3*time.Second)
+	if !ok {
+		t.Fatalf("goroutine count %d still exceeds baseline %d (+%d slack) after Close — leaked worker?",
+			runtime.NumGoroutine(), baseline, slack)
 	}
 }
 

@@ -123,20 +123,34 @@ func New(opts ...Option) *Bus {
 }
 
 // getOrCreateTopic returns the [topicState] for `topic`, lazily spawning
-// the worker goroutine on first use. Callers MUST hold a read-or-better
-// guarantee that the bus is not closed; the function does not re-check
-// `b.closed` because the surrounding Publish/Subscribe path already does
-// so under `b.mu`.
+// the worker goroutine on first use. Returns nil if the bus has been
+// closed; callers map a nil return to [ErrClosed].
 //
-// The implementation takes `b.mu` briefly to (a) double-check the topic
-// map under exclusive lock, (b) install a fresh [topicState] on miss, and
-// (c) spawn the worker goroutine before releasing the lock. Workers
-// register themselves in `b.wg` so [Bus.Close] can wait for them to drain.
+// The implementation takes `b.mu` briefly to (a) re-check `b.closed` under
+// the same lock Close acquires when snapshotting per-topic channels —
+// closing this TOCTOU window is what prevents a leaked worker on a
+// never-closed channel — (b) double-check the topic map, (c) install a
+// fresh [topicState] on miss, and (d) spawn the worker goroutine before
+// releasing the lock. Workers register themselves in `b.wg` so [Bus.Close]
+// can wait for them to drain.
 func (b *Bus) getOrCreateTopic(topic string) *topicState {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if ts, ok := b.topics[topic]; ok {
 		return ts
+	}
+	// Re-check under `b.mu` so we cannot install a new topicState (and
+	// spawn its worker) after Close has already snapshotted the topics
+	// map and proceeded to close per-topic channels. Close acquires the
+	// SAME `b.mu` for its snapshot, so either:
+	//   - Close has not yet snapshotted: re-check sees closed=false,
+	//     install proceeds, Close blocks on b.mu, sees the new entry in
+	//     its snapshot, closes its channel, worker exits cleanly.
+	//   - Close has finished its snapshot: closed=true was stored before
+	//     Close ever took b.mu, the re-check sees it, returns nil,
+	//     no install, no leak.
+	if b.closed.Load() {
+		return nil
 	}
 	ts := &topicState{
 		ch: make(chan envelope, b.cfg.bufferSize),
@@ -198,6 +212,14 @@ func (b *Bus) Subscribe(topic string, handler Handler) (func(), error) {
 	}
 
 	ts := b.getOrCreateTopic(topic)
+	// Close-race fence: getOrCreateTopic returns nil if Close ran between
+	// the fast-path closed-flag check above and the under-lock re-check
+	// inside the helper. Without this, a fresh topicState + worker would
+	// be spawned after Close had already snapshotted+closed the channel
+	// set, leaking the worker on a never-closed channel.
+	if ts == nil {
+		return noop, ErrClosed
+	}
 
 	id := b.nextSubID.Add(1)
 	ts.mu.Lock()
@@ -250,19 +272,39 @@ func (b *Bus) Publish(ctx context.Context, topic string, event any) error {
 	if topic == "" {
 		return ErrInvalidTopic
 	}
-	// Hold publishWG across the entire send so Close cannot close the
-	// per-topic channel from underneath us. The closed-flag check below
-	// must happen AFTER Add: otherwise a Close that ran between the
-	// `closed.Load()` and the `Add` could close the channel before we
-	// select on it, and the send below would panic.
-	b.publishWG.Add(1)
-	defer b.publishWG.Done()
-
+	// Fast-path closed check avoids touching b.mu in the hot path when the
+	// bus is already shut down.
 	if b.closed.Load() {
 		return ErrClosed
 	}
 
+	// Register this in-flight Publish under b.mu, atomic with a re-check of
+	// the closed flag. Close acquires the same b.mu before its
+	// publishWG.Wait, so a 0→1 transition of publishWG can never race with
+	// the first Wait — eliminating a sync.WaitGroup misuse the race detector
+	// flags as `race.Read(&wg.sema)` (Add) vs `race.Write(&wg.sema)` (Wait).
+	//
+	// Holding publishWG across the entire send below also prevents Close
+	// from closing the per-topic channel from underneath an in-flight send;
+	// Close.publishWG.Wait drains in-flight Publishes BEFORE close(ts.ch).
+	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
+		return ErrClosed
+	}
+	b.publishWG.Add(1)
+	b.mu.Unlock()
+	defer b.publishWG.Done()
+
 	ts := b.getOrCreateTopic(topic)
+	// Close-race fence: getOrCreateTopic returns nil if Close ran between
+	// the fast-path closed-flag check above and the under-lock re-check
+	// inside the helper. Without this, a first-touch Publish on an unseen
+	// topic could spawn a fresh worker on a never-closed channel after
+	// Close had already snapshotted the topic set, leaking the goroutine.
+	if ts == nil {
+		return ErrClosed
+	}
 
 	// Fast path: try a non-blocking send. The non-blocking send avoids
 	// burning the slow-path select for the common case where the queue
@@ -306,9 +348,22 @@ func (b *Bus) Publish(ctx context.Context, topic string, event any) error {
 // by construction.
 func (b *Bus) Close() error {
 	b.closeOnce.Do(func() {
-		// 1. Mark closed first so subsequent Publish/Subscribe short-circuit
-		//    before they can reach getOrCreateTopic.
+		// 1. Mark closed and snapshot the per-topic channel set under
+		//    b.mu. Holding b.mu here serialises against Publish's
+		//    register-under-mu step (and getOrCreateTopic), so a Publish
+		//    that observes closed=false while holding b.mu has already
+		//    incremented publishWG before Close's publishWG.Wait runs —
+		//    eliminating the WaitGroup-Add-races-Wait misuse that the
+		//    race detector flags on `wg.sema`. Conversely, any Publish
+		//    that takes b.mu after Close releases it sees closed=true
+		//    and bails before touching publishWG.
+		b.mu.Lock()
 		b.closed.Store(true)
+		channels := make([]chan envelope, 0, len(b.topics))
+		for _, ts := range b.topics {
+			channels = append(channels, ts.ch)
+		}
+		b.mu.Unlock()
 
 		// 2. Wake any publishers blocked on the backpressure select. They
 		//    return ErrClosed and decrement publishWG.
@@ -320,17 +375,9 @@ func (b *Bus) Close() error {
 		//    on send-to-closed-channel.
 		b.publishWG.Wait()
 
-		// 4. Snapshot the per-topic channels under the topic lock and
-		//    close each one. Worker goroutines exit their `range` loop
-		//    once their channel is closed and any remaining buffered
-		//    envelopes have been drained.
-		b.mu.Lock()
-		channels := make([]chan envelope, 0, len(b.topics))
-		for _, ts := range b.topics {
-			channels = append(channels, ts.ch)
-		}
-		b.mu.Unlock()
-
+		// 4. Close each per-topic channel. Worker goroutines exit their
+		//    `range` loop once their channel is closed and any remaining
+		//    buffered envelopes have been drained.
 		for _, ch := range channels {
 			close(ch)
 		}
