@@ -229,7 +229,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Scope**
 
-- [ ] **M3.1** In-process event bus (pub/sub) with handler registration, ordered per-topic delivery, and backpressure.
+- [x] **M3.1** In-process event bus (pub/sub) with handler registration, ordered per-topic delivery, and backpressure.
 - [ ] **M3.2** Lifecycle manager: `Spawn`, `Retire`, `Health`, `List` for Watchkeeper processes; state persisted in `watchkeeper` table **via `keepclient`, not direct DB access**.
 - [ ] **M3.3** Cron scheduler (robfig/cron) that emits events onto the bus.
 - [ ] **M3.4** Config loader (env + `config.yaml`); secrets pluggable interface (env-first for Phase 1, Vault-ready).
