@@ -1011,3 +1011,38 @@ Absence is unambiguous; empty-string is not.
 - Docs: `docs/ROADMAP-phase1.md` §M3 → M3.6.
 
 ---
+
+## 2026-05-04 — M3.7: Stop()/Start() state-machine bugs hide in early-return paths
+
+**PR**: <https://github.com/vadimtrunov/watchkeepers/pull/37>
+**Merged**: 2026-05-04 (squash sha `c695303`)
+
+### Context
+
+Implemented `core/pkg/outbox` consumer with at-least-once semantics and idempotency keys.
+The package exposes `Consumer.Start()`/`Stop()` backed by a state machine (`stateIdle`,
+`stateRunning`, `stateStopped`). A Stop-before-Start path hit a latent bug: `Stop()` wrote
+`state = stateStopped` unconditionally, then returned `ErrNotStarted` — permanently bricking
+subsequent `Start()` calls with `ErrAlreadyStopped`. The bug was invisible because the
+Stop-before-Start test only asserted the error return, not the post-call state.
+
+### Pattern
+
+**State-machine mutation order: lock → check sentinel → return without mutating → mutate-and-continue**:
+when an early-return error path coexists with state mutation, the guard MUST come before the
+mutation. Wrong order: mutate state, then return error for sentinel condition — caller's state
+is now poisoned. Correct order: check sentinel under lock, return the error WITHOUT touching
+state, only then proceed to mutate.
+
+**Pin state-machine invariants with transition tests, not just error-return tests**: a test that
+only asserts `Stop() == ErrNotStarted` misses the post-state invariant entirely. The correct test
+exercises the FULL transition chain: `Stop() → assert ErrNotStarted → Start() → assert run loop
+actually starts → Stop() → assert clean shutdown`. If Start() after the failed Stop returns
+`ErrAlreadyStopped`, the state machine is broken — and a return-value-only test will never catch it.
+
+### References
+
+- Files: `core/pkg/outbox/{consumer,errors,doc}.go` + `_test.go`, `core/pkg/outbox/README.md`
+- Docs: `docs/ROADMAP-phase1.md` §M3 → M3.7.
+
+---

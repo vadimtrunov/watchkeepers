@@ -239,7 +239,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M3.4.b** Config loader: `core/pkg/config/` loading env vars + `config.yaml` via `gopkg.in/yaml.v3` into a strongly-typed Config struct with per-service sub-structs; validates required fields at Load time; resolves `*_secret` fields through the M3.4.a SecretSource interface (depends on M3.4.a).
 - [x] **M3.5** Capability broker: issues scoped, short-lived tokens to tools and to `keepclient` / `notebook` / `archivestore` calls; validates on invocation; enforces TTL.
 - [x] **M3.6** Keeper's Log writer (thin wrapper on `keepclient.log_append`): structured event schema, correlation IDs, trace context propagation.
-- [ ] **M3.7** Outbox consumer: reads `outbox` from Keep via `keepclient.subscribe`, publishes to event bus with at-least-once semantics and idempotency keys.
+- [x] **M3.7** Outbox consumer: reads `outbox` from Keep via `keepclient.subscribe`, publishes to event bus with at-least-once semantics and idempotency keys.
 
 **Artifacts**: Go packages `eventbus`, `lifecycle`, `cron`, `capability`, `keeperslog`, `outbox`.
 
@@ -247,7 +247,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 - [ ] Integration test: spawn a mock Watchkeeper, fire a cron event, Watchkeeper receives it, Keeper's Log contains both the cron-fired and the handler-ran events with matching correlation IDs.
 - [ ] Capability token expires exactly at TTL; use after expiry rejected.
-- [ ] Outbox consumer is at-least-once and idempotent under forced redeliveries.
+- [x] Outbox consumer is at-least-once and idempotent under forced redeliveries.
 
 **Dependencies**: M2.
 **Magnitude**: 5–8 days.
