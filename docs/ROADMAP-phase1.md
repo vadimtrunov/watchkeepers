@@ -260,7 +260,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Scope**
 
-- [ ] **M4.1** `MessengerAdapter` Go interface: `SendMessage`, `Subscribe`, `CreateApp`, `InstallApp`, `SetBotProfile`, `LookupUser`.
+- [x] **M4.1** `MessengerAdapter` Go interface: `SendMessage`, `Subscribe`, `CreateApp`, `InstallApp`, `SetBotProfile`, `LookupUser`.
 - [ ] **M4.2** Slack implementation:
   - Slack Manifest API client (parent app holds `app_configuration` scope).
   - OAuth install flow (admin-preapproval path for dev workspace).

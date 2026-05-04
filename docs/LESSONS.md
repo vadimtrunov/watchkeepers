@@ -1091,3 +1091,29 @@ actually starts → Stop() → assert clean shutdown`. If Start() after the fail
 - Docs: `docs/ROADMAP-phase1.md` §M2b bullet 216, §M3 bullet 249. Pattern applies to all future autonomous ROADMAP loop iterations.
 
 ---
+
+## 2026-05-04 — M4.1: portable adapter interfaces avoid platform leaks via Metadata maps
+
+**PR**: [#41](https://github.com/vadimtrunov/watchkeepers/pull/41)
+**Merged**: 2026-05-04 (squash sha `eeb4049`)
+
+### Pattern
+
+When defining a Go interface that abstracts over multiple platforms (messengers,
+databases, secret stores, etc.), ALL platform-specific fields belong in an opaque
+`Metadata map[string]string` or `map[string]any`, not as named struct fields.
+M4.1's `MessengerAdapter` keeps the cross-platform spine (`Message`,
+`IncomingMessage`, `BotProfile`, `UserQuery`, `User`) plain — every Slack-specific
+concept (`thread_ts`, `channel_type`, `enterprise_id`) lives in `Metadata`.
+Reviewers verify zero platform-specific identifiers leak into source via `grep`
+against the suspected platform's API vocabulary. The M4.2 (Slack) author then
+populates `Metadata` at integration boundaries; future adapters (Discord, Teams)
+populate the same `Metadata` key conventions without interface churn. Apply when
+defining the next adapter interface (`RuntimeAdapter`, `LLMProvider`).
+
+### References
+
+- Files: `core/pkg/messenger/messenger.go`, `core/pkg/messenger/doc.go`, `core/pkg/messenger/README.md`
+- Docs: `docs/ROADMAP-phase1.md` §M4 → M4.1.
+
+---
