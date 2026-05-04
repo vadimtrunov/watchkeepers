@@ -36,7 +36,14 @@ type fakeSecretSource struct {
 // Compile-time assertion: *fakeSecretSource satisfies SecretSource.
 var _ secrets.SecretSource = (*fakeSecretSource)(nil)
 
-func (f *fakeSecretSource) Get(_ context.Context, key string) (string, error) {
+func (f *fakeSecretSource) Get(ctx context.Context, key string) (string, error) {
+	// Honour context cancellation / deadline before doing any work, as the
+	// SecretSource contract requires. This also enables
+	// TestLoad_CancelledCtx_ReturnsCtxErr to exercise Load's cancellation
+	// path without coupling that test to a real EnvSource.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, fakeSecretCall{Key: key})
@@ -401,6 +408,30 @@ func TestLoad_LoggerReceivesFieldPathOnSecretFailure(t *testing.T) {
 		if !strings.Contains(allText, "Keep.TokenSecret") {
 			t.Errorf("logger output does not contain field path %q; got:\n%s", "Keep.TokenSecret", allText)
 		}
+
+		// Verify redaction: the log entry must contain "err_type" (the type
+		// string) but must NOT contain the raw error serialisation. Using
+		// secrets.ErrSecretNotFound as the injected error: its .Error() value
+		// is "secret not found". If the raw err were logged, that string would
+		// appear; with err_type logging only the type name appears.
+		if !strings.Contains(allText, "err_type") {
+			t.Errorf("logger output does not contain %q key; raw err may have been logged; got:\n%s", "err_type", allText)
+		}
+		// The raw error message from secrets.ErrSecretNotFound must not appear
+		// via the err object path (it could appear via field value — that is
+		// acceptable — but must not appear as an err kv value).
+		rawErrMsg := secrets.ErrSecretNotFound.Error()
+		// Check no kv value entry serialises to the raw error message.
+		for _, entry := range entries {
+			for i := 0; i+1 < len(entry.kv); i += 2 {
+				if k, ok := entry.kv[i].(string); ok && k == "err" {
+					t.Errorf("logger kv contains raw %q key; want %q only; got kv=%+v", "err", "err_type", entry.kv)
+				}
+				if v, ok := entry.kv[i+1].(string); ok && strings.Contains(v, rawErrMsg) {
+					t.Errorf("logger kv value at key %v contains raw error message %q; redaction violated; kv=%+v", entry.kv[i], rawErrMsg, entry.kv)
+				}
+			}
+		}
 	})
 
 	// Sub-test 2: successful resolution path — the resolved secret value
@@ -481,6 +512,25 @@ func TestLoad_SecretDetectionByFieldNameSuffix(t *testing.T) {
 	})
 }
 
+// TestLoad_MultiDocumentYAML_ErrParseYAML — a config.yaml with two YAML
+// documents (separated by ---) must return ErrParseYAML with a message
+// containing "extra yaml document". The second document would otherwise
+// be silently skipped by yaml.v3's Decoder, hiding misconfiguration.
+func TestLoad_MultiDocumentYAML_ErrParseYAML(t *testing.T) {
+	clearWatchkeeperEnv(t)
+
+	_, err := Load(
+		context.Background(),
+		WithFile(testdataPath(t, "multi_document.yaml")),
+	)
+	if !errors.Is(err, ErrParseYAML) {
+		t.Fatalf("Load err = %v, want errors.Is ErrParseYAML", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "extra yaml document") {
+		t.Errorf("Load err = %q, want message to contain %q", msg, "extra yaml document")
+	}
+}
+
 // TestLoad_EmptyEnvVarDoesNotOverride — WATCHKEEPER_KEEP_BASE_URL=""
 // must NOT clear the YAML value.
 func TestLoad_EmptyEnvVarDoesNotOverride(t *testing.T) {
@@ -534,10 +584,11 @@ func TestLoad_CancelledCtx_ReturnsCtxErr(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel
 
-	// Use the real EnvSource so the ctx pre-check actually fires (the
-	// fakeSecretSource above does not consult ctx; the real one does).
-	t.Setenv("DB_PASSWORD", "should-not-be-read")
-	src := secrets.NewEnvSource()
+	// Use fakeSecretSource (which now honours ctx.Err()) so the test is
+	// decoupled from the real EnvSource implementation.
+	src := &fakeSecretSource{
+		values: map[string]string{"DB_PASSWORD": "should-not-be-read"},
+	}
 
 	_, err := Load(
 		ctx,

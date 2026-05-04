@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -273,6 +274,19 @@ func decodeYAMLFile(path string, cfg *Config) error {
 		}
 		return fmt.Errorf("%w: %w", ErrParseYAML, err)
 	}
+
+	// Guard against multi-document YAML streams. yaml.v3's Decoder
+	// silently ignores documents beyond the first; a second successful
+	// Decode call means the operator's file has extra documents that
+	// would be silently skipped — surface that as ErrParseYAML so the
+	// misconfiguration is caught immediately.
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("%w: extra yaml document", ErrParseYAML)
+		}
+		return fmt.Errorf("%w: %w", ErrParseYAML, err)
+	}
 	return nil
 }
 
@@ -415,8 +429,10 @@ func joinPath(prefix, name string) string {
 
 // logSecretError forwards a secret-resolution error to the optional
 // [Logger]. Nil-logger safe. Logs only the field path and the error
-// type — never the secret-reference value, never the resolved value
-// (the resolved value does not exist on the error path anyway).
+// TYPE (via fmt.Sprintf("%T", err)) — never the error value, never
+// the secret-reference value, never the resolved value. Using only
+// the type name means no Logger implementation can accidentally leak
+// sensitive context that an upstream error may carry in its message.
 func logSecretError(ctx context.Context, logger Logger, fieldPath string, err error) {
 	if logger == nil {
 		return
@@ -424,7 +440,7 @@ func logSecretError(ctx context.Context, logger Logger, fieldPath string, err er
 	logger.Log(
 		ctx, "config: secret resolution failed",
 		"field", fieldPath,
-		"err", err,
+		"err_type", fmt.Sprintf("%T", err),
 	)
 }
 

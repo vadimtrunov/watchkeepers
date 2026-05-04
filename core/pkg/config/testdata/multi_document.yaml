@@ -1,0 +1,8 @@
+keep:
+  base_url: "http://multi-doc.example.com"
+  token_secret: "DB_PASSWORD"
+notebook:
+  data_dir: "/var/lib/watchkeeper/notebook"
+---
+keep:
+  base_url: "http://second-doc.example.com"
