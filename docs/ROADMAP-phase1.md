@@ -177,10 +177,10 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Verification**
 
-- [ ] Client `log_append` → server persists → client `log_tail` returns same event.
-- [ ] `UPDATE`/`DELETE` on `keepers_log` rejected by trigger.
-- [ ] RLS: client authenticated as agent A cannot `search` rows scoped to agent B.
-- [ ] Contract tests pass against a fresh Keep instance.
+- [x] Client `log_append` → server persists → client `log_tail` returns same event.
+- [x] `UPDATE`/`DELETE` on `keepers_log` rejected by trigger.
+- [x] RLS: client authenticated as agent A cannot `search` rows scoped to agent B.
+- [x] Contract tests pass against a fresh Keep instance.
 
 **Dependencies**: M1.
 **Magnitude**: 4–6 days.
