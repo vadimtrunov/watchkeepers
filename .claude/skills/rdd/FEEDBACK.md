@@ -772,3 +772,30 @@ The TS-vs-Go harness ambiguity is now compounding for the THIRD time (M2b.4, M2b
 - Total wall time from /rdd to merge: ~30 min
 
 ---
+
+## 2026-05-04 — M2b.7: Notebook mutating ops emit correlated audit events
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/27
+**Phases with incidents**: 6 (transient network outage during CI polling)
+
+### What worked
+
+Reviewer iter 1 converged immediately with 0/0/0. The TASK brief named all four reviewer concerns (pre-commit-skip, commit-precedence, payload-no-PII, time-format-consistency) and the executor implemented each correctly the first time. Backward-compat AC framing forced the executor to verify legacy tests pass at every step — no surprises at review time. Truncation guard from prior FEEDBACK entries still holding — executor delivered full structured report before exit.
+
+### What wasted effort
+
+Network outage during Phase 6 polling caused ~5 minutes of alternating `POLL:no-checks-yet` and real-status events. The orchestrator correctly identified the pattern as transient (gh CLI timeouts to api.github.com), halted cleanly with a stop-the-world message, and resumed when the operator confirmed. Net cost: a couple of minutes of operator attention and orphan poll events — not a process bug, but worth a SKILL note that intermittent gh API failures are expected and the orchestrator should not panic.
+
+### Suggested skill changes
+
+- `references/bounded-loop.md` §Polling — add a note: "If `gh pr checks` returns alternating `POLL:no-checks-yet` and real-status events for >2 minutes, treat as transient network — wait, do NOT escalate. The orchestrator may halt cleanly and ask the operator if the disruption persists, but should NOT classify a green-then-quiet PR as failed."
+- The "audit emit after commit, never before" pattern is now confirmed across M2b.4/M2b.5/M2b.6/M2b.7 — every orchestrator helper that crosses a side-effect-then-audit boundary uses it. Worth promoting to a top-level LESSON or `references/audit-emit.md` so future ROADMAP items in M3+ don't re-discover it.
+
+### Metrics
+
+- Review iterations: 1 (converged immediately)
+- PR-fix iterations: 0 (CI green on first push)
+- Operator interventions outside of gates: 1 (network outage handshake)
+- Total wall time from /rdd to merge: ~50 min
+
+---

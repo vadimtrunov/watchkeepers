@@ -733,3 +733,27 @@ Implemented `notebook.ImportFromArchive(ctx, db, agentID, fetcher)` as a library
 - Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.6. **Future**: `wk notebook import <wk> <archive>` CLI lands in M10.3 on top of this helper; auto-inheritance policy is Phase 2.
 
 ---
+
+## 2026-05-04 — M2b.7: Notebook mutating ops emit correlated audit events
+
+**PR**: [#27](https://github.com/vadimtrunov/watchkeepers/pull/27)
+**Merged**: 2026-05-04 (squash commit `fd3caeb`)
+
+### Context
+
+Wired `notebook.Remember` and `notebook.Forget` to emit audit events via the Keep audit log (`keepers_log` table) when the mutation succeeds. Phase 1 planner verdict: "fits" (~5 files, ≤ 1 day); executor (opus) delivered 1 commit (+545 LOC, 8 new tests passing under `-race`; 76 total tests in package — 68 legacy preserved). Phase 4 iter 1 converged 0/0/0. Phase 6 CI green 9/9, 0 review threads. Phase 7 PR squash-merged (`fd3caeb`); ROADMAP M2b.7 marked `[x]` (`c76052b`).
+
+### Pattern
+
+**Functional options preserve backward compatibility for cross-cutting concerns**: `Open(ctx, agentID, opts ...DBOption)` adds variadic options WITHOUT breaking existing callers — `Open(ctx, agentID)` compiles and runs unchanged. `WithLogger(Logger)` attaches a logger that all mutating ops automatically use. Pattern: when adding a cross-cutting concern (audit, metrics, tracing) to an existing API, use functional options to ship the new feature WITHOUT breaking callsites. Nil-default behavior preserves the prior contract; opt-in for the new contract.
+
+**Audit emit AFTER commit, never before — partial-failure shape (id, err)**: For `Remember`/`Forget`, the audit emit fires only after `tx.Commit()` returns nil — data is durable BEFORE the audit attempt. If `LogAppend` fails, return `(id, fmt.Errorf("audit emit: %w", err))` (Forget returns just `error` since there's no id). This mirrors M2b.4's `ArchiveOnRetire` contract and gives callers two pieces of information: the data IS in the DB (so don't retry the mutation) and the audit isn't (so retry just the audit emit). Pre-commit failures (validation, tx error, `ErrNotFound`) skip the audit block entirely — auditing rolled-back operations would be incorrect.
+
+**Audit payload excludes PII and large fields**: `notebook_entry_remembered` carries only `agent_id`, `entry_id`, `category`, `created_at`. NOT `content`, NOT `embedding`, NOT `subject`. Audit log answers "what happened" not "what was stored" — the actual data is recoverable from the DB. Including 1536-float embeddings (~6 KiB each) or arbitrary user content would bloat the keepers_log table and create a PII surface. Tests carry explicit banned-field assertions to prevent regressions ("payload does NOT contain `content`").
+
+### References
+
+- Files: `core/pkg/notebook/{db,remember,forget}.go`, `core/pkg/notebook/mutation_audit_test.go` (new), `core/pkg/notebook/README.md`
+- Docs: `docs/ROADMAP-phase1.md` §M2b → M2b.7. Keep is the single audit authority; Notebook has no audit surface of its own.
+
+---
