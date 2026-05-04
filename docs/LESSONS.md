@@ -815,3 +815,29 @@ Embedding `sync.WaitGroup` directly in the bus struct and calling `Add` across s
 - Docs: `docs/ROADMAP-phase1.md` §M3 → M3.1. Mirrors foundational pattern from `core/pkg/{notebook,archivestore,keepclient}`.
 
 ---
+
+## 2026-05-04 — M3.2.a: keepclient watchkeeper resource CRUD (server + client)
+
+**PR**: [#30](https://github.com/vadimtrunov/watchkeepers/pull/30)
+**Merged**: 2026-05-04 (squash sha `019b9fe`)
+
+### Context
+
+Implemented the watchkeeper resource server-side handlers and client methods to support the Keep service's resource-management use case. First decomposed milestone from M3.2 — the keepclient extension introduces a new resource-type API surface (server handlers + client methods) distinct from the lifecycle manager that will consume it (M3.2.b).
+
+### Pattern
+
+**Resource-CRUD pair pattern in keepclient**: pair `read_<resource>.go` + `write_<resource>.go` files on the client side; mirror with handler families in `handlers_read.go` / `handlers_write.go` on the server side. Keep both under ~700 LOC before splitting per-resource. Handler tests live in a single `handlers_<resource>_test.go` file when the resource has its own integration concerns (status transitions, RLS placeholders) that benefit from co-location.
+
+**Multi-sentinel error matching via `Unwrap() []error`**: `ServerError.Unwrap()` returns `[]error` so a single HTTP 400 with code `invalid_status_transition` matches BOTH `errors.Is(err, ErrInvalidRequest)` AND `errors.Is(err, ErrInvalidStatusTransition)`. Go 1.20+ `errors.Is` walks the slice automatically. Godoc the signature change: "An empty/nil slice means the error has no sentinel chain."
+
+**`SELECT ... FOR UPDATE` + Go-side state-machine validation in same tx**: status-transition handlers should `SELECT current_status FROM table WHERE id = $1 FOR UPDATE` first, then the Go-side switch validates `(current → target)` is allowed, then UPDATE in the SAME `pgx.Tx`. The row-level lock prevents concurrent transitions. Server-side timestamps (`spawned_at = now()` / `retired_at = now()`) stamp in the UPDATE statement, not a second round-trip.
+
+**`fakeTx` extension pattern for server-handler tests**: extend the existing fake with optional injection points (`QueryRow func(...) Row`, `Query func(...) (Rows, error)`, `Exec func(...) Tag`) while preserving the simple `id`-based constructor as a fast path. Add `NewFakeRow*` / `NewFakeRows` helpers in `export_test.go` for typed seam construction.
+
+### References
+
+- Files: `core/internal/keep/server/handlers_read.go`, `handlers_write.go`, `handlers_watchkeeper_test.go`; `core/pkg/keepclient/read_watchkeeper.go`, `write_watchkeeper.go`
+- Docs: `docs/ROADMAP-phase1.md` §M3.2.a. Stable API surface consumed by M3.2.b lifecycle package.
+
+---

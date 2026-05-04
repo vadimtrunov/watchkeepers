@@ -853,3 +853,36 @@ Phase 4 fixer timed out (Stream idle timeout) mid-investigation — required orc
 - Total wall time from /rdd to merge: ~1:30
 
 ---
+
+## 2026-05-04 — M3.2.a: keepclient watchkeeper resource CRUD (server + client)
+
+**PR**: [#30](https://github.com/vadimtrunov/watchkeepers/pull/30)
+**Phases with incidents**: 4 (2 fixer iters), 6 (0 CodeRabbit comments)
+
+### What worked
+
+**First in-flight decomposition** went smoothly. Planner returned `fits: false` with a concrete decomposition; orchestrator applied the ROADMAP edit per `references/roadmap-migration.md` §"Decomposition at Gate 1", committed as `docs(roadmap): decompose M3.2 into sub-items`, then proceeded with the leaf. The decomposition discipline (M3.2 → M3.2.a + M3.2.b mirroring M2b.2 / M2b.3 history) made the planner's call easy.
+
+**Server + client co-located in one PR** worked. Even though M3.2.a touches both `core/internal/keep/server/` and `core/pkg/keepclient/`, the units are tightly coupled (client tests assume the server contract; server tests assume client request shape) so a single PR is the right granularity. The 13-file diff was within the planner's heuristic.
+
+**Phase 4 iter 1 rejection** caught real defects (dead code, missing test cases, stale doc) that would have shipped to main. Iter 2 verified all fixes resolved + flagged a single quality nit. The bounded-loop terminated cleanly at iter 2 with 0 important, exactly as designed.
+
+**Phase 6 zero-comment outcome** — CodeRabbit was silent this time despite the bigger diff (2031 LOC). Likely because the iter-1 fixer pre-emptively addressed common concerns (DisallowUnknownFields enforcement, missing edge tests, dead code) that CodeRabbit usually flags. Worth noting: a thorough Phase 4 review reduces Phase 6 churn.
+
+### What wasted effort
+
+Planner heuristic flagged ~7 files for M3.2.a but actual landing was 13 files — the planner did not initially realize Keep is an HTTP server requiring server-side handlers (it treated keepclient as the only side). The orchestrator spotted this gap by reading the keepclient/keep layout BEFORE writing the TASK and adjusted scope. Worth feedback into `references/agent-briefs/planner.md`: "When the resource adds new server endpoints, check whether the server side already supports them — keepclient is a thin HTTP client, not a SQL driver."
+
+### Suggested skill changes
+
+- Add to `references/agent-briefs/planner.md`: a short note that keepclient is an HTTP client (not a SQL driver), and resources without existing server endpoints require both client-side and server-side work to land. The planner should factor this into the file-count heuristic.
+- Add to `references/roadmap-migration.md` §"Decomposition at Gate 1": clarify that the orchestrator (not an agent) writes the ROADMAP decomposition edit + commits on main BEFORE creating the leaf-id branch. The existing spec says this implicitly; making it explicit avoids ambiguity in future autonomous runs.
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0 (autonomous run)
+- Total wall time from /rdd to merge: ~50 min
+
+---
