@@ -34,6 +34,14 @@ Phase map step 7).
 - `/rdd` — interactive: list available sub-items, operator picks one.
 - `/rdd <id>` — e.g. `/rdd M3` or `/rdd M1.9` — skip the selection prompt.
 - `/rdd resume` — continue the most recent in-progress `TASK-*.md`.
+- `/rdd --auto [<id>|resume]` — autonomous mode for `/loop`-driven runs.
+  Auto-decides Gates 1/2/3 deterministically per `references/gates.md`
+  §"Auto mode". Halts (no side effects) on any condition the auto rules
+  cannot resolve unambiguously: planner verdict missing, bounded-loop
+  escalation, ambiguous candidate selection, CI-not-green at Gate 3, or
+  any preflight failure. The operator-facing gate prompts are still
+  emitted to the transcript for audit, immediately followed by the
+  auto-decision and its justification.
 
 ## Phase map (hard sequence)
 
@@ -83,8 +91,11 @@ inside the squash commit. Toggle-only PRs are forbidden — see
    Delegate via `Agent`. Exceptions: TASK progress log only. ROADMAP
    checkbox toggles moved to the `writer` agent in Phase 7a (so they ride
    inside the squash commit, not as a follow-up commit on `main`).
-2. NEVER skip a gate, including Gate 3 (merge). If the operator is
-   unreachable, halt.
+2. NEVER skip a gate, including Gate 3 (merge). In interactive mode, if
+   the operator is unreachable, halt. In `--auto` mode, gates are
+   auto-decided per `references/gates.md` §"Auto mode" — halting still
+   applies whenever the auto rules cannot resolve the gate
+   deterministically.
 3. All repo content is English.
 4. `TASK-*.md` is gitignored and must never be committed to `main`.
 5. After every `Agent` call, end the same reply with an orchestrator-authored

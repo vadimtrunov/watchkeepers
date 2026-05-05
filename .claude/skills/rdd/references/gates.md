@@ -84,3 +84,64 @@ Proceed? (yes / no / defer)
   clarify; a second unrecognized reply halts.
 - Never infer intent from similar-sounding answers. "looks good" is
   not `yes`.
+
+## Auto mode
+
+Activated when the orchestrator is invoked as `/rdd --auto …`. The
+gate prompts are still printed to the transcript for audit, but the
+orchestrator emits a deterministic decision instead of waiting for
+the operator. Each gate has exactly one auto-`yes` rule; everything
+else halts without side effects, mirroring the conservative posture of
+interactive halting.
+
+### Gate 1 auto-decision
+
+- **Auto-`yes`** when the planner verdict is `fits one PR` AND exactly
+  one candidate sub-item is selectable (the first `[ ]` leaf whose
+  dependencies are all `[x]`, top-down in the ROADMAP file).
+- If the planner verdict is `too large` AND it returned a numbered
+  decomposition, apply the ROADMAP edits and auto-`yes` on the FIRST
+  decomposed sub-item. The remaining decomposed items become future
+  candidates.
+- Halt when: planner returned no verdict; planner returned `too large`
+  without a decomposition; the candidate list is empty (nothing to do
+  — print "ROADMAP complete" and halt); ROADMAP edits would touch
+  more than the candidate's own checkbox + parent cascade.
+
+### Gate 2 auto-decision
+
+- **Auto-`yes`** when the TASK file is fully populated (Scope,
+  Acceptance criteria with ≥1 item, Test plan with ≥1 item, Plan with
+  ≥1 numbered step) AND Hard rule 6 (PR size cap) is not predicted to
+  fail (rough heuristic: plan touches ≤ 5 files; if unknown, do not
+  block at this gate — let the bounded review loops catch it).
+- Halt when: any of Scope / Acceptance criteria / Test plan / Plan is
+  empty or placeholder text; the TASK is a toggle-only TASK that would
+  violate Hard rule 7.
+
+### Gate 3 auto-decision
+
+- **Auto-`yes`** when CI is reported all-green by `gh pr checks` AND
+  unresolved blocker+important review comments = 0 (the standard
+  Phase 6 exit condition is the precondition of Gate 3). Proceed
+  directly into Phase 7 (writer pass, merge, cleanup).
+- Halt when: CI is not all-green; unresolved blocker/important > 0;
+  the bounded Phase 6 loop escalated; the merge precondition was
+  computed from stale data (re-fetch once, then halt if still stale).
+
+### Audit format for an auto-decision
+
+After printing the gate's literal prompt, print exactly:
+
+```
+Auto-decision: yes
+Reason: <one sentence quoting the rule above that authorised this>
+```
+
+Or, on halt:
+
+```
+Auto-decision: halt
+Reason: <one sentence naming the specific halt condition above>
+Side effects rolled back: <list, or "none">
+```
