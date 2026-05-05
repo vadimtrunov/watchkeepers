@@ -1451,3 +1451,29 @@ layer carries logical shape, loader layer is the projection.
 - Docs: `docs/ROADMAP-phase1.md` §M5.1.
 
 ---
+
+## 2026-05-04 — M5.2: streaming interface design — callback + Subscription.Stop mirrors message-bus pattern across LLMs
+
+**PR**: [#55](https://github.com/vadimtrunov/watchkeepers/pull/55)
+**Merged**: 2026-05-04
+
+### Pattern
+
+When designing a portable streaming interface (LLM provider, websocket adapter, SSE
+consumer), the right shape is `Stream(ctx, req, handler) (Subscription, error)` where
+handler is a callback `func(ctx, event) error` and Subscription has only `Stop() error`.
+Avoid returning channels at the interface boundary — they leak goroutine ownership and
+make Stop semantics ambiguous. Avoid raw iterators — they require the caller to manage
+backpressure. The callback + Stop pattern matches what M5.1 (`AgentRuntime.Subscribe`)
+and M4.1 (`messenger.Adapter.Subscribe`) already use, so the M5.10 conformance harness
+can drive any of them through a single test scaffolding. Companion: when a streaming
+type carries multiple event shapes (text delta vs tool-call JSON fragment), prefer
+separate fields per shape over reusing one — field overload reads cleanly to the author
+but trips up reviewers and integrators. Apply when the next streaming consumer arrives.
+
+### References
+
+- Files: `core/pkg/llm/provider.go`, `core/pkg/llm/errors.go`, `core/pkg/llm/doc.go`
+- Docs: `docs/ROADMAP-phase1.md` §M5.2.
+
+---
