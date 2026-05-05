@@ -1399,3 +1399,28 @@ four corners.
 - Docs: `docs/ROADMAP-phase1.md` §M3.5.a.3.1.
 
 ---
+
+## 2026-05-04 — M3.5.a.3.2: defense-in-depth means handler check + RLS, not handler check OR RLS
+
+**PR**: [#53](https://github.com/vadimtrunov/watchkeepers/pull/53)
+**Merged**: 2026-05-04
+
+### Pattern
+
+When wiring per-tenant authorization, layer the application-layer claim check AND
+the RLS policy — they serve different purposes. The handler-layer EXISTS subquery
+returns a deterministic 404 (no row-existence oracle leaks to the caller), while
+RLS ensures even buggy handlers cannot leak rows by construction. The handler check
+produces clear error codes for legitimate callers; RLS catches refactors and
+bypasses. Removing either layer is a security regression — keep both. Companion:
+when downgrading operator-only network-boundary documentation from "required" to
+"recommended", be explicit about which layers replaced it (handler EXISTS + RLS
+subquery) and which residual hardening (per-org RLS on adjacent tables) is
+genuinely defense-in-depth versus safety-critical.
+
+### References
+
+- Files: `core/internal/keep/server/handlers_write.go`, `core/internal/keep/server/handlers_write_test.go`, `docs/DEVELOPING.md`
+- Docs: `docs/ROADMAP-phase1.md` §M3.5.a.3.2.
+
+---
