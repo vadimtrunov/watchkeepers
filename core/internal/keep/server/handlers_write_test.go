@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/auth"
@@ -892,5 +893,128 @@ func TestPutManifestVersion_InvalidManifestID(t *testing.T) {
 				t.Errorf("error = %q, want invalid_manifest_id", env.Error)
 			}
 		})
+	}
+}
+
+// -----------------------------------------------------------------------
+// M3.5.a.3.2 cross-tenant rejection coverage on PUT manifest version
+// -----------------------------------------------------------------------
+//
+// The four mutating handlers wired in M3.5.a.2 (handleInsertHuman,
+// handleSetWatchkeeperLead, handleUpdateWatchkeeperStatus,
+// handleInsertWatchkeeper) carry parallel CrossTenant + LegacyClaim
+// rejection tests in handlers_human_test.go and
+// handlers_watchkeeper_test.go. M3.5.a.3.2 closes the gap on
+// handlePutManifestVersion; the two tests below mirror that contract:
+//
+//   * cross-tenant manifest_id → 404 not_found (no row-existence oracle,
+//     same posture as handleSetWatchkeeperLead and handleInsertWatchkeeper);
+//   * legacy claim with no OrganizationID → 403 organization_required
+//     before WithScope ever runs (no DB round-trip on legacy callers).
+
+const (
+	putManifestVersionFakeID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	putManifestID            = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+)
+
+// TestPutManifestVersion_CrossTenantRejected — claim carries org X; the
+// supplied manifest_id resolves (in a real DB) to a manifest in org Y.
+// M3.5.a.3.2 wires the INSERT through a `WHERE EXISTS (SELECT 1 FROM
+// watchkeeper.manifest WHERE id = $manifest_id AND organization_id =
+// $claim_org)` subquery, so a cross-tenant caller cannot anchor a
+// manifest_version at another tenant's manifest. Under the new SQL the
+// INSERT … RETURNING returns no row, surfaced as pgx.ErrNoRows → 404
+// not_found (mirrors the contract on handleInsertWatchkeeper). We
+// assert (1) the SQL contains the organization_id binding and (2) the
+// claim org is bound as an SQL argument.
+func TestPutManifestVersion_CrossTenantRejected(t *testing.T) {
+	const otherOrgID = "77777777-7777-4777-8777-777777777777"
+	var gotSQL string
+	var gotArgs []any
+	queryRow := func(_ context.Context, sql string, args ...any) pgx.Row {
+		gotSQL = sql
+		gotArgs = args
+		// Stage ErrNoRows: under the new SQL the INSERT … SELECT … WHERE
+		// EXISTS clause matches zero rows when the manifest's org does
+		// not equal the claim org, so RETURNING produces no row and
+		// Scan surfaces pgx.ErrNoRows.
+		return server.NewFakeRowErr(pgx.ErrNoRows)
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintTokenForOrg(t, ti, "org", otherOrgID)
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+		}, "")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	// Org filter MUST be on the SQL — without it any authenticated
+	// caller could write a version against any tenant's manifest.
+	if !strings.Contains(gotSQL, "organization_id") {
+		t.Errorf("INSERT missing organization_id filter; got SQL: %s", gotSQL)
+	}
+	// The handler must bind claim.OrganizationID as one of the SQL
+	// arguments. The exact slot can shift if the placeholder layout
+	// changes; assert membership rather than a fixed index so the test
+	// is robust to a re-ordering refactor while still proving the
+	// claim org reaches Postgres.
+	found := false
+	for _, a := range gotArgs {
+		if a == otherOrgID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("claim org %q not bound to any SQL arg; args=%v", otherOrgID, gotArgs)
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "not_found" {
+		t.Errorf("error = %q, want not_found", env.Error)
+	}
+}
+
+// TestPutManifestVersion_LegacyClaimRejected — claim carries an EMPTY
+// OrganizationID (the pre-M3.5.a.1 wire shape). M3.5.a.3.2 contract
+// mirrors the four other M3.5.a.2 handlers: 403 organization_required
+// before WithScope ever runs, so the runner never sees the claim and
+// no DB round-trip happens for a legacy token.
+func TestPutManifestVersion_LegacyClaimRejected(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: putManifestVersionFakeID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintLegacyToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+		}, "")
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked despite empty-org claim; expected pre-tx 403")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "organization_required" {
+		t.Errorf("error = %q, want organization_required", env.Error)
 	}
 }

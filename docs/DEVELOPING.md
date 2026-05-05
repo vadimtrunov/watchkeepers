@@ -157,16 +157,16 @@ configurable timeout and closes the pool.
 Per-tenant authorization in the keep service is enforced at the handler
 layer via `claim.OrganizationID`, plumbed through `auth.Claim` and the
 capability broker by **M3.5.a** (foundation in **M3.5.a.1**, handler
-wire-up in **M3.5.a.2**). Four mutating handlers carry the wire-up:
-`handleInsertHuman`, `handleSetWatchkeeperLead`,
-`handleUpdateWatchkeeperStatus`, and `handleInsertWatchkeeper`.
-Concretely:
+wire-up in **M3.5.a.2** and **M3.5.a.3.2**). Five mutating handlers
+carry the wire-up: `handleInsertHuman`, `handleSetWatchkeeperLead`,
+`handleUpdateWatchkeeperStatus`, `handleInsertWatchkeeper`, and
+`handlePutManifestVersion`. Concretely:
 
 - Token-bearing requests carry `claim.OrganizationID` extracted from the
   JWT `org_id` field. The verifier still accepts pre-M3.5.a.1 tokens
-  with no `org_id` for rolling-deploy safety, but each of the four keep
+  with no `org_id` for rolling-deploy safety, but each of the five keep
   handlers above rejects an empty value with
-  `403 organization_required`.
+  `403 organization_required` before any DB transaction opens.
 - `POST /v1/humans` cross-checks the request-body `organization_id`
   against `claim.OrganizationID`; a mismatch returns
   `403 organization_mismatch` before any DB work runs.
@@ -186,32 +186,31 @@ WHERE id = $lead_human_id AND organization_id = $claim_org)`, so a
   caller cannot anchor a new watchkeeper at another tenant's human;
   the cross-tenant case produces no row through `RETURNING` and
   surfaces as `404 not_found`.
+- `PUT /v1/manifests/{manifest_id}/versions` wraps the INSERT in
+  `INSERT … SELECT … WHERE EXISTS (SELECT 1 FROM watchkeeper.manifest
+WHERE id = $manifest_id AND organization_id = $claim_org)` so a
+  caller cannot append a version to another tenant's manifest; the
+  cross-tenant case produces no row through `RETURNING` and surfaces
+  as `404 not_found`.
 
-**Remaining gap.** `PUT /v1/manifests/{manifest_id}/versions`
-(`handlePutManifestVersion`) is NOT yet filtered by tenant at the
-handler layer. The schema half of the fix landed in **M3.5.a.3.1**
-(migration 013): `manifest.organization_id NOT NULL` plus FK to
-`watchkeeper.organization`, plus per-role `ENABLE + FORCE ROW LEVEL
-SECURITY` on `manifest` and `manifest_version` keyed off a new
-`watchkeeper.org` GUC. `db.WithScope` sets the GUC from
-`claim.OrganizationID` so existing handlers continue to function;
-legacy claims with empty `OrganizationID` cause Postgres-level RLS
-to fail closed (zero rows visible, INSERT rejected by `WITH CHECK`)
-as defense in depth. Handler-layer rejection (mirroring the
-M3.5.a.2 shape: `403 organization_required` on empty claim,
-`404 not_found` on cross-tenant `manifest_id`) is tracked at
-**M3.5.a.3.2** (ROADMAP-phase1.md). Until that lands, deploy this
-route behind an operator-only network boundary even though the RLS
-backstop is now active.
+**Defense-in-depth notes.** RLS on `manifest` and `manifest_version`
+landed in **M3.5.a.3.1** (migration 013): per-role `ENABLE + FORCE
+ROW LEVEL SECURITY` keyed off a `watchkeeper.org` session GUC.
+`db.WithScope` sets the GUC from `claim.OrganizationID`, so even if
+the `handlePutManifestVersion` `WHERE EXISTS` filter regressed,
+Postgres would still refuse to insert across tenants (the `WITH
+CHECK` clause rejects, `nullif(..., '')::uuid` makes empty GUC
+fail-closed). The application-layer filter exists alongside RLS to
+keep the 404 surface deterministic (instead of an RLS-level error
+path) and to short-circuit the round-trip on legacy claims.
 
 A network-boundary that admits only authenticated operators is no
-longer required for tenant safety on the four wired handlers above,
-but is still **recommended** as defense-in-depth alongside the
-existing `KEEP_TOKEN_*` controls AND remains the only mitigation for
-`handlePutManifestVersion` until M3.5.a.3 lands. The per-org RLS
-policies on `human` / `watchkeeper` mentioned in ROADMAP-phase1 §M3
-M3.5.a remain a follow-up backstop; the handler-layer enforcement
-above closes the M4.4 cross-tenant gap on the four wired handlers.
+longer required for tenant safety on any of the five wired handlers
+above, but is still **recommended** as defense-in-depth alongside
+the existing `KEEP_TOKEN_*` controls. The per-org RLS policies on
+`human` / `watchkeeper` mentioned in ROADMAP-phase1 §M3 M3.5.a remain
+a follow-up backstop; the handler-layer enforcement above closes the
+M4.4 cross-tenant gap on all five mutating write handlers.
 
 ### Protocol choice: HTTP over gRPC
 
