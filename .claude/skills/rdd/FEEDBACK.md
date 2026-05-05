@@ -1118,3 +1118,52 @@ PR), so rollback was free.
 - Total wall time from /rdd to halt: 00:05 (mostly the 2m 29s silent stall)
 
 ---
+
+## 2026-05-05 — M5.3.b.a: pure-JS isolated-vm sandbox via invokeTool RPC
+
+**PR**: https://github.com/vadimtrunov/watchkeepers/pull/57
+**Phases with incidents**: 5, 6
+
+### What worked
+The `--auto` loop self-resolved every gate without operator intervention. Phase 4
+converged in 2 iterations; Phase 6 converged in 2 effective iterations after an
+inter-iteration title-edit. The Companion-todo discipline (`TaskCreate` before each
+`Agent` dispatch) caught zero silent-exits this run — Hard rule 5 held.
+
+### What wasted effort
+**The git-master Phase-5 brief produced an invalid PR title.** The brief instructs
+"PR title ≤ 70 chars. Derived from TASK title (prepend `<roadmap-id>: `)" — which
+yields `M5.3.b.a: add invokeTool isolated-vm sandbox path`. The repo enforces
+commitlint on PR titles via the Meta CI job (`printf '%s\n' "$PR_TITLE" |
+pnpm exec commitlint`); commitlint sees `M5.3.b.a:` as the type prefix, classifies
+it as unrecognised, and reports `subject may not be empty / type may not be empty`.
+Cost: one extra Phase-6 iteration to diagnose, an out-of-band orchestrator
+`gh pr edit --title`, and a separate empty commit to fire `pull_request.synchronize`
+(the title edit alone does not re-trigger the workflow because the repo's `ci.yml`
+does not subscribe to `types: [edited]`).
+
+A second smaller incident: `harness/node_modules/` (the workspace package's nested
+`node_modules/`) was not covered by the markdownlint ignore pattern `node_modules/**`.
+The pattern needed a `**/` prefix to match nested workspace packages. Cost: one
+Phase-6 iteration that produced `chore(lint): ignore nested node_modules in
+markdownlint config` (`cc756c7`).
+
+### Suggested skill changes
+- `references/agent-briefs/git-master.md` §"Mode — pr (Phase 5)": change the title
+  derivation rule from "prepend `<roadmap-id>: `" to "use the conventional-commits
+  type/scope from the leading commit and append `(<roadmap-id>)` at the end" — e.g.
+  `feat(harness): add invokeTool isolated-vm sandbox path (M5.3.b.a)`. This avoids
+  the commitlint trap on every repo that lints PR titles.
+- `references/bounded-loop.md` §Phase 6: add a note that title edits alone do NOT
+  fire `pull_request.synchronize`; the standard recovery is an empty
+  `chore(ci): re-trigger after PR title fix` commit, not `gh run rerun`. (Re-runs
+  use the original event payload and observe the OLD title.)
+
+### Metrics
+- Review iterations: 2
+- PR-fix iterations: 2 (markdownlint ignore + PR-title/empty-commit cycle)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~02:00 (Phase 1 to Phase 6 converge)
+
+---
+
