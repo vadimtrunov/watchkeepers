@@ -43,7 +43,8 @@ import (
 // read-API integration test. Keeping it in one place avoids drift between
 // tests if a new required env var lands later.
 func readBootEnv(dsn, addr string) []string {
-	return append(os.Environ(),
+	return append(
+		os.Environ(),
 		"KEEP_DATABASE_URL="+dsn,
 		"KEEP_HTTP_ADDR="+addr,
 		"KEEP_SHUTDOWN_TIMEOUT=5s",
@@ -189,19 +190,22 @@ func pgxBeginAndRun(ctx context.Context, pool *pgxpool.Pool, fn func(context.Con
 // KNN tests only care about row visibility — not distances — and we avoid
 // non-determinism that would flake in CI.
 func (e *testEnv) seed(ctx context.Context, tx pgx.Tx) error {
-	if _, err := tx.Exec(ctx,
+	if _, err := tx.Exec(
+		ctx,
 		`INSERT INTO watchkeeper.organization (id, display_name) VALUES ($1, $2)`,
 		e.orgID, "Integration Org "+e.subjectTag,
 	); err != nil {
 		return fmt.Errorf("org: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
+	if _, err := tx.Exec(
+		ctx,
 		`INSERT INTO watchkeeper.human (id, organization_id, display_name) VALUES ($1, $2, $3)`,
 		e.humanID, e.orgID, "Integration Human "+e.subjectTag,
 	); err != nil {
 		return fmt.Errorf("human: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
+	if _, err := tx.Exec(
+		ctx,
 		`INSERT INTO watchkeeper.manifest (id, display_name, created_by_human_id) VALUES ($1, $2, $3)`,
 		e.manifestID, "Integration Manifest "+e.subjectTag, e.humanID,
 	); err != nil {
@@ -346,6 +350,18 @@ func doJSON(t *testing.T, method, url, auth string, body any) (int, []byte) {
 func mintToken(t *testing.T, ti *auth.TestIssuer, scope string) string {
 	t.Helper()
 	tok, err := ti.Issue(auth.Claim{Subject: "test-subject", Scope: scope}, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	return tok
+}
+
+// mintTokenWithOrg mints a short-lived token with the given scope and
+// OrganizationID. Used by handlers that enforce claim.OrganizationID != ""
+// (e.g. handleInsertHuman, handleSetWatchkeeperLead added in M3.5.a.2).
+func mintTokenWithOrg(t *testing.T, ti *auth.TestIssuer, scope, orgID string) string {
+	t.Helper()
+	tok, err := ti.Issue(auth.Claim{Subject: "test-subject", Scope: scope, OrganizationID: orgID}, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
