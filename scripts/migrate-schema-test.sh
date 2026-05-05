@@ -79,11 +79,11 @@ WITH
   hum AS (
     INSERT INTO watchkeeper.human (organization_id, display_name, email)
     SELECT id, 'Alice Lead', 'alice@example.com' FROM org
-    RETURNING id
+    RETURNING id, organization_id
   ),
   man AS (
-    INSERT INTO watchkeeper.manifest (display_name, created_by_human_id)
-    SELECT 'Alpha Manifest', id FROM hum
+    INSERT INTO watchkeeper.manifest (display_name, created_by_human_id, organization_id)
+    SELECT 'Alpha Manifest', id, organization_id FROM hum
     RETURNING id
   ),
   mv AS (
@@ -498,5 +498,143 @@ for role in "${read_grant_roles[@]}"; do
   done
 done
 echo "OK: read-grants present for all three roles across manifest/log/lookup tables"
+
+# ---------------------------------------------------------------------------
+# M3.5.a.3.1 — manifest tenant column + RLS assertions (migration 013).
+#
+# Seeds two organizations (orgA / orgB) plus one manifest each and asserts:
+#   (l) cross-tenant SELECT invisibility under SET LOCAL watchkeeper.org;
+#   (m) cross-tenant INSERT rejected by WITH CHECK on manifest;
+#   (n) cross-tenant INSERT rejected by WITH CHECK on manifest_version
+#       (manifest_id resolves to a row not visible under the caller's GUC);
+#   (o) FK violation: manifest.organization_id pointing at a non-existent
+#       organization id raises 23503;
+#   (p) unset GUC visibility: with no SET LOCAL watchkeeper.org, the policy
+#       fails closed and zero manifest rows are visible.
+# ---------------------------------------------------------------------------
+echo ">> migrate-schema-test: (l-prep) seed two orgs + one manifest each"
+# Hermetic reseed: prior runs may have left rls-* rows in place. Order
+# respects FK chain (manifest_version -> manifest -> organization). The
+# happy-path rows from block (a) are not touched (they live under display
+# names that never start with 'rls-').
+"${PSQL[@]}" >/dev/null <<'SQL'
+BEGIN;
+DELETE FROM watchkeeper.manifest_version
+WHERE manifest_id IN (
+  SELECT id FROM watchkeeper.manifest WHERE display_name LIKE 'rls-mf-%'
+);
+DELETE FROM watchkeeper.manifest WHERE display_name LIKE 'rls-mf-%';
+DELETE FROM watchkeeper.organization WHERE display_name LIKE 'rls-org-%';
+WITH
+  org_a AS (
+    INSERT INTO watchkeeper.organization (display_name)
+    VALUES ('rls-org-a') RETURNING id
+  ),
+  org_b AS (
+    INSERT INTO watchkeeper.organization (display_name)
+    VALUES ('rls-org-b') RETURNING id
+  ),
+  mf_a AS (
+    INSERT INTO watchkeeper.manifest (display_name, organization_id)
+    SELECT 'rls-mf-a', id FROM org_a RETURNING id, organization_id
+  ),
+  mf_b AS (
+    INSERT INTO watchkeeper.manifest (display_name, organization_id)
+    SELECT 'rls-mf-b', id FROM org_b RETURNING id, organization_id
+  )
+INSERT INTO watchkeeper.manifest_version (manifest_id, version_no, system_prompt)
+SELECT id, 1, 'a-v1' FROM mf_a
+UNION ALL
+SELECT id, 1, 'b-v1' FROM mf_b;
+COMMIT;
+SQL
+
+org_a_id=$("${PSQL[@]}" -tA -c "SELECT id FROM watchkeeper.organization WHERE display_name = 'rls-org-a';")
+org_b_id=$("${PSQL[@]}" -tA -c "SELECT id FROM watchkeeper.organization WHERE display_name = 'rls-org-b';")
+if [[ -z "${org_a_id}" || -z "${org_b_id}" ]]; then
+  fail "rls org seed failed: orgA='${org_a_id}' orgB='${org_b_id}'"
+fi
+echo "OK: rls seed inserted (orgA=${org_a_id}, orgB=${org_b_id})"
+
+echo ">> migrate-schema-test: (l) RLS cross-tenant SELECT invisibility on manifest/manifest_version"
+mf_visible=$("${PSQL[@]}" -tA <<SQL
+BEGIN;
+SET ROLE wk_org_role;
+SET LOCAL watchkeeper.org = '${org_a_id}';
+SELECT
+  (SELECT count(*) FROM watchkeeper.manifest) || ',' ||
+  (SELECT count(*) FROM watchkeeper.manifest_version);
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+if [[ "${mf_visible}" != "1,1" ]]; then
+  fail "RLS cross-tenant SELECT expected '1,1' for orgA visibility; got '${mf_visible}'"
+fi
+echo "OK: under orgA GUC, only orgA's manifest+manifest_version are visible (counts=${mf_visible})"
+
+echo ">> migrate-schema-test: (m) RLS WITH CHECK rejects cross-tenant manifest INSERT"
+mf_insert_output=$("${PSQL[@]}" <<SQL 2>&1 || true
+BEGIN;
+SET ROLE wk_org_role;
+SET LOCAL watchkeeper.org = '${org_a_id}';
+INSERT INTO watchkeeper.manifest (display_name, organization_id)
+VALUES ('rls-cross-tenant', '${org_b_id}');
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${mf_insert_output}" | grep -Eq 'row-level security|42501'; then
+  fail "expected RLS INSERT on manifest to be rejected; got: ${mf_insert_output}"
+fi
+echo "OK: cross-tenant manifest INSERT rejected by WITH CHECK"
+
+echo ">> migrate-schema-test: (n) RLS WITH CHECK rejects cross-tenant manifest_version INSERT"
+mf_b_id=$("${PSQL[@]}" -tA -c "SELECT id FROM watchkeeper.manifest WHERE display_name = 'rls-mf-b';")
+mv_insert_output=$("${PSQL[@]}" <<SQL 2>&1 || true
+BEGIN;
+SET ROLE wk_org_role;
+SET LOCAL watchkeeper.org = '${org_a_id}';
+INSERT INTO watchkeeper.manifest_version (manifest_id, version_no, system_prompt)
+VALUES ('${mf_b_id}', 99, 'cross-tenant attempt');
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${mv_insert_output}" | grep -Eq 'row-level security|42501'; then
+  fail "expected RLS INSERT on manifest_version to be rejected; got: ${mv_insert_output}"
+fi
+echo "OK: cross-tenant manifest_version INSERT rejected by WITH CHECK"
+
+echo ">> migrate-schema-test: (o) FK violation on non-existent manifest.organization_id"
+fk_mf_output=$("${PSQL[@]}" <<'SQL' 2>&1 || true
+BEGIN;
+SAVEPOINT before_fk;
+INSERT INTO watchkeeper.manifest (display_name, organization_id)
+VALUES ('rls-fk-attempt', gen_random_uuid());
+ROLLBACK TO SAVEPOINT before_fk;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${fk_mf_output}" | grep -qi 'violates foreign key constraint'; then
+  fail "expected FK violation on manifest.organization_id; got: ${fk_mf_output}"
+fi
+echo "OK: manifest with non-existent organization_id rejected by FK"
+
+echo ">> migrate-schema-test: (p) RLS empty GUC fails closed on manifest"
+mf_empty=$("${PSQL[@]}" -tA <<'SQL'
+BEGIN;
+SET ROLE wk_org_role;
+-- No SET LOCAL watchkeeper.org. nullif('','')::uuid is NULL; comparison
+-- against NULL is never true so zero rows are visible.
+SELECT count(*) FROM watchkeeper.manifest;
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+if [[ "${mf_empty}" != "0" ]]; then
+  fail "RLS empty-GUC manifest visibility expected 0 (fail-closed); got '${mf_empty}'"
+fi
+echo "OK: unset watchkeeper.org GUC sees zero manifest rows (fail-closed)"
 
 echo "ALL schema assertions passed"

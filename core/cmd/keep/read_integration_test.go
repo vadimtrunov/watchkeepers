@@ -206,8 +206,8 @@ func (e *testEnv) seed(ctx context.Context, tx pgx.Tx) error {
 	}
 	if _, err := tx.Exec(
 		ctx,
-		`INSERT INTO watchkeeper.manifest (id, display_name, created_by_human_id) VALUES ($1, $2, $3)`,
-		e.manifestID, "Integration Manifest "+e.subjectTag, e.humanID,
+		`INSERT INTO watchkeeper.manifest (id, display_name, created_by_human_id, organization_id) VALUES ($1, $2, $3, $4)`,
+		e.manifestID, "Integration Manifest "+e.subjectTag, e.humanID, e.orgID,
 	); err != nil {
 		return fmt.Errorf("manifest: %w", err)
 	}
@@ -487,7 +487,13 @@ func TestReadAPI_GetManifest_LatestVersion(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	// Manifest is RLS-gated on `watchkeeper.org` (migration 013): the
+	// token must carry the seed's organization_id or the GET would
+	// surface as 404 (RLS hides every row, no UUID matches the empty
+	// GUC). M3.5.a.3.2 will tighten the handler to reject empty
+	// claim.OrganizationID with 403; until then a tenant-bound mint is
+	// the wire-shape requirement.
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	status, body := doJSON(t, http.MethodGet,
 		"http://"+addr+"/v1/manifests/"+env.manifestID, tok, nil)
@@ -599,7 +605,9 @@ func TestReadAPI_GetManifest_NotFound(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	// Tenant-bound mint so 404 reflects the bogus UUID, not the manifest
+	// table being uniformly hidden by RLS (migration 013).
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	bogus := newUUID(t)
 	status, body := doJSON(t, http.MethodGet, "http://"+addr+"/v1/manifests/"+bogus, tok, nil)
