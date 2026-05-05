@@ -79,14 +79,12 @@ export function createDefaultRegistry(signal: ShutdownSignal): MethodRegistry {
   const registry = new Map<string, MethodHandler>();
 
   registry.set("hello", () => {
-    const result: HelloResult = { harness: "watchkeeper", version: HARNESS_VERSION };
-    return { harness: result.harness, version: result.version };
+    return { harness: "watchkeeper", version: HARNESS_VERSION } satisfies HelloResult;
   });
 
   registry.set("shutdown", () => {
     signal.shouldExit = true;
-    const result: ShutdownResult = { accepted: true };
-    return { accepted: result.accepted };
+    return { accepted: true } satisfies ShutdownResult;
   });
 
   return registry;

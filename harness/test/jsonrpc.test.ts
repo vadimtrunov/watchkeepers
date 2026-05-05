@@ -88,6 +88,23 @@ describe("parseRequest", () => {
     }
   });
 
+  it("parses an id-less envelope as a notification (JSON-RPC §4.1)", () => {
+    const result = parseRequest('{"jsonrpc":"2.0","method":"event.tick"}');
+    expect(result.kind).toBe("notification");
+    if (result.kind === "notification") {
+      expect(result.notification.method).toBe("event.tick");
+      expect(result.notification.params).toBeUndefined();
+    }
+  });
+
+  it("preserves params on a parsed notification", () => {
+    const result = parseRequest('{"jsonrpc":"2.0","method":"event.tick","params":{"n":1}}');
+    expect(result.kind).toBe("notification");
+    if (result.kind === "notification") {
+      expect(result.notification.params).toEqual({ n: 1 });
+    }
+  });
+
   it("accepts null id", () => {
     const result = parseRequest('{"jsonrpc":"2.0","id":null,"method":"hello"}');
     expect(result.kind).toBe("ok");

@@ -99,4 +99,42 @@ describe("handleLine", () => {
     expect(decoded.id).toBeNull();
     expect(decoded.result.harness).toBe("watchkeeper");
   });
+
+  it("invokes the handler on a notification but writes nothing to stdout", async () => {
+    let invoked = 0;
+    const registry = new Map([
+      [
+        "event.tick",
+        () => {
+          invoked += 1;
+          return null;
+        },
+      ],
+    ]);
+
+    const line = await handleLine(registry, '{"jsonrpc":"2.0","method":"event.tick"}');
+
+    expect(line).toBeUndefined();
+    expect(invoked).toBe(1);
+  });
+
+  it("silently drops notifications for unknown methods (no stdout)", async () => {
+    const signal: ShutdownSignal = { shouldExit: false };
+    const registry = createDefaultRegistry(signal);
+
+    const line = await handleLine(registry, '{"jsonrpc":"2.0","method":"no.such.notify"}');
+
+    expect(line).toBeUndefined();
+  });
+
+  it("still surfaces ParseError for malformed JSON even when intent is a notification", async () => {
+    const signal: ShutdownSignal = { shouldExit: false };
+    const registry = createDefaultRegistry(signal);
+
+    const line = await handleLine(registry, "not json at all");
+    const decoded = decodeLine(line) as JsonRpcErrorLine;
+
+    expect(decoded.id).toBeNull();
+    expect(decoded.error.code).toBe(JsonRpcErrorCode.ParseError);
+  });
 });

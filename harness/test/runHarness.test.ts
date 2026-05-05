@@ -9,6 +9,7 @@ import { Readable, Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 
 import { runHarness } from "../src/index.js";
+import type { ShutdownSignal } from "../src/methods.js";
 
 function readableFromLines(lines: readonly string[]): Readable {
   return Readable.from(lines.map((line) => line + "\n"));
@@ -108,5 +109,39 @@ describe("runHarness", () => {
     await runHarness(stdin, stdout);
 
     expect(stdout.lines()).toHaveLength(1);
+  });
+
+  it("exits cleanly when the shared shutdown signal is flipped (SIGTERM/SIGINT path)", async () => {
+    // Simulates the SIGTERM/SIGINT handler path: a long-running stdin
+    // would normally keep the loop alive, but flipping `shouldExit`
+    // before the next line drains makes the loop break out cleanly.
+    // The async generator awaits between yields so the dispatch loop
+    // has a chance to process line #1 before the flag flips.
+    const signal: ShutdownSignal = { shouldExit: false };
+    const wait = (ms: number): Promise<void> =>
+      new Promise((resolve) => {
+        setTimeout(resolve, ms);
+      });
+    const stdin = Readable.from(
+      (async function* () {
+        yield '{"jsonrpc":"2.0","id":1,"method":"hello"}\n';
+        // Give the dispatch loop a turn so it processes line #1 before
+        // the SIGTERM-equivalent flag flip.
+        await wait(20);
+        signal.shouldExit = true;
+        // Yield another line; the loop must NOT process it because the
+        // signal already requested teardown.
+        yield '{"jsonrpc":"2.0","id":2,"method":"hello"}\n';
+      })(),
+    );
+    const stdout = new CollectingWritable();
+
+    await runHarness(stdin, stdout, signal);
+
+    // First line was processed before the flag flipped; second line is
+    // dropped because the loop checked the flag at the top of the next
+    // iteration.
+    expect(stdout.lines()).toHaveLength(1);
+    expect(signal.shouldExit).toBe(true);
   });
 });

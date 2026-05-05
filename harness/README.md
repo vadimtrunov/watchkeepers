@@ -106,6 +106,25 @@ Response:
 The harness writes the response, drains stdout, then exits the dispatch
 loop and lets the process terminate.
 
+### Notifications (client → server)
+
+Per JSON-RPC 2.0 §4.1, a Notification is a Request without an `id`
+member. The harness MUST NOT reply to a notification — the spec is
+absolute on this point. Concretely:
+
+- **Known method, valid params** → handler is invoked, return value
+  discarded, nothing written to stdout.
+- **Unknown method** → silently dropped. No `MethodNotFound` envelope.
+- **Handler throws** → silently dropped. No `InternalError` envelope.
+- **Malformed JSON** → still answered with a `ParseError` (-32700)
+  envelope carrying `id: null`. Per §5.1 the parser cannot tell whether
+  the client intended a request or a notification once the JSON is
+  unparseable, so the standard id-recovery rule applies.
+
+A request that includes `"id": null` is **not** a notification — it is
+a request whose id happens to be the literal `null` value, and the
+harness replies as usual.
+
 ### Streaming notifications (server → client)
 
 Reserved shape — no methods registered in M5.3.a. The harness emits
@@ -121,6 +140,15 @@ land. Example (illustrative; not implemented yet):
 ```
 
 The Go core never replies; matching is by `method` name.
+
+### Lifecycle signals
+
+When the harness is launched directly (`node harness/dist/index.js`)
+it installs `SIGTERM` and `SIGINT` handlers that flip a shared shutdown
+flag. The dispatch loop exits at the next iteration boundary, letting
+the Go core supervisor fall back to signal-based teardown when stdin
+remains open. `shutdown` over JSON-RPC is still the preferred path —
+signals are the supervisor's safety net.
 
 ## Running locally
 

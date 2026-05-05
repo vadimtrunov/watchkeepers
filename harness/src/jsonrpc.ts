@@ -29,8 +29,9 @@ import {
 } from "./types.js";
 
 /**
- * Outcome of {@link parseRequest} — either a valid request object or a
- * structured error the dispatcher can lift into a response.
+ * Outcome of {@link parseRequest} — a valid request, a valid notification
+ * (JSON-RPC 2.0 §4.1, no `id` member), or a structured error the
+ * dispatcher can lift into a response.
  *
  * Discriminated on the `kind` field; callers MUST switch on it. The
  * `id` on the error variant is the best-effort recovered id (parser
@@ -39,6 +40,7 @@ import {
  */
 export type ParseResult =
   | { readonly kind: "ok"; readonly request: JsonRpcRequest }
+  | { readonly kind: "notification"; readonly notification: JsonRpcNotification }
   | {
       readonly kind: "error";
       readonly id: JsonRpcId;
@@ -106,7 +108,26 @@ export function parseRequest(line: string): ParseResult {
     };
   }
 
-  if (!("id" in obj) || !isJsonRpcId(obj.id)) {
+  // JSON-RPC 2.0 §4.1: a Notification is a Request without an `id`
+  // member. Servers MUST NOT reply. Parse the id-less envelope as a
+  // distinct shape so the dispatcher can dispatch the method without
+  // writing a response.
+  if (!("id" in obj)) {
+    const notif: JsonRpcNotification =
+      "params" in obj
+        ? {
+            jsonrpc: JSON_RPC_VERSION,
+            method: obj.method,
+            params: obj.params as JsonRpcValue,
+          }
+        : {
+            jsonrpc: JSON_RPC_VERSION,
+            method: obj.method,
+          };
+    return { kind: "notification", notification: notif };
+  }
+
+  if (!isJsonRpcId(obj.id)) {
     return {
       kind: "error",
       id: recoveredId,
