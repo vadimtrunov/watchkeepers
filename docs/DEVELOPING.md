@@ -154,11 +154,33 @@ configurable timeout and closes the pool.
 
 ### Security posture (Phase 1)
 
-The Phase 1 keep service is not yet per-tenant safe — handlers currently accept
-`org_id` from request bodies and cannot pin the value to the authenticated caller
-because `auth.Claim` does not yet carry an `OrganizationID`. Deploy behind a
-network boundary that admits only authenticated operators until the per-tenant
-authorization gap is closed (see ROADMAP-phase1 §M3 M3.5.a).
+Per-tenant authorization in the keep service is enforced at the handler
+layer via `claim.OrganizationID`, plumbed through `auth.Claim` and the
+capability broker by **M3.5.a** (foundation in **M3.5.a.1**, handler
+wire-up in **M3.5.a.2**). Concretely:
+
+- Token-bearing requests carry `claim.OrganizationID` extracted from the
+  JWT `org_id` field. The verifier still accepts pre-M3.5.a.1 tokens
+  with no `org_id` for rolling-deploy safety, but every keep handler
+  that mutates a tenant-scoped row rejects an empty value with
+  `403 organization_required`.
+- `POST /v1/humans` cross-checks the request-body `organization_id`
+  against `claim.OrganizationID`; a mismatch returns
+  `403 organization_mismatch` before any DB work runs.
+- `PATCH /v1/watchkeepers/{id}/lead` and
+  `PATCH /v1/watchkeepers/{id}/status` filter the target row through a
+  JOIN on `watchkeeper.human` keyed by the claim's tenant
+  (`watchkeeper.watchkeeper` carries no `organization_id` column of its
+  own — see migration 002), so a cross-tenant caller's UPDATE matches
+  zero rows and surfaces as `404 not_found`.
+
+A network-boundary that admits only authenticated operators is no
+longer required for tenant safety, but is still recommended as
+defense-in-depth alongside the existing `KEEP_TOKEN_*` controls. The
+per-org RLS policies on `human` / `watchkeeper` mentioned in
+ROADMAP-phase1 §M3 M3.5.a remain a follow-up backstop; the
+handler-layer enforcement above closes the M4.4 cross-tenant gap on
+its own.
 
 ### Protocol choice: HTTP over gRPC
 

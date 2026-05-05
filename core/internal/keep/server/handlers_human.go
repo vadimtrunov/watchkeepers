@@ -122,19 +122,26 @@ func parseInsertHumanRequest(w http.ResponseWriter, req *http.Request) (insertHu
 // `(organization_id, email)` UNIQUE) falls through to the generic
 // `conflict` reason so a new constraint never silently mislabels itself.
 //
-// Cross-tenant posture (KNOWN GAP, M4.4 review):
-// `organization_id` is currently accepted from the request body and
-// trusted as-is. The `auth.Claim` carries Subject + Scope only; it does
-// NOT yet expose an OrganizationID, so the handler cannot pin org from
-// claim today. The same posture exists on `human` (no RLS — see migration
-// 012) and on `watchkeeper.watchkeeper` (no RLS — see migration 011), so
-// every authenticated caller can write any org's rows. This must be
-// closed by a follow-up that (1) plumbs `organization_id` onto
-// `auth.Claim` and the capability broker mint path and (2) lands a
-// per-org RLS policy on `human` keyed off the same scope/org GUC the
-// knowledge_chunk policy uses (migration 005). Until then, deploy with
-// operator-only access at the network/auth boundary. See ROADMAP-phase1
-// §M3 M3.5.a for the tracked fix.
+// Cross-tenant posture (M3.5.a.2): the handler refuses to trust
+// request-body `organization_id` in isolation. The verified
+// `claim.OrganizationID` (plumbed in M3.5.a.1) is the single source of
+// truth for the tenant the row will land in. Two reject paths:
+//
+//   - claim.OrganizationID == "" → 403 organization_required. Phase 1
+//     contract: the handler refuses to fall back to body input even
+//     though the auth.Verifier accepts legacy tokens (rolling-deploy
+//     compat lives at the verifier; the handler is the strict
+//     enforcement boundary). Tokens minted by the M3.5.a-aware broker
+//     always carry an org; only pre-M3.5.a.1 tokens hit this branch.
+//   - body.OrganizationID != claim.OrganizationID → 403
+//     organization_mismatch. The body retains the field for API
+//     stability — clients pass the same value they expect; the handler
+//     just cross-checks it against the claim. A future revision could
+//     drop the field entirely once every caller is org-aware.
+//
+// Both rejections fire BEFORE r.WithScope runs so a malicious body
+// never opens a transaction. See ROADMAP-phase1 §M3 M3.5.a for the
+// tracked fix.
 func handleInsertHuman(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())
@@ -148,6 +155,18 @@ func handleInsertHuman(r scopedRunner) http.Handler {
 			return
 		}
 
+		// M3.5.a.2: pin the row's tenant to the verified claim. The body
+		// field is kept for backward compatibility with M4.4 callers but
+		// MUST equal the claim — anything else is rejected with 403.
+		if claim.OrganizationID == "" {
+			writeError(w, http.StatusForbidden, "organization_required")
+			return
+		}
+		if body.OrganizationID != claim.OrganizationID {
+			writeError(w, http.StatusForbidden, "organization_mismatch")
+			return
+		}
+
 		// email and slack_user_id are nullable; pass SQL NULL when empty so
 		// the row carries NULL rather than an empty string that would defeat
 		// the unique constraint's NULLs-are-distinct semantics.
@@ -156,13 +175,18 @@ func handleInsertHuman(r scopedRunner) http.Handler {
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
+			// Bind claim.OrganizationID rather than body.OrganizationID:
+			// the two are guaranteed equal by the check above, but
+			// passing the verified value keeps the SQL parameter
+			// trustworthy by construction even if a future refactor
+			// reorders the validation.
 			return tx.QueryRow(ctx, `
                 INSERT INTO watchkeeper.human (
                     organization_id, display_name, email, slack_user_id
                 )
                 VALUES ($1, $2, $3, $4)
                 RETURNING id
-            `, body.OrganizationID, body.DisplayName, email, slackUserID).Scan(&id)
+            `, claim.OrganizationID, body.DisplayName, email, slackUserID).Scan(&id)
 		})
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -307,14 +331,15 @@ func parseUpdateWatchkeeperLeadRequest(w http.ResponseWriter, req *http.Request)
 // add an audit-log row keyed off claim.Subject. Until then, deploy with
 // operator-only access at the network/auth boundary.
 //
-// Cross-tenant posture (KNOWN GAP, M4.4 review): the UPDATE matches
-// `WHERE id = $1` only, so any authenticated caller can rebind any
-// watchkeeper across organizations. Closing this requires (1)
-// `auth.Claim.OrganizationID` (broker refactor) and (2) `WHERE id = $1
-// AND organization_id = $claim_org`. The same gap exists on every
-// watchkeeper-table mutator (see migration 011), so M4.4 inherits the
-// posture rather than introducing it. See ROADMAP-phase1 §M3 M3.5.a
-// for the consolidated fix.
+// Cross-tenant posture (M3.5.a.2 fix): the UPDATE filters BOTH on the
+// watchkeeper id AND on the claim's tenant (resolved through the row's
+// `lead_human_id → human.organization_id` relation, since
+// `watchkeeper.watchkeeper` carries no `organization_id` column of its
+// own — see migration 002). A cross-tenant caller's UPDATE simply
+// matches zero rows and surfaces as 404 not_found, hiding row
+// existence from the wrong tenant. An empty `claim.OrganizationID`
+// (legacy pre-M3.5.a.1 token) is rejected up front with 403
+// organization_required, mirroring handleInsertHuman.
 func handleSetWatchkeeperLead(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())
@@ -338,13 +363,32 @@ func handleSetWatchkeeperLead(r scopedRunner) http.Handler {
 			return
 		}
 
+		// M3.5.a.2: the claim must carry an explicit tenant. Phase 1
+		// rejects legacy claims rather than silently fall through to a
+		// scope-only check that would let any authenticated caller
+		// rebind any watchkeeper.
+		if claim.OrganizationID == "" {
+			writeError(w, http.StatusForbidden, "organization_required")
+			return
+		}
+
 		var notFound bool
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
+			// JOIN-through-human org filter: the watchkeeper table has no
+			// `organization_id` column of its own; tenancy is inferred
+			// from the row's lead human. The IN-subquery shape lets
+			// Postgres fold the filter into the UPDATE plan without an
+			// extra round-trip and keeps the parameter binding flat
+			// (id, lead_human_id, claim_org).
 			tag, err := tx.Exec(ctx, `
                 UPDATE watchkeeper.watchkeeper
                 SET lead_human_id = $2
                 WHERE id = $1
-            `, id, body.LeadHumanID)
+                  AND lead_human_id IN (
+                      SELECT id FROM watchkeeper.human
+                      WHERE organization_id = $3
+                  )
+            `, id, body.LeadHumanID, claim.OrganizationID)
 			if err != nil {
 				return err
 			}

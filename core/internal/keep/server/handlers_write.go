@@ -411,7 +411,8 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `
+			return tx.QueryRow(
+				ctx, `
                 INSERT INTO watchkeeper.manifest_version (
                     manifest_id, version_no, system_prompt,
                     tools, authority_matrix, knowledge_sources,
@@ -620,6 +621,16 @@ func parseUpdateWatchkeeperStatusRequest(w http.ResponseWriter, req *http.Reques
 // concurrent transitions are serialised by Postgres' row-level lock semantics
 // (the SELECT … FOR UPDATE pattern); see migration 002 for the table CHECK
 // constraint that backs this at the storage layer.
+//
+// Cross-tenant posture (M3.5.a.2 fix): the SELECT … FOR UPDATE filter
+// matches BOTH on the watchkeeper id AND on the claim's tenant
+// (resolved through the row's `lead_human_id → human.organization_id`
+// relation; `watchkeeper.watchkeeper` carries no `organization_id`
+// column of its own — see migration 002). A cross-tenant caller's
+// SELECT returns no rows and the handler surfaces 404 not_found,
+// hiding row existence from the wrong tenant. An empty
+// `claim.OrganizationID` (legacy pre-M3.5.a.1 token) is rejected up
+// front with 403 organization_required.
 func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())
@@ -643,6 +654,13 @@ func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
 			return
 		}
 
+		// M3.5.a.2: legacy claims (no org) cannot pin tenancy and are
+		// rejected. Mirrors handleInsertHuman / handleSetWatchkeeperLead.
+		if claim.OrganizationID == "" {
+			writeError(w, http.StatusForbidden, "organization_required")
+			return
+		}
+
 		// transitionResult lets the closure signal the handler that the row
 		// existed but the requested transition is not allowed, so the
 		// outer code can map that to a 400 invalid_status_transition
@@ -655,15 +673,22 @@ func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
 
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
 			// Lock the row so a concurrent PATCH cannot race the
-			// transition validation. SELECT … FOR UPDATE blocks any
+			// transition validation. SELECT … FOR UPDATE OF w blocks any
 			// other tx that targets the same row until ours commits.
+			//
+			// JOIN-through-human org filter: a cross-tenant caller's
+			// SELECT returns zero rows and the handler emits 404. The
+			// `FOR UPDATE OF w` form locks ONLY the watchkeeper row;
+			// the human side is read-only and locking it would
+			// over-serialize unrelated traffic.
 			var current string
 			row := tx.QueryRow(ctx, `
-                SELECT status
-                FROM watchkeeper.watchkeeper
-                WHERE id = $1
-                FOR UPDATE
-            `, id)
+                SELECT w.status
+                FROM watchkeeper.watchkeeper AS w
+                JOIN watchkeeper.human AS h ON h.id = w.lead_human_id
+                WHERE w.id = $1 AND h.organization_id = $2
+                FOR UPDATE OF w
+            `, id, claim.OrganizationID)
 			if err := row.Scan(&current); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					res.notFound = true

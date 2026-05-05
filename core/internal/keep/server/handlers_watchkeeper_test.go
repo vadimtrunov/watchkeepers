@@ -324,15 +324,15 @@ func TestGetWatchkeeper_ReturnsFullRow(t *testing.T) {
 			//   id, manifest_id, lead_human_id,
 			//   active_manifest_version_id, status,
 			//   spawned_at, retired_at, created_at
-			*(dest[0].(*string)) = wkFakeID
-			*(dest[1].(*string)) = wkManifestID
-			*(dest[2].(*string)) = wkLeadHumanID
+			*dest[0].(*string) = wkFakeID
+			*dest[1].(*string) = wkManifestID
+			*dest[2].(*string) = wkLeadHumanID
 			active := wkActiveVerID
-			*(dest[3].(**string)) = &active
-			*(dest[4].(*string)) = "active"
-			*(dest[5].(**time.Time)) = &spawnedAt
-			*(dest[6].(**time.Time)) = nil
-			*(dest[7].(*time.Time)) = time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+			*dest[3].(**string) = &active
+			*dest[4].(*string) = "active"
+			*dest[5].(**time.Time) = &spawnedAt
+			*dest[6].(**time.Time) = nil
+			*dest[7].(*time.Time) = time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -404,19 +404,19 @@ func makeListScans(t *testing.T, statuses []string) []func(dest ...any) error {
 	for i, status := range statuses {
 		i, status := i, status
 		out = append(out, func(dest ...any) error {
-			*(dest[0].(*string)) = wkFakeID
-			*(dest[1].(*string)) = wkManifestID
-			*(dest[2].(*string)) = wkLeadHumanID
-			*(dest[3].(**string)) = nil
-			*(dest[4].(*string)) = status
-			*(dest[5].(**time.Time)) = nil
-			*(dest[6].(**time.Time)) = nil
+			*dest[0].(*string) = wkFakeID
+			*dest[1].(*string) = wkManifestID
+			*dest[2].(*string) = wkLeadHumanID
+			*dest[3].(**string) = nil
+			*dest[4].(*string) = status
+			*dest[5].(**time.Time) = nil
+			*dest[6].(**time.Time) = nil
 			// Stagger created_at by row index so the DESC order is
 			// observable end-to-end (the fake does not actually sort —
 			// it just returns rows in the order the test stages them).
 			// Row 0 is the newest (largest created_at); row N is oldest.
 			base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-			*(dest[7].(*time.Time)) = base.Add(-time.Duration(i) * time.Hour)
+			*dest[7].(*time.Time) = base.Add(-time.Duration(i) * time.Hour)
 			return nil
 		})
 	}
@@ -704,6 +704,84 @@ func TestUpdateWatchkeeperStatus_InvalidPathID_400(t *testing.T) {
 	}
 	if env.Error == "" {
 		t.Errorf("error field empty; want non-empty error code")
+	}
+}
+
+// -----------------------------------------------------------------------
+// M3.5.a.2 cross-tenant rejection coverage (watchkeeper-table mutators)
+// -----------------------------------------------------------------------
+
+// TestUpdateWatchkeeperStatus_CrossTenantNotFound — the watchkeeper row
+// is invisible to the SELECT FOR UPDATE because its lead human's
+// organization_id does not match the claim's org. M3.5.a.2 routes the
+// SELECT through a JOIN on watchkeeper.human keyed by the claim org,
+// so a cross-tenant caller sees pgx.ErrNoRows → 404, not silent
+// success. We also assert the handler bound the claim org parameter
+// to the SELECT.
+func TestUpdateWatchkeeperStatus_CrossTenantNotFound(t *testing.T) {
+	const otherOrgID = "77777777-7777-4777-8777-777777777777"
+	var gotSelectSQL string
+	var gotSelectArgs []any
+	queryRow := func(_ context.Context, sql string, args ...any) pgx.Row {
+		gotSelectSQL = sql
+		gotSelectArgs = args
+		// Stage ErrNoRows: under the new SQL the row is filtered out by
+		// the JOIN-through-human org clause, mirroring how Postgres
+		// would respond when claim_org != row_org.
+		return server.NewFakeRowErr(pgx.ErrNoRows)
+	}
+	exec := func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+		t.Fatal("UPDATE should not run when the SELECT FOR UPDATE returned no rows")
+		return pgconn.CommandTag{}, nil
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow, Exec: exec})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintTokenForOrg(t, ti, "org", otherOrgID)
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+		map[string]any{"status": "active"}, "")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(gotSelectSQL, "organization_id") {
+		t.Errorf("SELECT FOR UPDATE missing organization_id filter; got SQL: %s", gotSelectSQL)
+	}
+	// Handler binds the claim org as the second parameter (after id).
+	if len(gotSelectArgs) < 2 {
+		t.Fatalf("args len = %d, want >= 2 (id, claim_org); args=%v", len(gotSelectArgs), gotSelectArgs)
+	}
+	if gotSelectArgs[1] != otherOrgID {
+		t.Errorf("args[1] = %v, want claim org %q", gotSelectArgs[1], otherOrgID)
+	}
+}
+
+// TestUpdateWatchkeeperStatus_LegacyClaimRejected — empty
+// OrganizationID surfaces as 403 organization_required before the
+// runner is invoked. Mirrors the contract in handleInsertHuman /
+// handleSetWatchkeeperLead.
+func TestUpdateWatchkeeperStatus_LegacyClaimRejected(t *testing.T) {
+	runner := &server.FakeScopedRunner{Tx: stageUpdateTx(t, "pending", false, nil)}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintLegacyToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+		map[string]any{"status": "active"}, "")
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked despite empty-org claim; expected pre-tx 403")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "organization_required" {
+		t.Errorf("error = %q, want organization_required", env.Error)
 	}
 }
 

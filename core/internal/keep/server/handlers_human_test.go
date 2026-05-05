@@ -34,7 +34,9 @@ const (
 // -----------------------------------------------------------------------
 
 // TestInsertHuman_HappyPath asserts a minimal body returns 201 + id and
-// the runner sees claim.Scope.
+// the runner sees claim.Scope. The minted token carries OrganizationID =
+// testClaimOrgID (which equals humanOrgID), so the M3.5.a.2 claim-vs-body
+// org check passes by construction.
 func TestInsertHuman_HappyPath(t *testing.T) {
 	runner := &server.FakeScopedRunner{FakeID: humanFakeID}
 	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
@@ -490,7 +492,9 @@ func stageSetLeadTx(rowsAffected int64, gotSQL *string, gotArgs *[]any, execErr 
 
 // TestSetWatchkeeperLead_HappyPath — happy path returns 204 and the bound
 // SQL targets watchkeeper.watchkeeper.lead_human_id with the supplied
-// values.
+// values. M3.5.a.2 added a third bound parameter (claim.OrganizationID)
+// for the JOIN-through-human org filter; the assertions below pin both
+// the SQL shape and the (id, lead_human_id, claim_org) parameter order.
 func TestSetWatchkeeperLead_HappyPath(t *testing.T) {
 	var gotSQL string
 	var gotArgs []any
@@ -510,14 +514,20 @@ func TestSetWatchkeeperLead_HappyPath(t *testing.T) {
 	if !strings.Contains(gotSQL, "WHERE id = $1") {
 		t.Errorf("SQL did not bind id filter; got: %s", gotSQL)
 	}
-	if len(gotArgs) != 2 {
-		t.Fatalf("args len = %d, want 2; args=%v", len(gotArgs), gotArgs)
+	if !strings.Contains(gotSQL, "organization_id = $3") {
+		t.Errorf("SQL did not bind org filter (M3.5.a.2); got: %s", gotSQL)
+	}
+	if len(gotArgs) != 3 {
+		t.Fatalf("args len = %d, want 3; args=%v", len(gotArgs), gotArgs)
 	}
 	if gotArgs[0] != wkFakeID {
 		t.Errorf("args[0] = %v, want %q", gotArgs[0], wkFakeID)
 	}
 	if gotArgs[1] != humanFakeID {
 		t.Errorf("args[1] = %v, want %q", gotArgs[1], humanFakeID)
+	}
+	if gotArgs[2] != testClaimOrgID {
+		t.Errorf("args[2] = %v, want testClaimOrgID %q", gotArgs[2], testClaimOrgID)
 	}
 }
 
@@ -680,5 +690,146 @@ func TestSetWatchkeeperLead_RunnerErrorBubblesUp(t *testing.T) {
 	}
 	if env.Error != "set_watchkeeper_lead_failed" {
 		t.Errorf("error = %q, want set_watchkeeper_lead_failed", env.Error)
+	}
+}
+
+// -----------------------------------------------------------------------
+// M3.5.a.2 cross-tenant rejection coverage
+// -----------------------------------------------------------------------
+//
+// otherOrgID is a deliberately distinct tenant identifier used by the
+// rejection tests below. All same-tenant happy paths above use the
+// default testClaimOrgID (which equals humanOrgID). The contrast pins
+// "claim org != body/row org" rejection without leaking the prod
+// constant.
+const otherOrgID = "77777777-7777-4777-8777-777777777777"
+
+// TestInsertHuman_CrossTenantRejected — claim carries org X; body
+// carries org Y. M3.5.a.2 wires `handleInsertHuman` to compare the two
+// and reject the mismatch with 403 organization_mismatch BEFORE the
+// runner is invoked. Without the wire-up the handler currently trusts
+// body.organization_id verbatim and inserts under the wrong tenant.
+func TestInsertHuman_CrossTenantRejected(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: humanFakeID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	// Claim org = otherOrgID; body org = humanOrgID. Different tenants.
+	tok := mustMintTokenForOrg(t, ti, "org", otherOrgID)
+
+	rec := writeDo(t, h, http.MethodPost, "/v1/humans", tok, map[string]any{
+		"organization_id": humanOrgID,
+		"display_name":    "Lead Operator",
+	}, "")
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked despite cross-tenant rejection; expected pre-tx 403")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "organization_mismatch" {
+		t.Errorf("error = %q, want organization_mismatch", env.Error)
+	}
+}
+
+// TestInsertHuman_LegacyClaimRejected — claim carries an EMPTY
+// OrganizationID (the pre-M3.5.a.1 wire shape). M3.5.a.2 contract:
+// handler refuses to fall back to body input when the claim has no
+// tenant pinned, so the request surfaces as 403 organization_required
+// rather than silently inserting into the body's tenant. This is the
+// "Phase 1 reject" choice documented in the handler godoc.
+func TestInsertHuman_LegacyClaimRejected(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: humanFakeID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintLegacyToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPost, "/v1/humans", tok, map[string]any{
+		"organization_id": humanOrgID,
+		"display_name":    "Lead Operator",
+	}, "")
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked despite empty-org claim; expected pre-tx 403")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "organization_required" {
+		t.Errorf("error = %q, want organization_required", env.Error)
+	}
+}
+
+// TestSetWatchkeeperLead_CrossTenantNotFound — the watchkeeper row
+// belongs to org A (its lead_human_id resolves to a human whose
+// organization_id == humanOrgID); the claim carries org B
+// (otherOrgID). M3.5.a.2 wires the UPDATE so the JOIN-through-human
+// org filter excludes the row, RowsAffected == 0 falls through to
+// 404. We assert (1) the handler bound the org_id parameter and
+// (2) the response is 404 not_found, NOT 204 (the pre-fix behaviour).
+func TestSetWatchkeeperLead_CrossTenantNotFound(t *testing.T) {
+	var gotSQL string
+	var gotArgs []any
+	// Stage RowsAffected == 0: under the new SQL the cross-tenant row
+	// is invisible to the UPDATE, mirroring how Postgres would respond.
+	runner := &server.FakeScopedRunner{Tx: stageSetLeadTx(0, &gotSQL, &gotArgs, nil)}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintTokenForOrg(t, ti, "org", otherOrgID)
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/lead", tok,
+		map[string]any{"lead_human_id": humanFakeID}, "")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	// Org filter MUST be on the SQL — without it any authenticated
+	// caller could rebind any watchkeeper.
+	if !strings.Contains(gotSQL, "organization_id") {
+		t.Errorf("UPDATE missing organization_id filter; got SQL: %s", gotSQL)
+	}
+	// The handler binds the claim org as the third parameter.
+	if len(gotArgs) < 3 {
+		t.Fatalf("args len = %d, want >= 3 (id, lead_human_id, claim_org); args=%v", len(gotArgs), gotArgs)
+	}
+	if gotArgs[2] != otherOrgID {
+		t.Errorf("args[2] = %v, want claim org %q", gotArgs[2], otherOrgID)
+	}
+}
+
+// TestSetWatchkeeperLead_LegacyClaimRejected — the claim carries an
+// EMPTY OrganizationID. M3.5.a.2 contract mirrors handleInsertHuman:
+// 403 organization_required before any DB work runs.
+func TestSetWatchkeeperLead_LegacyClaimRejected(t *testing.T) {
+	runner := &server.FakeScopedRunner{Tx: stageSetLeadTx(1, nil, nil, nil)}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintLegacyToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/lead", tok,
+		map[string]any{"lead_human_id": humanFakeID}, "")
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked despite empty-org claim; expected pre-tx 403")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "organization_required" {
+		t.Errorf("error = %q, want organization_required", env.Error)
 	}
 }
