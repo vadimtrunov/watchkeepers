@@ -1167,3 +1167,48 @@ markdownlint config` (`cc756c7`).
 
 ---
 
+## 2026-05-06 — M5.3.b.b.a: ADR 0001 worker substrate
+
+**PR**: [#58](https://github.com/vadimtrunov/watchkeepers/pull/58)
+**Phases with incidents**: none
+
+### What worked
+The two FEEDBACK lessons from M5.3.b.a (PR title format + nested
+node_modules in markdownlint ignore) **prevented re-incurring those costs**:
+the orchestrator dispatched git-master with a conventional-commits PR title
+from the start, and the `**/node_modules/**` ignore was already in place.
+Phase 6 converged on the first iteration with 9/9 CI green and 0 unresolved
+threads — fastest Phase 6 in the project's rdd history. The Gate 1 auto-rule
+for `too large` planner verdicts (apply decomposition + auto-yes the first
+sub-item) executed cleanly: planner returned 5 sub-items, ROADMAP committed,
+M5.3.b.b.a became the unit of work without operator intervention.
+
+### What wasted effort
+Phase 4 iter 1 caught a real reasoning defect (the structured-clone IPC claim
+for `child_process.fork`) — the executor authored an ADR that asserted a
+property fork only has when `serialization: 'advanced'` is set, then leaned
+on that property to differentiate fork from spawn. Code-reviewer flagged it
+as `important`. The fix took one iteration. This is exactly the kind of
+domain-knowledge defect that a generalist reviewer catches and a generalist
+executor misses — the workflow held.
+
+A single small drag: the prior writer iteration (M5.3.b.a) failed to commit
+because of MD034 (bare PR URL); this writer was given an explicit
+"`[#NN](URL)` format + trailing `---`" instruction in its brief, which is a
+band-aid rather than a structural fix.
+
+### Suggested skill changes
+- `references/lessons-template.md` §"Per-TASK section": change the example PR
+  line from `**PR**: <PR URL>` to `**PR**: [#NN](<PR URL>)`. Also add an
+  explicit note in §"Brevity rules" that EVERY appended section MUST end with
+  `---` (currently shown in the example but not stated as a rule). The two
+  formatting conventions trip writers because they live only in the example,
+  not in the rules.
+
+### Metrics
+- Review iterations: 2
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~01:30 (estimate; Phase 1 fast-track + Phase 6 single-pass)
+
+---
