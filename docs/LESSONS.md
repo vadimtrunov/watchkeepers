@@ -1193,3 +1193,27 @@ event-protocol consumer (webhook receiver, Kafka consumer with manual commit, et
 - Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
 
 ---
+
+## 2026-05-04 — M4.2.c.2: per-session ctx is required to unblock blocking reads on reconnect
+
+**PR**: [#45](https://github.com/vadimtrunov/watchkeepers/pull/45)
+**Merged**: 2026-05-04 (squash sha `6d3ac20`)
+
+### Pattern
+
+When a streaming consumer reconnects (Socket Mode disconnect envelope, WS transport
+error, pong-timeout), the parent `runCtx` is still live but the CURRENT connection
+must be torn down. A naive `conn.Read()` in a pump goroutine parks indefinitely
+because the server holds the connection open after sending its disconnect frame
+waiting for the client close. Solution: wrap each session in
+`context.WithCancel(runCtx)` and cancel `sessCtx` on every reconnect transition.
+The pump's `conn.Read(sessCtx)` or its `select`-with-`ctx.Done` unblocks promptly.
+Without it, reconnects either deadlock or leak the pump goroutine. Apply when
+implementing any reconnect-resilient streaming consumer (WebSocket, SSE, gRPC stream).
+
+### References
+
+- Files: `core/pkg/messenger/slack/subscribe_reconnect.go`, `core/pkg/messenger/slack/subscribe_reconnect_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
+
+---
