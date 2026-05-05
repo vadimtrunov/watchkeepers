@@ -116,11 +116,25 @@ func parseInsertHumanRequest(w http.ResponseWriter, req *http.Request) (insertHu
 
 // handleInsertHuman serves POST /v1/humans. It validates the body, inserts
 // one row into watchkeeper.human under the scoped tx, and returns the new
-// id. A unique-violation on `human_slack_user_id_key` is translated to
-// 409 slack_user_id_conflict so the caller can decide whether to fall back
-// to a lookup. RLS on the human table is intentionally not enabled at this
-// milestone (matching the watchkeeper-table policy from migration 011);
-// future TASK adds a policy keyed off the same `app.scope` GUC.
+// id. A unique-violation on the `human_slack_user_id_key` constraint is
+// translated to 409 slack_user_id_conflict so the caller can decide
+// whether to fall back to a lookup; any other 23505 (e.g. a future
+// `(organization_id, email)` UNIQUE) falls through to the generic
+// `conflict` reason so a new constraint never silently mislabels itself.
+//
+// Cross-tenant posture (KNOWN GAP, M4.4 review):
+// `organization_id` is currently accepted from the request body and
+// trusted as-is. The `auth.Claim` carries Subject + Scope only; it does
+// NOT yet expose an OrganizationID, so the handler cannot pin org from
+// claim today. The same posture exists on `human` (no RLS — see migration
+// 012) and on `watchkeeper.watchkeeper` (no RLS — see migration 011), so
+// every authenticated caller can write any org's rows. This must be
+// closed by a follow-up that (1) plumbs `organization_id` onto
+// `auth.Claim` and the capability broker mint path and (2) lands a
+// per-org RLS policy on `human` keyed off the same scope/org GUC the
+// knowledge_chunk policy uses (migration 005). Until then, deploy with
+// operator-only access at the network/auth boundary. See ROADMAP-phase1
+// §M4 → M4.4 review.
 func handleInsertHuman(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())
@@ -153,7 +167,17 @@ func handleInsertHuman(r scopedRunner) http.Handler {
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				writeError(w, http.StatusConflict, "slack_user_id_conflict")
+				// Pin the 409 reason to the slack-uniqueness constraint by
+				// name so a future UNIQUE on `human` (e.g. an
+				// `(organization_id, email)` constraint) does not silently
+				// surface as `slack_user_id_conflict`. Any other 23505 is
+				// reported with a generic `conflict` reason — still
+				// retryable, but unambiguous about the constraint family.
+				if pgErr.ConstraintName == "human_slack_user_id_key" {
+					writeError(w, http.StatusConflict, "slack_user_id_conflict")
+					return
+				}
+				writeError(w, http.StatusConflict, "conflict")
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "insert_human_failed")
@@ -178,6 +202,15 @@ func handleLookupHumanBySlackID(r scopedRunner) http.Handler {
 			return
 		}
 
+		// req.PathValue returns the percent-decoded path segment, so the
+		// 64-byte cap below applies to the decoded value. A request of the
+		// form `.../by-slack/%55%55…` with 65 `%55` triplets decodes to 65
+		// `U` characters and is rejected here, not at the Postgres `text`
+		// boundary. PII posture: Slack user IDs are workspace-public
+		// identifiers (not Slack `email` / `team_id`), so logging the
+		// decoded value at error level is acceptable; the bound parameter
+		// is what the unique constraint matches against, and the cap keeps
+		// a malformed lookup from burning megabyte-sized query plans.
 		slackUserID := req.PathValue("slack_user_id")
 		if slackUserID == "" {
 			writeError(w, http.StatusBadRequest, "invalid_request")
@@ -256,11 +289,32 @@ func parseUpdateWatchkeeperLeadRequest(w http.ResponseWriter, req *http.Request)
 // handleSetWatchkeeperLead serves PATCH /v1/watchkeepers/{id}/lead. It
 // updates the watchkeeper row's `lead_human_id` column. An unknown
 // watchkeeper id yields 404 not_found; an FK violation on the
-// human reference (23503) yields 400 invalid_lead_human_id so callers
-// learn the human row does not exist without leaking SQL text. The
-// status / spawned_at / retired_at columns are intentionally untouched
-// by this handler — those transitions stay on the dedicated /status
-// route.
+// `watchkeeper_lead_human_id_fkey` constraint yields 400
+// invalid_lead_human_id so callers learn the human row does not exist
+// without leaking SQL text. Any other 23503 (a future FK on the same
+// row) falls through to the generic 500 path so a new constraint never
+// silently mislabels itself as `invalid_lead_human_id`. The status /
+// spawned_at / retired_at columns are intentionally untouched by this
+// handler — those transitions stay on the dedicated /status route.
+//
+// Scope-role policy: the route runs under `WithScope`, so any verified
+// claim — `org`, `user:<id>`, or `agent:<id>` — currently passes the
+// auth wall. This is intentional pending the broker refactor: an agent
+// must be able to surface a self-rebind request (e.g. "promote my
+// pairing human") through the same endpoint operators call. A future
+// hardening pass should either (a) tighten this to org/user only and
+// expose a separate agent-only flow, or (b) keep the open posture and
+// add an audit-log row keyed off claim.Subject. Until then, deploy with
+// operator-only access at the network/auth boundary.
+//
+// Cross-tenant posture (KNOWN GAP, M4.4 review): the UPDATE matches
+// `WHERE id = $1` only, so any authenticated caller can rebind any
+// watchkeeper across organizations. Closing this requires (1)
+// `auth.Claim.OrganizationID` (broker refactor) and (2) `WHERE id = $1
+// AND organization_id = $claim_org`. The same gap exists on every
+// watchkeeper-table mutator (see migration 011), so M4.4 inherits the
+// posture rather than introducing it. See ROADMAP-phase1 §M4 → M4.4
+// review for the consolidated fix.
 func handleSetWatchkeeperLead(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())
@@ -301,7 +355,14 @@ func handleSetWatchkeeperLead(r scopedRunner) http.Handler {
 		})
 		if err != nil {
 			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			// Pin the 400 reason to the lead-human FK by name so a future
+			// FK on this row (e.g. an `organization_id` cross-row check)
+			// does not silently surface as `invalid_lead_human_id`. Any
+			// other 23503 falls through to the generic 500 path; a
+			// follow-up should add a stable reason for those cases once
+			// the next FK lands.
+			if errors.As(err, &pgErr) && pgErr.Code == "23503" &&
+				pgErr.ConstraintName == "watchkeeper_lead_human_id_fkey" {
 				writeError(w, http.StatusBadRequest, "invalid_lead_human_id")
 				return
 			}

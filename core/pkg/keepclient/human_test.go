@@ -290,8 +290,12 @@ func TestClient_LookupHumanBySlackID_NotFound_404(t *testing.T) {
 	}
 }
 
-// TestClient_LookupHumanBySlackID_EmptyID_Synchronous — empty slackUserID
-// returns ErrInvalidRequest synchronously without a network round-trip.
+// TestClient_LookupHumanBySlackID_EmptyID_Synchronous — empty or
+// whitespace-only slackUserID returns ErrInvalidRequest synchronously
+// without a network round-trip. Whitespace is rejected because the
+// percent-encoded form (e.g. `%20%20%20`) is structurally
+// indistinguishable from a typo at the call site and would never match
+// a real Slack user ID.
 func TestClient_LookupHumanBySlackID_EmptyID_Synchronous(t *testing.T) {
 	t.Parallel()
 
@@ -303,9 +307,21 @@ func TestClient_LookupHumanBySlackID_EmptyID_Synchronous(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
-	_, err := c.LookupHumanBySlackID(context.Background(), "")
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Errorf("err = %v, want ErrInvalidRequest", err)
+	cases := []struct {
+		name, value string
+	}{
+		{"empty", ""},
+		{"single_space", " "},
+		{"tabs_and_spaces", "\t  \t "},
+		{"newline", "\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := c.LookupHumanBySlackID(context.Background(), tc.value)
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("err = %v, want ErrInvalidRequest", err)
+			}
+		})
 	}
 	if hits.Load() != 0 {
 		t.Errorf("server received %d hits; want 0 (synchronous reject)", hits.Load())

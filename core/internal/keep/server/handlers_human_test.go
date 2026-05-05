@@ -134,6 +134,50 @@ func TestInsertHuman_OmittedOptionalsBindNil(t *testing.T) {
 	}
 }
 
+// TestInsertHuman_OtherUniqueViolation_409Generic asserts that a 23505
+// from a UNIQUE constraint that is NOT `human_slack_user_id_key` (e.g.
+// a future `(organization_id, email)` UNIQUE) surfaces as a generic
+// 409 `conflict` reason rather than mislabeling itself as the
+// slack-uniqueness conflict. Pinned by ConstraintName so the next
+// migration cannot silently regress the reason mapping.
+func TestInsertHuman_OtherUniqueViolation_409Generic(t *testing.T) {
+	queryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRowErr(&pgconn.PgError{
+			Code:           "23505",
+			ConstraintName: "human_org_email_key",
+			Message:        "duplicate key value violates unique constraint \"human_org_email_key\"",
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPost, "/v1/humans", tok, map[string]any{
+		"organization_id": humanOrgID,
+		"display_name":    "Lead Operator",
+		"email":           humanFakeEmail,
+	}, "")
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "conflict" {
+		t.Errorf("error = %q, want generic conflict (not slack_user_id_conflict)", env.Error)
+	}
+	// The raw constraint name must NOT leak into the response body.
+	for _, forbidden := range []string{"human_org_email_key", "duplicate", "violates"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Errorf("response body leaked %q: %s", forbidden, rec.Body.String())
+		}
+	}
+}
+
 // TestInsertHuman_DuplicateSlackID_409 — a 23505 unique violation on
 // `human_slack_user_id_key` is translated to 409 slack_user_id_conflict
 // without leaking the raw SQL error text.
@@ -371,6 +415,39 @@ func TestLookupHumanBySlackID_Oversized_400(t *testing.T) {
 	}
 }
 
+// TestLookupHumanBySlackID_OversizedEncoded_400 asserts the 64-byte cap
+// runs against the decoded value: a path of `%55` repeated 65 times
+// decodes to 65 `U` characters, which must be rejected with 400 before
+// the SQL parameter is bound. Without the decode-side cap a caller could
+// smuggle a 65-byte payload past a byte-count check on the encoded form
+// (which the stdlib mux already decodes via PathValue) and surface as a
+// confusing 500 from Postgres.
+func TestLookupHumanBySlackID_OversizedEncoded_400(t *testing.T) {
+	runner := &server.FakeScopedRunner{}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	// 65 × `%55` = 65 decoded `U` chars; encoded form is 195 bytes long.
+	encoded := strings.Repeat("%55", 65)
+	rec := writeDo(t, h, http.MethodGet, "/v1/humans/by-slack/"+encoded, tok, nil, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked; expected rejection before tx")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "invalid_slack_user_id" {
+		t.Errorf("error = %q, want invalid_slack_user_id", env.Error)
+	}
+}
+
 // TestLookupHumanBySlackID_NoToken_401 — request without bearer token is
 // rejected by the auth wall before the handler runs.
 func TestLookupHumanBySlackID_NoToken_401(t *testing.T) {
@@ -456,6 +533,40 @@ func TestSetWatchkeeperLead_UnknownWatchkeeper_404(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSetWatchkeeperLead_OtherFKViolation_500 asserts that a 23503 from
+// an FK that is NOT `watchkeeper_lead_human_id_fkey` (e.g. a future
+// `organization_id` FK) does not silently surface as
+// `invalid_lead_human_id`. The handler pins the 400 reason to that
+// constraint name; any other 23503 falls through to the generic 500
+// path so the next FK migration cannot regress the reason mapping into
+// a misleading 400.
+func TestSetWatchkeeperLead_OtherFKViolation_500(t *testing.T) {
+	fkErr := &pgconn.PgError{
+		Code:           "23503",
+		ConstraintName: "watchkeeper_organization_id_fkey",
+		Message:        "insert or update on table \"watchkeeper\" violates foreign key constraint",
+	}
+	runner := &server.FakeScopedRunner{Tx: stageSetLeadTx(0, nil, nil, fkErr)}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/lead", tok,
+		map[string]any{"lead_human_id": humanFakeID}, "")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "set_watchkeeper_lead_failed" {
+		t.Errorf("error = %q, want set_watchkeeper_lead_failed (not invalid_lead_human_id)", env.Error)
 	}
 }
 

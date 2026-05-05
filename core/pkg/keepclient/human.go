@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -76,10 +77,14 @@ func (c *Client) InsertHuman(ctx context.Context, req InsertHumanRequest) (*Inse
 
 // LookupHumanBySlackID calls GET /v1/humans/by-slack/{slack_user_id}. A
 // missing row surfaces as [*ServerError] whose Unwrap matches
-// [ErrNotFound]. Empty slackUserID returns [ErrInvalidRequest]
-// synchronously without a network round-trip.
+// [ErrNotFound]. Empty or whitespace-only slackUserID returns
+// [ErrInvalidRequest] synchronously without a network round-trip — the
+// server's path-segment lookup would otherwise round-trip a value that
+// can never match a real Slack user ID, and the percent-encoded form
+// (e.g. `%20%20%20`) is structurally indistinguishable from a typo at
+// the call site.
 func (c *Client) LookupHumanBySlackID(ctx context.Context, slackUserID string) (*Human, error) {
-	if slackUserID == "" {
+	if strings.TrimSpace(slackUserID) == "" {
 		return nil, ErrInvalidRequest
 	}
 	var out Human
