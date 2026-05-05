@@ -51,6 +51,14 @@ var (
 	// the supplied method name is empty. The HTTP exchange is NOT
 	// attempted on this path. Matchable via [errors.Is].
 	ErrUnknownMethod = errors.New("slack: unknown method")
+
+	// ErrReconnectExhausted surfaces from the Socket Mode subscription
+	// when the bounded retry budget for transparent reconnects has
+	// been burned without recovering a working WSS connection. The
+	// wrapped chain carries the LAST observed error (transport drop,
+	// hello timeout, etc.). Callers awaiting [messenger.Subscription.Stop]
+	// receive this wrapped error; matchable via [errors.Is].
+	ErrReconnectExhausted = errors.New("slack: socket mode: reconnect budget exhausted")
 )
 
 // APIError carries the parsed envelope from a Slack response that

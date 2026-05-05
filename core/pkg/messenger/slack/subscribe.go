@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -30,6 +31,33 @@ const defaultHelloTimeout = 5 * time.Second
 // the same budget to the underlying ws write so a wedged write never
 // blocks the read loop indefinitely.
 const defaultAckTimeout = 3 * time.Second
+
+// Reconnect tuning defaults — mirror outbox/keepclient backoff-with-jitter
+// model. Production callers can override every value via the matching
+// [ClientOption]. The defaults assume Slack's documented Socket Mode
+// disconnect cadence (warning ~15s; refresh_requested every ~24h) and
+// give the client enough budget to ride a brief network blip without
+// surfacing the failure to the operator.
+const (
+	defaultReconnectInitialDelay = 100 * time.Millisecond
+	defaultReconnectMaxDelay     = 30 * time.Second
+	defaultMaxReconnectAttempts  = 5
+
+	// defaultPingInterval is the application-layer ping cadence. If no
+	// envelope is received within this interval the read loop emits a
+	// ping; if no pong arrives within [defaultPingTimeout] the loop
+	// triggers a reconnect. Slack's keepalive cadence is documented as
+	// 15-30s — 30s is the conservative choice.
+	defaultPingInterval = 30 * time.Second
+
+	// defaultPingTimeout is the per-ping pong deadline. A pong-timeout
+	// triggers a reconnect with backoff.
+	defaultPingTimeout = 10 * time.Second
+
+	// reconnectJitterFraction bounds the additive jitter applied to each
+	// backoff sleep at ±25% of the un-jittered delay.
+	reconnectJitterFraction = 0.25
+)
 
 // Sentinel errors specific to the Subscribe path.
 var (
@@ -89,8 +117,89 @@ func WithSocketModeDialer(d socketModeDialer) ClientOption {
 	}
 }
 
+// WithSocketModeReconnectInitialDelay overrides the first-attempt
+// backoff before the resilient reconnect loop dials a fresh WSS URL.
+// Defaults to 100ms. Non-positive values fall back to the default.
+func WithSocketModeReconnectInitialDelay(d time.Duration) ClientOption {
+	return func(c *clientConfig) {
+		if d > 0 {
+			c.socketReconnectInitialDelay = d
+		}
+	}
+}
+
+// WithSocketModeReconnectMaxDelay caps the per-attempt reconnect
+// backoff. Defaults to 30s. Non-positive values fall back to the
+// default. The cap is applied BEFORE jitter so the realised sleep can
+// briefly exceed maxDelay by up to ±25%.
+func WithSocketModeReconnectMaxDelay(d time.Duration) ClientOption {
+	return func(c *clientConfig) {
+		if d > 0 {
+			c.socketReconnectMaxDelay = d
+		}
+	}
+}
+
+// WithSocketModeMaxReconnectAttempts sets the maximum number of
+// CONSECUTIVE reconnect attempts the read loop performs before
+// surfacing [ErrReconnectExhausted] via [messenger.Subscription.Stop].
+// Defaults to 5. Non-positive values fall back to the default.
+func WithSocketModeMaxReconnectAttempts(n int) ClientOption {
+	return func(c *clientConfig) {
+		if n > 0 {
+			c.socketMaxReconnectAttempts = n
+		}
+	}
+}
+
+// WithSocketModePingInterval overrides the application-layer ping
+// cadence. The read loop sends a ping if no envelope (Slack-side or
+// our own pong receipt) has arrived within this interval. Defaults to
+// 30s. Non-positive values fall back to the default.
+func WithSocketModePingInterval(d time.Duration) ClientOption {
+	return func(c *clientConfig) {
+		if d > 0 {
+			c.socketPingInterval = d
+		}
+	}
+}
+
+// WithSocketModePingTimeout overrides the per-ping pong deadline. If
+// no pong arrives within this window after a ping is sent, the read
+// loop triggers a reconnect. Defaults to 10s. Non-positive values
+// fall back to the default.
+func WithSocketModePingTimeout(d time.Duration) ClientOption {
+	return func(c *clientConfig) {
+		if d > 0 {
+			c.socketPingTimeout = d
+		}
+	}
+}
+
+// withSocketModeSleeperOption is the unexported test seam that lets
+// the test suite inject a fake clock into the reconnect backoff loop
+// without exporting a public option.
+func withSocketModeSleeperOption(s sleeper) ClientOption {
+	return func(c *clientConfig) {
+		if s != nil {
+			c.socketSleeper = s
+		}
+	}
+}
+
+// withSocketModeRandOption is the unexported test seam that lets the
+// test suite substitute a deterministic jitter source into the
+// reconnect backoff loop.
+func withSocketModeRandOption(fn func() float64) ClientOption {
+	return func(c *clientConfig) {
+		if fn != nil {
+			c.socketRand = fn
+		}
+	}
+}
+
 // Subscribe opens a Slack Socket Mode connection and dispatches each
-// inbound message envelope to `handler`.
+// inbound message envelope to `handler` with transparent reconnect.
 //
 // Lifecycle:
 //
@@ -98,31 +207,38 @@ func WithSocketModeDialer(d socketModeDialer) ClientOption {
 //     [RateLimiter]) to obtain a one-shot WSS URL.
 //  2. Dial the WSS URL.
 //  3. Wait for the `hello` envelope (timeout via
-//     [WithSocketModeHelloTimeout]). On timeout or wrong-shape first
-//     frame, the connection is closed and the error returned.
+//     [WithSocketModeHelloTimeout]). On INITIAL hello-timeout or
+//     wrong-shape first frame the connection is closed and the
+//     error returned to the caller (subscription never came up). On
+//     hello-timeout during a RECONNECT the loop continues with the
+//     bounded retry budget.
 //  4. Spawn a goroutine that reads envelopes, ACKS each event-bearing
 //     envelope back to Slack BEFORE invoking the handler, then
 //     dispatches the decoded [messenger.IncomingMessage]
 //     synchronously (so [messenger.Subscription.Stop] blocks for the
 //     in-flight handler per the messenger contract).
-//  5. Return a [messenger.Subscription] handle whose Stop closes the
-//     connection cleanly and waits for the read goroutine to exit.
+//  5. On `disconnect` envelope, transport error, or pong-timeout the
+//     loop closes the current WSS, dials a fresh
+//     `apps.connections.open` URL with backoff-with-jitter, and
+//     resumes reading. The caller's [messenger.MessageHandler] keeps
+//     receiving events without observing the reconnect.
+//  6. After [WithSocketModeMaxReconnectAttempts] consecutive
+//     reconnect failures the read loop exits with the wrapped
+//     [ErrReconnectExhausted] surfaced via the next
+//     [messenger.Subscription.Stop] call.
 //
 // The handler returning a non-nil error is logged and discarded —
 // Phase 1 is at-most-once at the adapter layer per the
 // [messenger.MessageHandler] contract; durable redelivery is M3.7's
 // job further upstream.
 //
-// What this method does NOT do (deferred to M4.2.c.2):
+// Note: the handler is invoked with a context whose lifetime is the
+// [messenger.Subscription], NOT the Subscribe-call ctx. The handler
+// observes cancellation when [messenger.Subscription.Stop] is called;
+// cancelling the original Subscribe-call ctx after Subscribe has
+// returned has no effect on the handler.
 //
-//   - Reconnect on `disconnect` envelope or transport error. The c.1
-//     contract treats both as terminal: the read goroutine exits, the
-//     connection closes, [messenger.Subscription.Stop] returns nil.
-//   - Application-layer ping/pong heartbeat. The coder/websocket
-//     library handles control-frame echoes natively.
-//   - Exponential backoff or retry budget.
-//
-// Error mapping:
+// Error mapping (initial open):
 //
 //   - nil handler                   → [messenger.ErrInvalidHandler]
 //   - apps.connections.open `error` → [*APIError] (Code populated)
@@ -132,6 +248,10 @@ func WithSocketModeDialer(d socketModeDialer) ClientOption {
 //   - WSS dial / handshake failure  → wrapped error (no portable sentinel)
 //   - ctx cancellation              → wrapped [context.Canceled] /
 //     [context.DeadlineExceeded]
+//
+// Error mapping (reconnect-loop exhaustion, surfaced via Stop):
+//
+//   - [ErrReconnectExhausted] wrapping the last transport error.
 //
 // Concurrency: a single Subscribe call spawns ONE read goroutine
 // the returned subscription owns. Multiple Subscribe calls on the
@@ -145,6 +265,27 @@ func (c *Client) Subscribe(ctx context.Context, handler messenger.MessageHandler
 		return nil, err
 	}
 
+	// Initial open: synchronous open + dial + hello so the caller sees
+	// any auth/scope/wire failure before Subscribe returns. Reconnect
+	// failures (which only happen AFTER this initial open) surface
+	// via [messenger.Subscription.Stop].
+	conn, err := c.openSocketModeConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	sub := newSocketSubscription(c, conn)
+	//nolint:contextcheck // intentional: read loop runs on a Background-derived ctx the Stop() owns; the Subscribe ctx is consumed for the open + dial + hello, then handed off.
+	sub.run(handler)
+
+	return sub, nil
+}
+
+// openSocketModeConn drives one round of apps.connections.open + dial
+// + hello. Returned conn has already received its `hello` envelope and
+// is ready for the read loop. Caller owns the conn (closes on error or
+// when the read loop unwinds).
+func (c *Client) openSocketModeConn(ctx context.Context) (*websocket.Conn, error) {
 	// 1. apps.connections.open — rate-limited, token-resolved,
 	//    redacted via [Client.Do]. The response carries the
 	//    per-connection WSS URL.
@@ -156,7 +297,7 @@ func (c *Client) Subscribe(ctx context.Context, handler messenger.MessageHandler
 		return nil, fmt.Errorf("slack: %s: response missing url", appsConnectionsOpenMethod)
 	}
 
-	// 2. Dial the WSS URL. The dial uses the Subscribe ctx — a ctx
+	// 2. Dial the WSS URL. The dial uses the supplied ctx — a ctx
 	//    cancel mid-dial aborts the handshake.
 	conn, err := c.dialWebSocket(ctx, resp.URL)
 	if err != nil {
@@ -164,8 +305,7 @@ func (c *Client) Subscribe(ctx context.Context, handler messenger.MessageHandler
 	}
 
 	// 3. Wait for hello. On any failure, close the conn cleanly and
-	//    surface the error to the caller — the subscription never
-	//    came up.
+	//    surface the error to the caller — the round failed.
 	helloCtx, cancelHello := context.WithTimeout(ctx, c.socketHelloTimeout())
 	defer cancelHello()
 	if err := awaitHello(helloCtx, conn); err != nil {
@@ -173,14 +313,7 @@ func (c *Client) Subscribe(ctx context.Context, handler messenger.MessageHandler
 		return nil, err
 	}
 	c.cfg.logger.Log(ctx, "slack: socket mode: hello received", "url", redactWSURL(resp.URL))
-
-	// 4. Spawn the read loop. The subscription owns the goroutine
-	//    and the conn.
-	sub := newSocketSubscription(c, conn)
-	//nolint:contextcheck // intentional: read loop runs on a Background-derived ctx the Stop() owns; the Subscribe ctx is consumed for the open + dial + hello, then handed off.
-	sub.run(handler)
-
-	return sub, nil
+	return conn, nil
 }
 
 // dialWebSocket runs the configured [WithSocketModeDialer] hook (or
@@ -213,6 +346,69 @@ func (c *Client) socketHelloTimeout() time.Duration {
 	return defaultHelloTimeout
 }
 
+// socketReconnectInitialDelay returns the configured first-attempt
+// reconnect backoff, falling back to the package default when unset.
+func (c *Client) socketReconnectInitialDelay() time.Duration {
+	if c.cfg.socketReconnectInitialDelay > 0 {
+		return c.cfg.socketReconnectInitialDelay
+	}
+	return defaultReconnectInitialDelay
+}
+
+// socketReconnectMaxDelay returns the configured per-attempt cap for
+// reconnect backoff, falling back to the package default when unset.
+func (c *Client) socketReconnectMaxDelay() time.Duration {
+	if c.cfg.socketReconnectMaxDelay > 0 {
+		return c.cfg.socketReconnectMaxDelay
+	}
+	return defaultReconnectMaxDelay
+}
+
+// socketMaxReconnectAttempts returns the configured retry budget for
+// the reconnect loop, falling back to the package default when unset.
+func (c *Client) socketMaxReconnectAttempts() int {
+	if c.cfg.socketMaxReconnectAttempts > 0 {
+		return c.cfg.socketMaxReconnectAttempts
+	}
+	return defaultMaxReconnectAttempts
+}
+
+// socketPingInterval returns the configured ping cadence, falling
+// back to the package default when unset.
+func (c *Client) socketPingInterval() time.Duration {
+	if c.cfg.socketPingInterval > 0 {
+		return c.cfg.socketPingInterval
+	}
+	return defaultPingInterval
+}
+
+// socketPingTimeout returns the configured pong deadline, falling
+// back to the package default when unset.
+func (c *Client) socketPingTimeout() time.Duration {
+	if c.cfg.socketPingTimeout > 0 {
+		return c.cfg.socketPingTimeout
+	}
+	return defaultPingTimeout
+}
+
+// socketSleeper returns the configured sleeper (test seam) or the
+// production default that honours ctx cancellation.
+func (c *Client) socketSleeper() sleeper {
+	if c.cfg.socketSleeper != nil {
+		return c.cfg.socketSleeper
+	}
+	return realSleeper{}
+}
+
+// socketRand returns the configured jitter source (test seam) or the
+// production default ([math/rand/v2.Float64]).
+func (c *Client) socketRand() func() float64 {
+	if c.cfg.socketRand != nil {
+		return c.cfg.socketRand
+	}
+	return rand.Float64
+}
+
 // awaitHello reads a single envelope from `conn` and asserts the
 // `type` field equals "hello". A timeout from ctx surfaces as
 // [ErrHelloTimeout]; a wrong-shape first envelope surfaces as
@@ -236,10 +432,15 @@ func awaitHello(ctx context.Context, conn *websocket.Conn) error {
 }
 
 // socketSubscription is the [messenger.Subscription] returned by
-// [Client.Subscribe]. It owns one *websocket.Conn and one read
+// [Client.Subscribe]. It owns the CURRENT *websocket.Conn (mutated
+// across reconnects under [socketSubscription.connMu]) and one read
 // goroutine. Stop is idempotent and blocks until the goroutine exits.
 type socketSubscription struct {
 	client *Client
+
+	// connMu guards conn against concurrent read-loop reconnect and
+	// caller-driven Stop. Only the read goroutine writes conn.
+	connMu sync.Mutex
 	conn   *websocket.Conn
 
 	// runCtx is cancelled by Stop to break the read loop. The read
@@ -261,11 +462,6 @@ type socketSubscription struct {
 // runCtx is decoupled from the Subscribe-call ctx so a parent ctx
 // cancel does NOT race the user's Stop call (the read loop honours
 // the runCtx; Stop cancels it explicitly).
-//
-// (*socketSubscription).Stop via stopOnce — the linter does not see
-// the indirect store.
-//
-//nolint:gosec // G118: the cancel func is invoked deterministically in
 func newSocketSubscription(c *Client, conn *websocket.Conn) *socketSubscription {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &socketSubscription{
@@ -277,142 +473,45 @@ func newSocketSubscription(c *Client, conn *websocket.Conn) *socketSubscription 
 	}
 }
 
+// currentConn returns the active connection under lock. Returns nil
+// once Stop has cleared it.
+func (s *socketSubscription) currentConn() *websocket.Conn {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.conn
+}
+
+// swapConn replaces the active connection with newConn and returns
+// the previous (caller is responsible for closing it). Called from
+// the read goroutine on a successful reconnect.
+func (s *socketSubscription) swapConn(newConn *websocket.Conn) *websocket.Conn {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	old := s.conn
+	s.conn = newConn
+	return old
+}
+
 // run spawns the read goroutine. The goroutine reads envelopes one at
 // a time; per envelope it acks (when the type calls for it), decodes,
-// and dispatches to the handler synchronously. On any read error,
-// disconnect envelope, or runCtx cancellation, the goroutine closes
-// `done` and exits — Stop reads `done` to know when the goroutine has
-// observed the cancel.
+// and dispatches to the handler synchronously. On disconnect envelope,
+// transport error, or pong-timeout the loop reconnects with backoff.
+// On runCtx cancellation or exhausted retry budget the goroutine
+// closes `done` and exits — Stop reads `done` to know when the
+// goroutine has observed the cancel.
 func (s *socketSubscription) run(handler messenger.MessageHandler) {
-	go s.readLoop(handler)
-}
-
-// readLoop is the per-subscription event-pump. Single goroutine,
-// single shared *websocket.Conn — no concurrent reads. Acks are
-// written back on the same connection but always BEFORE the handler
-// dispatch so a slow handler cannot miss the 3s ack budget.
-func (s *socketSubscription) readLoop(handler messenger.MessageHandler) {
-	defer close(s.done)
-	for {
-		_, raw, err := s.conn.Read(s.runCtx)
-		if err != nil {
-			s.logReadError(err)
-			return
-		}
-		var env rawEnvelope
-		if jerr := json.Unmarshal(raw, &env); jerr != nil {
-			s.client.cfg.logger.Log(
-				s.runCtx, "slack: socket mode: decode envelope failed",
-				"err_type", fmt.Sprintf("%T", jerr),
-			)
-			continue
-		}
-		if env.Type == envelopeTypeDisconnect {
-			s.client.cfg.logger.Log(
-				s.runCtx, "slack: socket mode: disconnect requested",
-				"reason", env.Reason,
-			)
-			// c.1 contract: terminal close. M4.2.c.2 will route
-			// this back into a reconnect.
-			return
-		}
-		if env.EnvelopeID != "" {
-			s.ackEnvelope(env.EnvelopeID)
-		}
-		s.dispatch(env, handler)
-	}
-}
-
-// logReadError writes a structured log entry for a read-side failure.
-// Distinguishes ctx-cancellation (clean Stop) from network errors so
-// the operator can tell the two apart in production.
-func (s *socketSubscription) logReadError(err error) {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		s.client.cfg.logger.Log(
-			s.runCtx, "slack: socket mode: read loop stopped",
-			"reason", "context canceled",
-		)
-		return
-	}
-	// websocket.CloseError carries the close-frame status; expose
-	// the numeric code so operators can correlate with Slack's
-	// disconnect log without leaking the close-frame reason
-	// (which Slack documents as free-text and may carry PII).
-	var ce websocket.CloseError
-	if errors.As(err, &ce) {
-		s.client.cfg.logger.Log(
-			s.runCtx, "slack: socket mode: read loop stopped",
-			"reason", "ws close",
-			"code", int(ce.Code),
-		)
-		return
-	}
-	s.client.cfg.logger.Log(
-		s.runCtx, "slack: socket mode: read loop stopped",
-		"reason", "transport error",
-		"err_type", fmt.Sprintf("%T", err),
-	)
-}
-
-// ackEnvelope writes a `{"envelope_id": "..."}` text frame back to
-// Slack. Slack's contract: ack within 3s. The write uses a per-ack
-// timeout independent of runCtx so a stuck Slack write never blocks
-// the read loop forever.
-func (s *socketSubscription) ackEnvelope(envelopeID string) {
-	body, err := json.Marshal(ackPayload{EnvelopeID: envelopeID})
-	if err != nil {
-		// Marshalling a single-string struct cannot fail in
-		// practice; defensive log + continue.
-		s.client.cfg.logger.Log(
-			s.runCtx, "slack: socket mode: marshal ack failed",
-			"err_type", fmt.Sprintf("%T", err),
-		)
-		return
-	}
-	ackCtx, cancel := context.WithTimeout(s.runCtx, defaultAckTimeout)
-	defer cancel()
-	if werr := s.conn.Write(ackCtx, websocket.MessageText, body); werr != nil {
-		s.client.cfg.logger.Log(
-			s.runCtx, "slack: socket mode: ack write failed",
-			"err_type", fmt.Sprintf("%T", werr),
-		)
-		return
-	}
-	s.client.cfg.logger.Log(
-		s.runCtx, "slack: socket mode: ack sent",
-		"type", "events_api",
-	)
-}
-
-// dispatch decodes a non-hello, non-disconnect envelope and calls the
-// handler when the envelope contains a Slack `message` event. Other
-// payload kinds (slash_commands, interactive, non-message events) are
-// dropped — M4.2.c.1 wires the message-shaped path only.
-//
-// Handler errors are logged but not redelivered (per the
-// [messenger.MessageHandler] contract).
-func (s *socketSubscription) dispatch(env rawEnvelope, handler messenger.MessageHandler) {
-	msg, ok := decodeIncoming(env)
-	if !ok {
-		s.client.cfg.logger.Log(
-			s.runCtx, "slack: socket mode: envelope dropped",
-			"type", env.Type,
-		)
-		return
-	}
-	if err := handler(s.runCtx, msg); err != nil {
-		s.client.cfg.logger.Log(
-			s.runCtx, "slack: socket mode: handler error",
-			"err_type", fmt.Sprintf("%T", err),
-		)
-	}
+	go s.sessionLoop(handler)
 }
 
 // Stop satisfies [messenger.Subscription]. Cancels the read loop,
 // closes the WebSocket with a normal-closure status, and blocks until
 // the read goroutine exits (so an in-flight handler completes before
-// Stop returns). Idempotent — subsequent calls return the same nil
+// Stop returns). Idempotent — subsequent calls return the same value
 // without reissuing the close-frame.
+//
+// Returns nil for a clean stop (caller-initiated, ctx cancellation).
+// Returns [ErrReconnectExhausted] (wrapped) if the read goroutine
+// exited because the bounded reconnect retry budget was burned.
 func (s *socketSubscription) Stop() error {
 	s.stopOnce.Do(func() {
 		// Cancelling first unblocks any pending conn.Read so the
@@ -422,12 +521,12 @@ func (s *socketSubscription) Stop() error {
 		// websocket.Close sends a close frame and waits for the
 		// peer's close response (with a short internal deadline);
 		// errors here are non-fatal — the conn is being torn down
-		// regardless.
-		if err := s.conn.Close(websocket.StatusNormalClosure, "subscription stop"); err != nil {
-			// Only surface the error when the read loop did NOT
-			// already report a cleaner close — for the c.1
-			// contract a normal Stop returns nil.
-			s.stopErr = nil
+		// regardless. Close errors are intentionally swallowed: the
+		// documented contract is "Stop returns nil on a clean stop"
+		// and "the wrapped reconnect-exhaustion error otherwise" —
+		// a close-frame write race never overrides either.
+		if conn := s.currentConn(); conn != nil {
+			_ = conn.Close(websocket.StatusNormalClosure, "subscription stop")
 		}
 		<-s.done
 	})
