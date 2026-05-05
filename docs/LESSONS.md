@@ -1477,3 +1477,29 @@ but trips up reviewers and integrators. Apply when the next streaming consumer a
 - Docs: `docs/ROADMAP-phase1.md` §M5.2.
 
 ---
+
+## 2026-05-04 — M5.3.a: JSON-RPC notification semantics — id-omitted is NOT id=null
+
+**PR**: [#56](https://github.com/vadimtrunov/watchkeepers/pull/56)
+**Merged**: 2026-05-04
+
+### Pattern
+
+When implementing a JSON-RPC server, distinguish three id states correctly:
+(1) id present + non-null → request, server MUST reply with matching id;
+(2) id present + null → request with null id, server MUST reply with id=null
+(also valid for unparseable-JSON responses per §5.1);
+(3) id ABSENT → notification, server MUST NOT reply at all (even on unknown
+method or handler error). The common mistake is treating cases (2) and (3) as
+the same — they're not. Cases (2) and (3) require different parser branches and
+different handler-loop dispositions. Test discipline: pin all four notification
+cases (known method, unknown method, handler throws, malformed JSON) with
+captured-stdout assertions to lock the contract. Apply when implementing any
+RPC framing where the spec distinguishes request from notification.
+
+### References
+
+- Files: `harness/src/jsonrpc.ts`, `harness/src/dispatcher.ts`, `harness/test/jsonrpc.test.ts`, `harness/test/dispatcher.test.ts`
+- Docs: `docs/ROADMAP-phase1.md` §M5.3.a.
+
+---

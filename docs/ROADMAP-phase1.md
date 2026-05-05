@@ -299,10 +299,10 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [x] **M5.1** `AgentRuntime` Go interface: `Start`, `SendMessage`, `InvokeTool`, `Terminate`, plus streaming event hook.
 - [x] **M5.2** `LLMProvider` interface (separate from `AgentRuntime`): `Complete`, `Stream`, `CountTokens`, `ReportCost`. Default implementation wraps Claude Code (via Claude Agent SDK if embedding, or as a subprocess if shelling out). _Interface ships in `core/pkg/llm/` (M5.2.a); the Claude Code default impl is deferred to a follow-up M5.2.b._
 - [ ] **M5.3** TS harness process:
-  - Claude Code integration via the `LLMProvider` wrapper — model, system prompt, and context parameterized from Manifest.
-  - JSON-RPC over stdio with Go core (request/response + streaming notifications).
-  - Tool invocation path: request → capability check → execute in `isolated-vm` (pure-JS tools) OR in a worker process (I/O-capable tools with declared capabilities) → return result.
-  - Tool schemas defined with `zod`, auto-derived from Tool Manifest.
+  - [x] **M5.3.a** Process scaffold + JSON-RPC stdio framing + hello/shutdown methods (`harness/` package; pnpm-workspace integrated; 39 vitest tests; framing per JSON-RPC 2.0 §4 incl. correct notification handling).
+  - [ ] **M5.3.b** Tool invocation path via `isolated-vm` (pure-JS) and worker process (I/O tools with declared capabilities).
+  - [ ] **M5.3.c** Tool schemas defined with `zod`, auto-derived from Tool Manifest.
+  - [ ] **M5.3.d** Claude Code integration via the `LLMProvider` wrapper — model, system prompt, context parameterized from Manifest.
 - [ ] **M5.4** Per-tool resource limits: wall-clock, CPU time, memory ceiling, output-byte cap; enforced by Go core via process controls and isolate options.
 - [ ] **M5.5** Manifest loader: harness calls `keepclient.GetManifest(agent_id)` on boot; Manifest fields include `system_prompt`, `personality`, `language`, toolset ACLs, model, autonomy. `personality` and `language` are composed into the effective system prompt via a templater.
 - [ ] **M5.6** **Notebook linked into harness**: harness opens its per-agent SQLite file on boot; auto-recall top-K relevant entries each turn and injects them into the prompt (configurable K, relevance threshold). `Remember` is available as a built-in tool the agent can call explicitly.
