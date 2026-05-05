@@ -34,14 +34,23 @@ Phase map step 7).
 - `/rdd` — interactive: list available sub-items, operator picks one.
 - `/rdd <id>` — e.g. `/rdd M3` or `/rdd M1.9` — skip the selection prompt.
 - `/rdd resume` — continue the most recent in-progress `TASK-*.md`.
-- `/rdd --auto [<id>|resume]` — autonomous mode for `/loop`-driven runs.
-  Auto-decides Gates 1/2/3 deterministically per `references/gates.md`
-  §"Auto mode". Halts (no side effects) on any condition the auto rules
-  cannot resolve unambiguously: planner verdict missing, bounded-loop
-  escalation, ambiguous candidate selection, CI-not-green at Gate 3, or
-  any preflight failure. The operator-facing gate prompts are still
-  emitted to the transcript for audit, immediately followed by the
-  auto-decision and its justification.
+- `/rdd --auto [<id>|resume]` — autonomous self-looping mode. **Run
+  directly; do NOT wrap with `/loop`.** `/loop` is for cron-style
+  recurring tasks and forces a 60-second-minimum sleep between
+  firings, which is pure overhead here. `--auto` instead runs Phase 1
+  through Phase 7 back-to-back inside a single orchestrator turn,
+  then immediately re-enters Phase 1 with the next ROADMAP candidate.
+  Auto-decides Gates 1/2/3 deterministically per
+  `references/gates.md` §"Auto mode". Phase 6 CI polling uses an
+  inline bash loop (`sleep 30 && gh pr checks`) rather than
+  ScheduleWakeup — no external scheduler is involved. Halts (no side
+  effects) on any condition the auto rules cannot resolve
+  unambiguously: planner verdict missing, bounded-loop escalation,
+  ambiguous candidate selection, CI-not-green-after-timeout at Gate
+  3, preflight failure, or empty candidate list (ROADMAP complete).
+  The operator-facing gate prompts are still emitted to the
+  transcript for audit, immediately followed by the auto-decision
+  and its justification.
 
 ## Phase map (hard sequence)
 

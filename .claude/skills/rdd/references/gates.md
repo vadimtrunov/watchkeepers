@@ -94,6 +94,20 @@ the operator. Each gate has exactly one auto-`yes` rule; everything
 else halts without side effects, mirroring the conservative posture of
 interactive halting.
 
+### Loop continuity
+
+`--auto` runs Phase 1 → Phase 7 back-to-back inside a single
+orchestrator turn and re-enters Phase 1 with the next ROADMAP
+candidate as soon as Phase 7c (`TASK-*.md` deletion) completes. **No
+ScheduleWakeup, no `/loop` wrapping, no inter-iteration sleep** — those
+add 60-second-minimum delays that are pure overhead. The only place
+the orchestrator is allowed to wait is Phase 6's CI poll, and that
+uses an inline bash loop (`while ! gh pr checks --watch …; do …;
+done`, or equivalent), not ScheduleWakeup. The orchestrator stops
+when the auto-rules cannot resolve a gate (halt — see per-gate rules
+below) or when the ROADMAP candidate list is empty (success —
+print "ROADMAP complete" and exit).
+
 ### Gate 1 auto-decision
 
 - **Auto-`yes`** when the planner verdict is `fits one PR` AND exactly
