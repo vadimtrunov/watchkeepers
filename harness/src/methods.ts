@@ -7,11 +7,13 @@
  * raise {@link MethodError} when they want to control the wire-level
  * error code (e.g. InvalidParams from a future zod-validating handler).
  *
- * M5.3.a registers only `hello` and `shutdown`. Tool invocation,
- * Claude Code passthrough, and zod-derived tool schemas land in
- * M5.3.b/c/d as separate sub-tasks.
+ * M5.3.a registered `hello` and `shutdown`. M5.3.b.a adds the pure-JS
+ * sandbox path via `invokeTool` (see `invokeTool.ts`). The remaining
+ * Claude Code passthrough and zod-derived tool schemas land in
+ * M5.3.b.b/c/d as separate sub-tasks.
  */
 
+import { invokeToolHandler } from "./invokeTool.js";
 import {
   JsonRpcErrorCode,
   type JsonRpcErrorCodeValue,
@@ -86,6 +88,8 @@ export function createDefaultRegistry(signal: ShutdownSignal): MethodRegistry {
     signal.shouldExit = true;
     return { accepted: true } satisfies ShutdownResult;
   });
+
+  registry.set("invokeTool", invokeToolHandler);
 
   return registry;
 }
