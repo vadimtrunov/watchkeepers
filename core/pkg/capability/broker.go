@@ -103,9 +103,18 @@ func WithReaperInterval(d time.Duration) Option {
 // entry is the per-token record stored in the broker map. Held by
 // pointer so the reaper can update fields under the broker's write
 // lock without copying.
+//
+// `organizationID` is populated by [Broker.IssueForOrg] (M3.5.a) and
+// left empty by the legacy [Broker.Issue] path. The validate side
+// reads it via [Broker.ValidateForOrg] to enforce per-tenant pinning;
+// the legacy [Broker.Validate] does not look at it, so a token issued
+// without an org still passes scope-only validation. Storing the
+// field as a plain string (not a sentinel) keeps the legacy serialised
+// shape of the entry struct unchanged for callers that snapshot it.
 type entry struct {
-	scope  string
-	expiry time.Time
+	scope          string
+	organizationID string
+	expiry         time.Time
 }
 
 // Broker mints, validates, and revokes opaque scoped capability
@@ -276,6 +285,164 @@ func (b *Broker) Validate(ctx context.Context, token, scope string) error {
 	b.log(
 		ctx, "capability: validated",
 		"scope", scope,
+		"token_prefix", tokenPrefix(token),
+	)
+	return nil
+}
+
+// IssueForOrg mints a fresh capability token bound to `scope`,
+// `organizationID`, and an expiry of `clock() + ttl`. It is the
+// per-tenant sibling of [Broker.Issue] introduced for M3.5.a so keep
+// handlers can pin authorization to the verified tenant carried on
+// `auth.Claim.OrganizationID` rather than to a request-body input.
+//
+// Validation order (synchronous, no map mutation on failure):
+//
+//  1. `scope == ""` → [ErrInvalidScope].
+//  2. `organizationID == ""` → [ErrInvalidOrganization].
+//  3. `ttl <= 0` → [ErrInvalidTTL].
+//  4. broker [Broker.Close]d → [ErrClosed].
+//  5. CSPRNG read failure → wrapped error (extremely rare).
+//
+// On success the broker logs `"capability: issued"` with `scope`,
+// `organization_id`, `token_prefix` (first 8 chars), and `expiry`
+// (RFC3339). The full token NEVER appears in any log entry — see the
+// redaction-discipline contract in the package godoc. The
+// `organization_id` is logged in full (it is a tenant identifier, not
+// a secret).
+//
+// Tokens minted here are validated via [Broker.ValidateForOrg]; calling
+// the legacy [Broker.Validate] on them succeeds when the scope matches
+// (the legacy validator simply does not inspect the org dimension).
+func (b *Broker) IssueForOrg(scope, organizationID string, ttl time.Duration) (string, error) {
+	if scope == "" {
+		return "", ErrInvalidScope
+	}
+	if organizationID == "" {
+		return "", ErrInvalidOrganization
+	}
+	if ttl <= 0 {
+		return "", ErrInvalidTTL
+	}
+	if b.closed.Load() {
+		return "", ErrClosed
+	}
+
+	token, err := newToken()
+	if err != nil {
+		return "", fmt.Errorf("capability: generate token: %w", err)
+	}
+	expiry := b.clock().Add(ttl)
+
+	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
+		return "", ErrClosed
+	}
+	b.tokens[token] = &entry{scope: scope, organizationID: organizationID, expiry: expiry}
+	b.mu.Unlock()
+
+	b.log(
+		context.Background(), "capability: issued",
+		"scope", scope,
+		"organization_id", organizationID,
+		"token_prefix", tokenPrefix(token),
+		"expiry", expiry.UTC().Format(time.RFC3339Nano),
+	)
+	return token, nil
+}
+
+// ValidateForOrg looks up `token` and decides admit / deny under the
+// per-tenant pinning contract. It is the M3.5.a sibling of
+// [Broker.Validate]: a token minted for tenant A must NEVER validate
+// for tenant B even when the scope matches. Returns nil on full match;
+// otherwise one of [ErrInvalidToken] / [ErrTokenExpired] /
+// [ErrScopeMismatch] / [ErrOrganizationMismatch] / [ErrClosed] /
+// `ctx.Err()`.
+//
+// Validation order:
+//
+//  1. `ctx.Err() != nil` → ctx.Err() (pre-check; no map read).
+//  2. broker [Broker.Close]d → [ErrClosed].
+//  3. token not in map → [ErrInvalidToken].
+//  4. `clock() >= entry.expiry` (boundary inclusive) → delete entry,
+//     return [ErrTokenExpired].
+//  5. `entry.scope != scope` → [ErrScopeMismatch].
+//  6. `entry.organizationID != organizationID` →
+//     [ErrOrganizationMismatch]. The token is left in the map so a
+//     follow-up validate for the right tenant still succeeds.
+//  7. otherwise → nil.
+//
+// A legacy token minted via [Broker.Issue] (no organizationID) will
+// fail step 6 with [ErrOrganizationMismatch] because its stored
+// organizationID is empty and an empty argument is rejected up-front
+// by [Broker.IssueForOrg]. The empty-vs-empty case is impossible to
+// reach legitimately, so callers reaching ValidateForOrg with an empty
+// `organizationID` argument get [ErrInvalidOrganization] before any
+// map work runs.
+func (b *Broker) ValidateForOrg(ctx context.Context, token, scope, organizationID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if organizationID == "" {
+		return ErrInvalidOrganization
+	}
+	if b.closed.Load() {
+		return ErrClosed
+	}
+
+	b.mu.RLock()
+	e, ok := b.tokens[token]
+	if !ok {
+		b.mu.RUnlock()
+		return ErrInvalidToken
+	}
+	expired := !b.clock().Before(e.expiry)
+	entryScope := e.scope
+	entryOrg := e.organizationID
+	b.mu.RUnlock()
+
+	if expired {
+		b.mu.Lock()
+		// Re-check under the write lock; concurrent Revoke / reaper may
+		// have removed the entry already, in which case skip the delete.
+		if cur, stillThere := b.tokens[token]; stillThere && !b.clock().Before(cur.expiry) {
+			delete(b.tokens, token)
+		}
+		b.mu.Unlock()
+		b.log(
+			ctx, "capability: expired",
+			"scope", entryScope,
+			"organization_id", entryOrg,
+			"token_prefix", tokenPrefix(token),
+		)
+		return ErrTokenExpired
+	}
+
+	if entryScope != scope {
+		b.log(
+			ctx, "capability: scope_mismatch",
+			"expected_scope", scope,
+			"organization_id", entryOrg,
+			"token_prefix", tokenPrefix(token),
+		)
+		return ErrScopeMismatch
+	}
+
+	if entryOrg != organizationID {
+		b.log(
+			ctx, "capability: organization_mismatch",
+			"scope", scope,
+			"expected_organization_id", organizationID,
+			"token_prefix", tokenPrefix(token),
+		)
+		return ErrOrganizationMismatch
+	}
+
+	b.log(
+		ctx, "capability: validated",
+		"scope", scope,
+		"organization_id", organizationID,
 		"token_prefix", tokenPrefix(token),
 	)
 	return nil

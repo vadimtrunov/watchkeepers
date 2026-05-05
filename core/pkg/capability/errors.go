@@ -42,3 +42,20 @@ var ErrTokenExpired = errors.New("capability: token expired")
 // input token bytes — see the redaction-discipline contract in the
 // package godoc. Matchable via [errors.Is].
 var ErrScopeMismatch = errors.New("capability: scope mismatch")
+
+// ErrInvalidOrganization is returned synchronously by
+// [Broker.IssueForOrg] when the supplied `organizationID` is the empty
+// string. An empty organizationID would defeat the per-tenant pinning
+// that IssueForOrg exists to provide; rejected up-front so the broker
+// map is never populated with such an entry. Matchable via [errors.Is].
+var ErrInvalidOrganization = errors.New("capability: invalid organization")
+
+// ErrOrganizationMismatch is returned by [Broker.ValidateForOrg] when
+// the supplied token is present, unexpired, and scope-matched but its
+// registered organizationID does not equal the `organizationID`
+// argument. Per-tenant pinning is the M3.5.a contract: a token minted
+// for tenant A must NEVER validate for tenant B even if the scope
+// matches. The error message never contains the input token bytes —
+// see the redaction-discipline contract in the package godoc.
+// Matchable via [errors.Is].
+var ErrOrganizationMismatch = errors.New("capability: organization mismatch")

@@ -56,8 +56,8 @@ var (
 // Claim is the verified capability payload the middleware hands downstream.
 // Fields map 1:1 onto the JWT payload, with JSON tags matching the RFC 7519
 // standard names where relevant (`sub`, `iss`, `exp`, `iat`) plus our
-// custom `scope`. The struct is value-typed and safe to pass by value; it
-// never carries the raw token.
+// custom `scope` and `org_id`. The struct is value-typed and safe to pass
+// by value; it never carries the raw token.
 type Claim struct {
 	// Subject is the stable identifier of the token bearer (e.g. a
 	// watchkeeper UUID or a human user id). Maps to JWT `sub`.
@@ -65,6 +65,15 @@ type Claim struct {
 	// Scope derives the DB role and the watchkeeper.scope GUC. Must be
 	// "org", "user:<uuid>", or "agent:<uuid>".
 	Scope string `json:"scope"`
+	// OrganizationID is the tenant the bearer is authorised to act on
+	// behalf of. Maps to the JWT `org_id` claim. Empty when the
+	// originating mint path predates M3.5.a (legacy tokens). Per-tenant
+	// authorization in keep handlers reads this field to pin
+	// `organization_id` from the verified claim rather than trusting
+	// request-body input — see ROADMAP-phase1 §M3.5.a. Phase 1 verifier
+	// accepts an empty value to keep rolling deploys safe; M3.5.a.2
+	// will tighten the handler-side enforcement.
+	OrganizationID string `json:"org_id,omitempty"`
 	// Issuer is the minting authority. Verified against the configured
 	// issuer string. Maps to JWT `iss`.
 	Issuer string `json:"iss"`
@@ -125,12 +134,23 @@ type header struct {
 // payload mirrors the on-wire JSON for a token body. `exp` and `iat` are
 // Unix seconds (RFC 7519 NumericDate) rather than Go time.Time so rounding
 // is predictable and interop with non-Go signers stays trivial.
+//
+// `org_id` carries the tenant identifier introduced in M3.5.a. The
+// `omitempty` tag keeps legacy tokens (minted before this field existed)
+// byte-compatible with the pre-M3.5.a wire shape: an empty
+// OrganizationID round-trips with no `org_id` key emitted, so a verifier
+// running the M3.5.a code can still read tokens whose mint path never
+// supplied the field. Decoding is symmetric — JSON unmarshal of a
+// payload missing `org_id` leaves the field at the Go zero value ("")
+// without erroring, matching the rolling-deploy contract documented in
+// ROADMAP-phase1 §M3.5.a.
 type payload struct {
-	Subject   string `json:"sub"`
-	Scope     string `json:"scope"`
-	Issuer    string `json:"iss"`
-	ExpiresAt int64  `json:"exp"`
-	IssuedAt  int64  `json:"iat"`
+	Subject        string `json:"sub"`
+	Scope          string `json:"scope"`
+	OrganizationID string `json:"org_id,omitempty"`
+	Issuer         string `json:"iss"`
+	ExpiresAt      int64  `json:"exp"`
+	IssuedAt       int64  `json:"iat"`
 }
 
 // Verify implements Verifier. The body is split into three base64url
@@ -190,11 +210,12 @@ func (v *hmacVerifier) Verify(_ context.Context, token string) (Claim, error) {
 	}
 
 	return Claim{
-		Subject:   p.Subject,
-		Scope:     p.Scope,
-		Issuer:    p.Issuer,
-		ExpiresAt: exp,
-		IssuedAt:  time.Unix(p.IssuedAt, 0).UTC(),
+		Subject:        p.Subject,
+		Scope:          p.Scope,
+		OrganizationID: p.OrganizationID,
+		Issuer:         p.Issuer,
+		ExpiresAt:      exp,
+		IssuedAt:       time.Unix(p.IssuedAt, 0).UTC(),
 	}, nil
 }
 
@@ -231,4 +252,12 @@ func encodeSegment(v any) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// encodeSegmentRaw base64url-encodes already-marshalled JSON bytes.
+// Test-only callers (MintLegacyTokenForTest) use this when they have
+// pre-marshalled bytes whose key set must stay byte-stable across
+// refactors of the prod payload struct.
+func encodeSegmentRaw(raw []byte) string {
+	return base64.RawURLEncoding.EncodeToString(raw)
 }

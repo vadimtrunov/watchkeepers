@@ -593,6 +593,261 @@ func TestBroker_TokenNotInErrorMessages(t *testing.T) {
 }
 
 // =====================================================================
+// Per-tenant (M3.5.a)
+// =====================================================================
+
+// TestBroker_IssueForOrg_ValidateForOrg_RoundTrip — happy path: a token
+// minted for (scope, organizationID) validates back with the same pair.
+func TestBroker_IssueForOrg_ValidateForOrg_RoundTrip(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock()
+	b := New(WithClock(clk.Now))
+	t.Cleanup(func() { _ = b.Close() })
+
+	const org = "11111111-1111-1111-1111-111111111111"
+	tok, err := b.IssueForOrg("keep:write", org, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueForOrg: %v", err)
+	}
+	if err := b.ValidateForOrg(context.Background(), tok, "keep:write", org); err != nil {
+		t.Fatalf("ValidateForOrg: %v, want nil", err)
+	}
+}
+
+// TestBroker_IssueForOrg_EmptyOrg_ErrInvalidOrganization — synchronous
+// rejection; no map mutation. Mirrors the empty-scope/empty-ttl guards.
+func TestBroker_IssueForOrg_EmptyOrg_ErrInvalidOrganization(t *testing.T) {
+	t.Parallel()
+	b := New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	_, err := b.IssueForOrg("keep:write", "", time.Hour)
+	if !errors.Is(err, ErrInvalidOrganization) {
+		t.Fatalf("IssueForOrg empty org err = %v, want errors.Is ErrInvalidOrganization", err)
+	}
+	if got := tokenCount(b); got != 0 {
+		t.Fatalf("tokenCount after rejected IssueForOrg = %d, want 0", got)
+	}
+}
+
+// TestBroker_ValidateForOrg_RejectsCrossTenant — the load-bearing
+// security claim of M3.5.a: a token minted for tenant A MUST NOT
+// validate when presented for tenant B even though the scope matches.
+// The token is left in the map so a follow-up validate for the right
+// tenant still succeeds (test asserts both halves).
+func TestBroker_ValidateForOrg_RejectsCrossTenant(t *testing.T) {
+	t.Parallel()
+	b := New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	const orgA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const orgB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+	tok, err := b.IssueForOrg("keep:write", orgA, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueForOrg: %v", err)
+	}
+
+	// Cross-tenant: minted for A, presented as B → rejected.
+	err = b.ValidateForOrg(context.Background(), tok, "keep:write", orgB)
+	if !errors.Is(err, ErrOrganizationMismatch) {
+		t.Fatalf("cross-tenant Validate err = %v, want errors.Is ErrOrganizationMismatch", err)
+	}
+
+	// Same-tenant validation still succeeds — the rejection MUST NOT
+	// have evicted the entry as a side effect.
+	if err := b.ValidateForOrg(context.Background(), tok, "keep:write", orgA); err != nil {
+		t.Fatalf("same-tenant Validate after cross-tenant reject: %v, want nil", err)
+	}
+}
+
+// TestBroker_ValidateForOrg_ScopeMismatchTakesPrecedence — when both
+// scope AND organization disagree, the broker reports ErrScopeMismatch
+// (per the validation order in the godoc). Pinning this lets future
+// callers reason about error precedence without re-reading the broker.
+func TestBroker_ValidateForOrg_ScopeMismatchTakesPrecedence(t *testing.T) {
+	t.Parallel()
+	b := New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	const orgA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const orgB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+	tok, err := b.IssueForOrg("keep:write", orgA, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueForOrg: %v", err)
+	}
+	err = b.ValidateForOrg(context.Background(), tok, "keep:read", orgB)
+	if !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("err = %v, want errors.Is ErrScopeMismatch (precedence)", err)
+	}
+}
+
+// TestBroker_ValidateForOrg_LegacyTokenRejected — a token minted via
+// the legacy [Broker.Issue] path has an empty organizationID stored.
+// Calling [Broker.ValidateForOrg] against any non-empty organizationID
+// MUST reject with ErrOrganizationMismatch — the per-tenant pinning is
+// the contract IssueForOrg exists to enforce, so legacy tokens must
+// not silently pass an org check.
+func TestBroker_ValidateForOrg_LegacyTokenRejected(t *testing.T) {
+	t.Parallel()
+	b := New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	tok, err := b.Issue("keep:write", time.Hour)
+	if err != nil {
+		t.Fatalf("legacy Issue: %v", err)
+	}
+	err = b.ValidateForOrg(context.Background(), tok, "keep:write",
+		"11111111-1111-1111-1111-111111111111")
+	if !errors.Is(err, ErrOrganizationMismatch) {
+		t.Fatalf("legacy token vs ValidateForOrg err = %v, want ErrOrganizationMismatch", err)
+	}
+
+	// Legacy validate path on a legacy token still works — backward
+	// compat is the load-bearing claim.
+	if err := b.Validate(context.Background(), tok, "keep:write"); err != nil {
+		t.Fatalf("legacy Validate of legacy token: %v, want nil", err)
+	}
+}
+
+// TestBroker_ValidateForOrg_NewTokenLegacyValidate — a token minted via
+// [Broker.IssueForOrg] still passes the legacy [Broker.Validate] when
+// scope matches. Backward compat in the OTHER direction: callers that
+// haven't adopted ValidateForOrg keep working against tokens minted by
+// callers that have.
+func TestBroker_ValidateForOrg_NewTokenLegacyValidate(t *testing.T) {
+	t.Parallel()
+	b := New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	const org = "11111111-1111-1111-1111-111111111111"
+	tok, err := b.IssueForOrg("keep:write", org, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueForOrg: %v", err)
+	}
+	if err := b.Validate(context.Background(), tok, "keep:write"); err != nil {
+		t.Fatalf("legacy Validate of new-shape token: %v, want nil", err)
+	}
+}
+
+// TestBroker_ValidateForOrg_EmptyOrgRejected — passing an empty
+// organizationID into ValidateForOrg is always a programmer error
+// (empty wouldn't match any IssueForOrg-minted entry; matching against
+// a legacy token would silently pass without per-tenant pinning).
+// Reject up-front with ErrInvalidOrganization.
+func TestBroker_ValidateForOrg_EmptyOrgRejected(t *testing.T) {
+	t.Parallel()
+	b := New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	tok, err := b.Issue("keep:write", time.Hour)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	err = b.ValidateForOrg(context.Background(), tok, "keep:write", "")
+	if !errors.Is(err, ErrInvalidOrganization) {
+		t.Fatalf("err = %v, want errors.Is ErrInvalidOrganization", err)
+	}
+}
+
+// TestBroker_ValidateForOrg_ExpiredEvicts — expiry semantics carry
+// over from the legacy validator: a token whose expiry has passed is
+// pruned from the map and the next call returns ErrInvalidToken.
+func TestBroker_ValidateForOrg_ExpiredEvicts(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock()
+	b := New(WithClock(clk.Now))
+	t.Cleanup(func() { _ = b.Close() })
+
+	const org = "11111111-1111-1111-1111-111111111111"
+	tok, err := b.IssueForOrg("keep:write", org, time.Minute)
+	if err != nil {
+		t.Fatalf("IssueForOrg: %v", err)
+	}
+	clk.Advance(2 * time.Minute)
+
+	err = b.ValidateForOrg(context.Background(), tok, "keep:write", org)
+	if !errors.Is(err, ErrTokenExpired) {
+		t.Fatalf("expired ValidateForOrg err = %v, want ErrTokenExpired", err)
+	}
+	if got := tokenCount(b); got != 0 {
+		t.Fatalf("tokenCount after expired ValidateForOrg = %d, want 0", got)
+	}
+	// Subsequent call sees the entry already pruned.
+	err = b.ValidateForOrg(context.Background(), tok, "keep:write", org)
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("post-prune ValidateForOrg err = %v, want ErrInvalidToken", err)
+	}
+}
+
+// TestBroker_IssueForOrg_LoggerNeverSeesFullToken — redaction
+// discipline applies to the new path too: log entries from issue +
+// validate (success / cross-tenant / scope mismatch) MUST NOT carry
+// the full token; only the 8-char prefix is allowed.
+func TestBroker_IssueForOrg_LoggerNeverSeesFullToken(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock()
+	logger := &recordingLogger{}
+	b := New(WithClock(clk.Now), WithLogger(logger))
+	t.Cleanup(func() { _ = b.Close() })
+
+	const orgA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const orgB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+	tok, err := b.IssueForOrg("keep:write", orgA, time.Minute)
+	if err != nil {
+		t.Fatalf("IssueForOrg: %v", err)
+	}
+	if err := b.ValidateForOrg(context.Background(), tok, "keep:write", orgA); err != nil {
+		t.Fatalf("ValidateForOrg success: %v", err)
+	}
+	if err := b.ValidateForOrg(context.Background(), tok, "keep:write", orgB); !errors.Is(err, ErrOrganizationMismatch) {
+		t.Fatalf("cross-tenant ValidateForOrg err = %v", err)
+	}
+	if err := b.ValidateForOrg(context.Background(), tok, "keep:read", orgA); !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("scope-mismatch ValidateForOrg err = %v", err)
+	}
+
+	entries := logger.allEntries()
+	if containsString(entries, tok) {
+		t.Fatalf("FULL token appeared in log entries; redaction discipline broken")
+	}
+	if !containsString(entries, tok[:tokenPrefixLen]) {
+		t.Fatalf("token prefix missing from log entries; logger may not be wired")
+	}
+	// Sanity: the org_id appears in at least one entry — pinning the
+	// log shape so a future refactor can't silently drop it.
+	if !containsString(entries, orgA) {
+		t.Fatalf("organization_id %q missing from log entries", orgA)
+	}
+}
+
+// TestBroker_ValidateForOrg_TokenNotInErrorMessages — error message
+// hygiene applies to ErrOrganizationMismatch too: the input token
+// bytes MUST NOT appear in err.Error().
+func TestBroker_ValidateForOrg_TokenNotInErrorMessages(t *testing.T) {
+	t.Parallel()
+	b := New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	const orgA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const orgB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+	tok, err := b.IssueForOrg("keep:write", orgA, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueForOrg: %v", err)
+	}
+	err = b.ValidateForOrg(context.Background(), tok, "keep:write", orgB)
+	if !errors.Is(err, ErrOrganizationMismatch) {
+		t.Fatalf("setup: want ErrOrganizationMismatch, got %v", err)
+	}
+	if strings.Contains(err.Error(), tok) {
+		t.Fatalf("ErrOrganizationMismatch err.Error() = %q contains input token bytes", err.Error())
+	}
+}
+
+// =====================================================================
 // Concurrency
 // =====================================================================
 
