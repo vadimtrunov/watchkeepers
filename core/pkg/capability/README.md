@@ -29,7 +29,9 @@ func WithLogger(l Logger) Option
 func WithReaperInterval(d time.Duration) Option
 
 func (*Broker) Issue(scope string, ttl time.Duration) (string, error)
+func (*Broker) IssueForOrg(scope, organizationID string, ttl time.Duration) (string, error)
 func (*Broker) Validate(ctx context.Context, token, scope string) error
+func (*Broker) ValidateForOrg(ctx context.Context, token, scope, organizationID string) error
 func (*Broker) Revoke(token string) error
 func (*Broker) Close() error
 ```
@@ -37,11 +39,16 @@ func (*Broker) Close() error
 Sentinel errors live in `errors.go`:
 
 - `ErrClosed` — any method called after `Close`.
-- `ErrInvalidScope` — empty scope on `Issue`.
-- `ErrInvalidTTL` — non-positive ttl on `Issue`.
-- `ErrInvalidToken` — token absent on `Validate`.
+- `ErrInvalidScope` — empty scope on `Issue` / `IssueForOrg`.
+- `ErrInvalidTTL` — non-positive ttl on `Issue` / `IssueForOrg`.
+- `ErrInvalidOrganization` — empty organizationID on `IssueForOrg` /
+  `ValidateForOrg`.
+- `ErrInvalidToken` — token absent on `Validate` / `ValidateForOrg`.
 - `ErrTokenExpired` — token present but `clock() >= expiry`.
 - `ErrScopeMismatch` — token present, unexpired, scope mismatch.
+- `ErrOrganizationMismatch` — token present, unexpired, scope-matched
+  but its registered organizationID does not equal the
+  `organizationID` argument.
 
 All matchable via `errors.Is`.
 
@@ -82,6 +89,43 @@ func wire(ctx context.Context) error {
     return nil
 }
 ```
+
+## Per-tenant pinning (M3.5.a)
+
+`IssueForOrg` mints a token bound to BOTH a `pkg:verb` scope AND a
+tenant identifier (`organizationID`). `ValidateForOrg` admits the
+token only when both dimensions match. The contract is the M3.5.a
+cross-tenant guarantee: a token minted for tenant A MUST NOT
+validate for tenant B even when the scope matches.
+
+```go
+const orgA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+tok, err := b.IssueForOrg("keep:write", orgA, 5*time.Minute)
+// ...
+if err := b.ValidateForOrg(ctx, tok, "keep:write", orgA); err != nil {
+    switch {
+    case errors.Is(err, capability.ErrOrganizationMismatch):
+        // Token is for a different tenant — reject.
+    // ... other ErrTokenExpired / ErrScopeMismatch / ErrInvalidToken.
+    }
+}
+```
+
+**Backward compatibility.** Tokens minted via the legacy `Issue` path
+have an empty stored organizationID; presenting them to
+`ValidateForOrg` rejects with `ErrOrganizationMismatch`. Tokens minted
+via `IssueForOrg` still pass the legacy `Validate` (scope-only)
+without the per-tenant check, so callers that haven't adopted the new
+validator keep working — adopt the validator first, then migrate the
+mint side.
+
+**`auth.Claim` integration.** The keep service's verifier carries
+`OrganizationID` on `auth.Claim` (see
+`core/internal/keep/auth/auth.go`). Future keep handlers will read the
+field from the verified claim and pass it to `ValidateForOrg`,
+replacing today's request-body-trust pattern. M3.5.a.2 wires that
+through `handleInsertHuman` and `handleSetWatchkeeperLead`; M3.5.a.1
+(this milestone) lays the foundation.
 
 ## Scope convention: `pkg:verb`
 
@@ -158,15 +202,21 @@ the M3.4.a/M3.4.b redaction test pattern documented in
 
 ### Logger event vocabulary
 
-| Event                        | Fields                                      |
-| ---------------------------- | ------------------------------------------- |
-| `capability: issued`         | `scope`, `token_prefix`, `expiry` (RFC3339) |
-| `capability: validated`      | `scope`, `token_prefix`                     |
-| `capability: scope_mismatch` | `expected_scope`, `token_prefix`            |
-| `capability: expired`        | `scope`, `token_prefix`                     |
-| `capability: revoked`        | `token_prefix`                              |
-| `capability: reaper_pruned`  | `scope`, `token_prefix`                     |
-| `capability: closed`         | (no fields)                                 |
+| Event                               | Fields                                                           |
+| ----------------------------------- | ---------------------------------------------------------------- |
+| `capability: issued`                | `scope`, `[organization_id]`, `token_prefix`, `expiry` (RFC3339) |
+| `capability: validated`             | `scope`, `[organization_id]`, `token_prefix`                     |
+| `capability: scope_mismatch`        | `expected_scope`, `[organization_id]`, `token_prefix`            |
+| `capability: organization_mismatch` | `scope`, `expected_organization_id`, `token_prefix`              |
+| `capability: expired`               | `scope`, `[organization_id]`, `token_prefix`                     |
+| `capability: revoked`               | `token_prefix`                                                   |
+| `capability: reaper_pruned`         | `scope`, `token_prefix`                                          |
+| `capability: closed`                | (no fields)                                                      |
+
+`organization_id` (bracketed in the table) is emitted only by the
+per-tenant `IssueForOrg` / `ValidateForOrg` paths — the legacy
+`Issue` / `Validate` paths omit it. The full organizationID value
+is logged unredacted: it is a tenant identifier, not a secret.
 
 ## Functional options
 

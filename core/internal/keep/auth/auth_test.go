@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -238,6 +239,129 @@ func TestIssueWithExpiry(t *testing.T) {
 	_, err = v.Verify(context.Background(), expiredTok)
 	if !errors.Is(err, auth.ErrExpired) {
 		t.Errorf("Verify past exp = %v, want ErrExpired", err)
+	}
+}
+
+// TestHMACVerifier_RoundTrip_OrganizationID covers the M3.5.a contract:
+// a TestIssuer that mints a Claim carrying OrganizationID round-trips
+// through HMAC verification with the field intact. Pinning this
+// behaviour at the unit level locks the JWT `org_id` wire shape for
+// every consumer (broker mint path, future keep handlers).
+func TestHMACVerifier_RoundTrip_OrganizationID(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC) }
+	ti := mustIssuer(t, "keep-test", now)
+	v := mustVerifier(t, "keep-test", now)
+
+	const orgID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+	claim := auth.Claim{
+		Subject:        "u-1",
+		Scope:          "user:abc",
+		OrganizationID: orgID,
+	}
+	tok, err := ti.Issue(claim, time.Minute)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	got, err := v.Verify(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got.OrganizationID != orgID {
+		t.Errorf("OrganizationID = %q, want %q", got.OrganizationID, orgID)
+	}
+	if got.Subject != claim.Subject || got.Scope != claim.Scope {
+		t.Errorf("claim mismatch: got %+v, want %+v", got, claim)
+	}
+}
+
+// TestHMACVerifier_LegacyTokenWithoutOrganizationID asserts the
+// rolling-deploy contract: a token whose JSON payload omits the
+// `org_id` key (legacy mint shape from before M3.5.a) MUST still verify
+// successfully and surface an empty Claim.OrganizationID. We construct
+// the legacy payload byte-for-byte using a sibling encoder so the test
+// is decoupled from any change to TestIssuer's mint behaviour.
+func TestHMACVerifier_LegacyTokenWithoutOrganizationID(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC) }
+	v := mustVerifier(t, "keep-test", now)
+
+	// Forge a payload with the pre-M3.5.a wire shape: no org_id key.
+	tok, err := auth.MintLegacyTokenForTest(
+		fixedKey, "keep-test",
+		"u-1", "org",
+		now(), now().Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("MintLegacyTokenForTest: %v", err)
+	}
+
+	got, err := v.Verify(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("Verify legacy token: %v, want nil", err)
+	}
+	if got.OrganizationID != "" {
+		t.Errorf("legacy token surfaced OrganizationID = %q, want empty", got.OrganizationID)
+	}
+	if got.Subject != "u-1" || got.Scope != "org" {
+		t.Errorf("legacy round-trip mismatch: got %+v", got)
+	}
+}
+
+// TestTestIssuer_OmitsOrganizationIDWhenEmpty asserts the byte-level
+// wire-shape contract from M4.2.b applied to M3.5.a: when a Claim is
+// minted with OrganizationID = "", the resulting JWT payload MUST NOT
+// carry an `org_id` key. This keeps tokens minted by callers that
+// haven't adopted the new field byte-compatible with the pre-M3.5.a
+// shape so a verifier rolled back to the legacy code path can still
+// parse them.
+func TestTestIssuer_OmitsOrganizationIDWhenEmpty(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC) }
+	ti := mustIssuer(t, "keep-test", now)
+
+	tok, err := ti.Issue(auth.Claim{Subject: "u", Scope: "org"}, time.Minute)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token has %d segments, want 3", len(parts))
+	}
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("base64 decode payload: %v", err)
+	}
+	if strings.Contains(string(payloadJSON), `"org_id"`) {
+		t.Errorf("legacy mint emitted `org_id` key; want omitted. payload=%s", payloadJSON)
+	}
+}
+
+// TestTestIssuer_EmitsOrganizationIDWhenSet asserts the positive
+// counterpart: when the claim carries a non-empty OrganizationID, the
+// payload MUST encode it under the `org_id` key. Defends the contract
+// against a future refactor that accidentally drops the field.
+func TestTestIssuer_EmitsOrganizationIDWhenSet(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC) }
+	ti := mustIssuer(t, "keep-test", now)
+
+	const orgID = "11111111-1111-1111-1111-111111111111"
+	tok, err := ti.Issue(auth.Claim{
+		Subject:        "u",
+		Scope:          "org",
+		OrganizationID: orgID,
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	parts := strings.Split(tok, ".")
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("base64 decode payload: %v", err)
+	}
+	want := `"org_id":"` + orgID + `"`
+	if !strings.Contains(string(payloadJSON), want) {
+		t.Errorf("payload missing %s; got %s", want, payloadJSON)
 	}
 }
 
