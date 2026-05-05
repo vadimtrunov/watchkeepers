@@ -103,9 +103,10 @@ approval:
 
 3. Take `M#.k.a` as the unit of work.
 
-## Cascade at Phase 7
+## Cascade at Phase 7a
 
-When marking the completed leaf `[x]`:
+When marking the completed leaf `[x]` (this happens **on the feature
+branch** during Phase 7a writer pass, not on `main` after merge):
 
 1. Flip the leaf bullet to `- [x] **M#.k.a.b** ...`.
 2. Walk up the hierarchy: if every direct child of `M#.k.a` is `[x]`, flip
@@ -113,6 +114,20 @@ When marking the completed leaf `[x]`:
 3. Stop at the first ancestor that still has an unchecked child.
 
 This generalizes to arbitrary decomposition depth introduced at Gate 1.
+
+The squash merge in Phase 7b carries the toggled checkbox(es) to `main`.
+There is no separate `chore(roadmap)` PR or commit — that pattern was
+retired because every TASK already produces a feature PR that can carry
+the toggle.
+
+### Verification batches: still no separate PRs
+
+Verification-batch TASKs (e.g. "mark M2 verification bullets covered by
+existing tests" — see `docs/lessons/cross-cutting.md`) follow the same
+rule: ride along an in-flight feature PR if one is open for the same
+milestone, or open a single feature-shaped PR per batch. Toggle-only PRs
+(`chore(roadmap): toggle ...`) cost a full CI cycle and an orchestrator
+loop iteration; they are forbidden.
 
 ## Rollback
 

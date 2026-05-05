@@ -56,7 +56,12 @@ Hard rules:
 - PR title ≤ 70 chars. Derived from TASK title (prepend `<roadmap-id>: `).
 - `--draft` is off (ready for review).
 
-## Mode — merge (Phase 7)
+## Mode — merge (Phase 7b)
+
+Phase 7b is **merge-only**. The lessons append, the FEEDBACK append, and
+the ROADMAP checkbox toggle have already been committed to the feature
+branch by the `writer` agent in Phase 7a. They reach `main` as part of
+the squash commit. There is no follow-up commit on `main`.
 
 Input:
 - **PR number**.
@@ -65,8 +70,6 @@ Input:
   .headRefName` and use that as the branch to delete in step 3.
 - **Merge method**: default `squash`; use the repo default if configurable
   via `.github/settings.yml` or `gh api repos/:owner/:repo`.
-- **Leaf roadmap id** (e.g. `M1.9.a`) — the one to mark `[x]`.
-- **ROADMAP path** (e.g. `docs/ROADMAP-phase1.md`).
 
 Actions:
 1. Merge the PR:
@@ -83,25 +86,12 @@ Actions:
    ```bash
    git branch -D rdd/<slug>
    ```
-4. Update the ROADMAP:
-   - Mark the leaf `- [ ] **<leaf-id>** ...` → `- [x] **<leaf-id>** ...`.
-   - Walk ancestors upward (see `references/roadmap-migration.md` §Cascade).
-     For each ancestor whose direct children are all `[x]`, flip the
-     ancestor to `[x]`.
-5. Commit and push:
-   ```bash
-   git add docs/ROADMAP-*.md
-   git commit -m "chore(roadmap): mark <leaf-id> complete"
-   git push origin main
-   ```
 
 Hard rules:
 - Never merge without an explicit instruction from the orchestrator (which
   only sends this brief after Gate 3).
-- If the ROADMAP update commit fails to push (non-fast-forward), do not
-  force. Pull, attempt to reapply the checkbox edits on top of the new
-  HEAD, commit, push. If conflicts persist, return failure — the merge
-  already happened, only the bookkeeping is stuck, and the orchestrator
-  will escalate.
-- Report: merge sha, new `main` sha, list of ROADMAP ids flipped (leaf plus
-  any cascaded ancestors).
+- Do **not** open a follow-up `chore(roadmap)` PR or commit. The
+  ROADMAP toggle is already on `main` via the squash commit because
+  Phase 7a wrote it on the feature branch.
+- Do **not** open a follow-up `docs(lessons)` PR or commit. Same reason.
+- Report: merge sha, new `main` sha.

@@ -16,9 +16,11 @@ the `Agent` tool. Your only jobs are: parse ROADMAP, converse with the operator
 at three gates, dispatch agents, read their reports, update state, decide next
 phase / retry / escalate.
 
-Two narrow write exceptions: the orchestrator itself (a) appends short
-Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
-`docs/ROADMAP-*.md` after merge. Everything else goes through an agent.
+One narrow write exception: the orchestrator itself appends short
+Progress-log entries to the current `TASK-*.md`. Everything else goes
+through an agent — including ROADMAP checkbox toggles, which moved to the
+`writer` agent in Phase 7a so they ride inside the squash commit (see
+Phase map step 7).
 
 > **Turn-closure invariant** — every `Agent` tool result MUST be
 > followed, in the SAME reply, by at least one user-facing sentence
@@ -43,6 +45,11 @@ Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
 2. **TASK brainstorm** — see `references/gates.md` §2; may use the `explore`
    agent per `references/agent-briefs/explore.md`. TASK file is created from
    `references/task-template.md`. **GATE 2.**
+   - Phase 2 reads only the milestone-family lessons file relevant to the
+     candidate TASK (e.g. `docs/lessons/M5.md`) plus
+     `docs/lessons/cross-cutting.md`. Never reads the full
+     `docs/LESSONS.md` index — that file is not lessons content, only a
+     pointer table.
 3. **Branch & implement** — dispatch the `executor` agent per
    `references/agent-briefs/executor.md` (TDD discipline).
 4. **Pre-PR review loop** — bounded loop per `references/bounded-loop.md`
@@ -50,20 +57,32 @@ Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
    `references/agent-briefs/code-reviewer.md` and the `executor` (fixer
    mode).
 5. **Commit & push & PR** — dispatch the `git-master` agent per
-   `references/agent-briefs/git-master.md` (`pr` mode).
+   `references/agent-briefs/git-master.md` (`pr` mode). Returns the PR URL.
 6. **PR-fix loop** — bounded loop per `references/bounded-loop.md` §Phase 6.
-7. **Merge & update ROADMAP & learn** — **GATE 3**; `git-master` (`merge`
-   mode) merges and commits the ROADMAP update following the cascade rules
-   in `references/roadmap-migration.md`; the `writer` agent per
-   `references/agent-briefs/writer.md` appends `docs/LESSONS.md` and
-   `FEEDBACK.md`; after `writer` returns, the orchestrator deletes the
-   `TASK-*.md` file.
+   Stops when CI is green and review is clean.
+7. **Learn → merge → cleanup** — **GATE 3** before this phase begins.
+   - **7a. Writer pass** — dispatch the `writer` agent per
+     `references/agent-briefs/writer.md`. The writer commits to
+     `rdd/<slug>` (NOT `main`) one combined commit containing: lesson
+     append into `docs/lessons/<milestone>.md`, FEEDBACK append, and
+     ROADMAP checkbox toggle (leaf + cascade per
+     `references/roadmap-migration.md`).
+   - **7b. Merge** — dispatch `git-master` in `merge` mode. Squash-merges
+     the PR (the writer's commit is folded in). No follow-up commit on
+     `main`.
+   - **7c. Cleanup** — orchestrator deletes the `TASK-*.md` file.
+
+The Phase 7 reordering removes the prior pattern of two follow-up commits
+on `main` after merge (`chore(roadmap)` + `docs: lessons`). Both now ride
+inside the squash commit. Toggle-only PRs are forbidden — see
+`references/roadmap-migration.md` §"Verification batches".
 
 ## Hard rules
 
 1. NEVER write code, tests, or long-form documentation from the orchestrator.
-   Delegate via `Agent`. Exceptions: TASK progress log, ROADMAP checkbox
-   toggles.
+   Delegate via `Agent`. Exceptions: TASK progress log only. ROADMAP
+   checkbox toggles moved to the `writer` agent in Phase 7a (so they ride
+   inside the squash commit, not as a follow-up commit on `main`).
 2. NEVER skip a gate, including Gate 3 (merge). If the operator is
    unreachable, halt.
 3. All repo content is English.
@@ -77,6 +96,22 @@ Progress-log entries to the current `TASK-*.md` and (b) toggles checkboxes in
    Silent-exit is the #1 failure mode recorded in `FEEDBACK.md`
    2026-04-22; `## Dispatching agents` §Companion-todo gives the
    workflow-level reinforcement.
+6. **PR size cap.** A single rdd PR aims for **≤ 500 LOC added and ≤ 5
+   files changed**. Exceeding both is a Gate 1 reject — `planner` must
+   return a decomposition before the TASK proceeds. Mechanical scaffolds
+   (generated migrations, vendored fixtures) count toward LOC; the cap
+   is on review surface, not novelty. The cap was set after the night
+   that produced PRs of 1700–2400 LOC and induced multi-iteration review
+   loops.
+7. **No toggle-only PRs.** Any TASK whose only change is moving ROADMAP
+   checkboxes (e.g. "verification covered by existing tests") rides on
+   the same PR as the next feature TASK in the same milestone, or batches
+   into a single PR per milestone close-out. Three consecutive
+   toggle-only PRs in one night (#38–#40) was the trigger for this rule.
+8. **Append-only writes for lessons / FEEDBACK.** The `writer` agent does
+   not Read the whole lessons or FEEDBACK file before appending — both
+   files are 10–80 KB and reading them per iteration costs ≥10K tokens.
+   See `references/lessons-template.md` §"Append mechanics".
 
 The skill does not self-modify `SKILL.md`, `references/`, or agent briefs;
 proposed changes route through `FEEDBACK.md` (appended at Phase 7 by the
@@ -157,14 +192,42 @@ iteration count, current unresolved issues, diff summary, and three choices
 acceptance criteria and restart Phase 3 or 4), `abort` (mark TASK
 `cancelled`, keep branch for inspection).
 
-## Knowledge loop (Phase 7)
+## Knowledge loop (Phase 7a)
 
-- `docs/LESSONS.md` — project patterns. Written by the `writer` agent using
-  `references/lessons-template.md`. Read by the orchestrator at the start of
-  Phase 2 to seed the brainstorm.
+- `docs/lessons/<milestone>.md` — project patterns, one file per milestone
+  family. Written by the `writer` agent using
+  `references/lessons-template.md`. Read by the orchestrator at the start
+  of Phase 2 — but **only the file matching the candidate TASK's
+  milestone family**, plus `docs/lessons/cross-cutting.md`. Never the full
+  index, never every milestone file.
+- `docs/LESSONS.md` — index pointing to the milestone files. Edited by the
+  writer agent only when a brand-new milestone family appears.
 - `.claude/skills/rdd/FEEDBACK.md` — skill self-reflection. Written by the
   `writer` agent using `references/feedback-template.md`. Never read by the
   skill at runtime. Operator promotes useful items into `SKILL.md` or
   `references/*` manually.
 
 The skill does not self-modify `SKILL.md` or anything under `references/`.
+
+## Context hygiene between iterations
+
+In autonomous-loop mode (`/loop /rdd resume`), the previous iteration's
+state is in the repo (TASK file, branch, ROADMAP checkboxes, lessons).
+The skill needs **no in-memory continuation** between iterations — every
+phase loads what it needs from disk via the State recovery protocol.
+
+Recommendation to the operator running the loop:
+
+- **Run each iteration in a fresh Claude session** (`/clear` in
+  Claude Code, or a new conversation in API harnesses). The 5–7 MB
+  per-night session size observed pre-2026-05-05 was the cost of
+  carrying old phase context into iterations that no longer needed it.
+- Hot-path files for the rdd skill — `docs/ROADMAP-phase1.md` (~25K
+  tokens), the milestone lessons file (~5–25K tokens),
+  `docs/lessons/cross-cutting.md` (~3K tokens) — should sit in the
+  prompt cache (5-min TTL). Putting them into the orchestrator's first
+  user-block when the iteration starts maximizes cache hits across the
+  rapid Phase-1-through-Phase-7 sequence within a single iteration.
+- The orchestrator never needs to Read `docs/LESSONS.md` (the index) at
+  runtime; it computes the milestone-family file path from the TASK id
+  directly.
