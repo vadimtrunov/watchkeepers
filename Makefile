@@ -150,6 +150,50 @@ keep-integration-test: ## Run integration tests for the Keep binary (requires KE
 	@: "$${KEEP_INTEGRATION_DB_URL:?ERROR: KEEP_INTEGRATION_DB_URL required (e.g. postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable)}"
 	@$(GO) test -tags=integration -race -v ./core/cmd/keep/...
 
+# ---------------------------------------------------------------------------
+# Slack dev workspace bootstrap (M4.3)
+#
+# `make spawn-dev-bot` provisions a parent Slack app from a YAML manifest,
+# resolving the configuration token from the secrets interface (env var
+# WATCHKEEPER_SLACK_CONFIG_TOKEN by default) and writing the returned
+# credentials to a JSON file the operator ingests into their secret store.
+#
+# Required env:
+#   WATCHKEEPER_SLACK_CONFIG_TOKEN — Slack `xoxe-*` app configuration token
+#
+# Optional env (with defaults):
+#   SPAWN_DEV_BOT_MANIFEST          (default: deploy/slack/dev-bot-manifest.yaml)
+#   SPAWN_DEV_BOT_CREDENTIALS_OUT   (default: .omc/secrets/dev-bot-credentials.json)
+#
+# Operators provision the dev workspace separately (see
+# docs/DEVELOPING.md "Provisioning the dev Slack workspace"); this target
+# does NOT mediate the admin.apps.approve / OAuth-install steps.
+# ---------------------------------------------------------------------------
+
+SPAWN_DEV_BOT_MANIFEST        ?= deploy/slack/dev-bot-manifest.yaml
+SPAWN_DEV_BOT_CREDENTIALS_OUT ?= .omc/secrets/dev-bot-credentials.json
+
+.PHONY: spawn-dev-bot-build
+spawn-dev-bot-build: ## Build the spawn-dev-bot binary into ./bin/spawn-dev-bot
+	@mkdir -p bin
+	@$(GO) build -trimpath -o bin/spawn-dev-bot ./core/cmd/spawn-dev-bot
+
+.PHONY: spawn-dev-bot
+spawn-dev-bot: export WATCHKEEPER_SLACK_CONFIG_TOKEN := $(WATCHKEEPER_SLACK_CONFIG_TOKEN)
+spawn-dev-bot: spawn-dev-bot-build ## Provision the parent dev-workspace Slack app from a manifest (M4.3)
+	@: "$${WATCHKEEPER_SLACK_CONFIG_TOKEN:?ERROR: WATCHKEEPER_SLACK_CONFIG_TOKEN required (Slack xoxe-* app configuration token; see docs/DEVELOPING.md)}"
+	@mkdir -p $$(dirname "$(SPAWN_DEV_BOT_CREDENTIALS_OUT)")
+	@./bin/spawn-dev-bot \
+	  --manifest "$(SPAWN_DEV_BOT_MANIFEST)" \
+	  --credentials-out "$(SPAWN_DEV_BOT_CREDENTIALS_OUT)"
+
+.PHONY: spawn-dev-bot-dry-run
+spawn-dev-bot-dry-run: spawn-dev-bot-build ## Validate the manifest WITHOUT contacting Slack (CI gate)
+	@./bin/spawn-dev-bot \
+	  --manifest "$(SPAWN_DEV_BOT_MANIFEST)" \
+	  --credentials-out "$(SPAWN_DEV_BOT_CREDENTIALS_OUT)" \
+	  --dry-run
+
 .PHONY: govulncheck
 govulncheck: ## Scan Go dependencies for known vulnerabilities
 	@$(GOVULNCHECK) ./...
