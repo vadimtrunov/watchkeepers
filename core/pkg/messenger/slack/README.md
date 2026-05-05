@@ -28,11 +28,12 @@ on. The package today is intentionally narrow:
 
 Deferred to later M4.2 sub-bullets:
 
-| Sub-bullet | Scope                                                                                  |
-| ---------- | -------------------------------------------------------------------------------------- |
-| **M4.2.b** | `SendMessage` / `SetBotProfile` (`chat.postMessage`, `users.profile.set`, `bots.info`) |
-| **M4.2.c** | `Subscribe` via Socket Mode (WebSocket event intake)                                   |
-| **M4.2.d** | `CreateApp` / `InstallApp` (Slack Manifest API + OAuth install flow)                   |
+| Sub-bullet   | Scope                                                                                  |
+| ------------ | -------------------------------------------------------------------------------------- |
+| **M4.2.b**   | `SendMessage` / `SetBotProfile` (`chat.postMessage`, `users.profile.set`, `bots.info`) |
+| **M4.2.c.1** | `Subscribe` via Socket Mode happy-path                                                 |
+| **M4.2.c.2** | Resilient reconnect on `disconnect` envelope, transport error, or pong-timeout         |
+| **M4.2.d**   | `CreateApp` / `InstallApp` (Slack Manifest API + OAuth install flow)                   |
 
 `Client` therefore does NOT yet implement `messenger.Adapter`. The
 compile-time `var _ messenger.Adapter = (*Adapter)(nil)` assertion
@@ -105,6 +106,27 @@ func ping(ctx context.Context) error {
     return c.Do(ctx, "auth.test", nil, &resp)
 }
 ```
+
+## Socket Mode resilience (M4.2.c.2)
+
+`Client.Subscribe` reconnects transparently on:
+
+- **`disconnect` envelope** — Slack sends `{type: "disconnect", reason: "warning"|"refresh_requested"|"link_disabled"}`. The read loop closes the WS, dials a fresh `apps.connections.open` URL, awaits a new `hello`, and resumes reading.
+- **Transport error** — connection reset, network drop, hard close — the loop reconnects with backoff.
+- **Pong timeout** — when no envelope (event or pong) is received within `WithSocketModePingInterval`, the client emits an application-layer `{"type":"ping","id":...}` frame. If no pong arrives within `WithSocketModePingTimeout`, the loop reconnects.
+
+The caller's `MessageHandler` keeps receiving events without observing the reconnect. On the bounded retry budget (`WithSocketModeMaxReconnectAttempts`, default 5) being exhausted, `Subscription.Stop()` returns `ErrReconnectExhausted` (matchable via `errors.Is`).
+
+| Option                                | Default | Purpose                                     |
+| ------------------------------------- | ------- | ------------------------------------------- |
+| `WithSocketModeReconnectInitialDelay` | 100ms   | First-attempt backoff before reconnect dial |
+| `WithSocketModeReconnectMaxDelay`     | 30s     | Cap on per-attempt backoff (before jitter)  |
+| `WithSocketModeMaxReconnectAttempts`  | 5       | Retry budget before `ErrReconnectExhausted` |
+| `WithSocketModePingInterval`          | 30s     | Application-layer ping cadence              |
+| `WithSocketModePingTimeout`           | 10s     | Per-ping pong deadline before reconnect     |
+| `WithSocketModeHelloTimeout`          | 5s      | Wait for `hello` after each (re)dial        |
+
+Backoff uses exponential growth (`initial × 2^attempt`) clamped at `maxDelay`, with ±25% jitter — mirrors the `outbox` and `keepclient` resilient-stream models.
 
 ## Design choices
 

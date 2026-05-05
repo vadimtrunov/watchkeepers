@@ -112,6 +112,31 @@ type clientConfig struct {
 	// [websocket.Dial]. Tests substitute an in-process pair so the
 	// happy-path runs without a real handshake.
 	socketDialer socketModeDialer
+
+	// socketReconnectInitialDelay / socketReconnectMaxDelay /
+	// socketMaxReconnectAttempts tune the resilient reconnect loop.
+	// Zero values fall back to the package defaults
+	// ([defaultReconnectInitialDelay] / [defaultReconnectMaxDelay] /
+	// [defaultMaxReconnectAttempts]).
+	socketReconnectInitialDelay time.Duration
+	socketReconnectMaxDelay     time.Duration
+	socketMaxReconnectAttempts  int
+
+	// socketPingInterval / socketPingTimeout tune the application-layer
+	// ping/pong heartbeat. Zero values fall back to
+	// [defaultPingInterval] / [defaultPingTimeout].
+	socketPingInterval time.Duration
+	socketPingTimeout  time.Duration
+
+	// socketSleeper is the unexported test seam that lets tests inject
+	// a fake clock into the reconnect backoff loop. Production code
+	// uses [realSleeper] (which honours ctx cancellation).
+	socketSleeper sleeper
+
+	// socketRand is the unexported test seam that lets tests inject
+	// a deterministic jitter source. Production code uses
+	// [math/rand/v2.Float64].
+	socketRand func() float64
 }
 
 // ClientOption configures a [Client] at construction time. Pass

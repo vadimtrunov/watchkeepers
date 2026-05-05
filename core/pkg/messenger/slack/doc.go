@@ -2,7 +2,7 @@
 // [github.com/vadimtrunov/watchkeepers/core/pkg/messenger.Adapter]
 // interface. ROADMAP §M4 → M4.2.
 //
-// # Scope (M4.2.a foundation + M4.2.b SendMessage/SetBotProfile + M4.2.c.1 Subscribe happy-path)
+// # Scope (M4.2.a foundation + M4.2.b SendMessage/SetBotProfile + M4.2.c Subscribe with reconnect)
 //
 // The package currently ships:
 //
@@ -31,10 +31,20 @@
 //     waits for the `hello` envelope, and runs a single read loop
 //     that ACKS each event_api envelope back to Slack within the
 //     documented 3-second budget BEFORE dispatching the decoded
-//     [messenger.IncomingMessage] to the handler. The returned
-//     [messenger.Subscription] supports idempotent Stop. A
-//     `disconnect` envelope or transport error terminates the
-//     subscription cleanly (reconnect lands in M4.2.c.2).
+//     [messenger.IncomingMessage] to the handler.
+//   - M4.2.c.2 — resilient reconnect layered on top of c.1.
+//     [Client.Subscribe] now reconnects transparently on
+//     `disconnect` envelope, transport error, or pong-timeout. The
+//     loop dials a fresh `apps.connections.open` URL, awaits a new
+//     `hello`, and resumes reading; the caller's
+//     [messenger.MessageHandler] keeps receiving events without
+//     observing the reconnect. Backoff-with-jitter mirrors the
+//     outbox / keepclient resilient-stream model. Application-layer
+//     ping/pong (configurable interval + timeout) detects half-open
+//     connections. After [WithSocketModeMaxReconnectAttempts]
+//     consecutive failures the subscription unwinds with the wrapped
+//     [ErrReconnectExhausted] sentinel surfaced via
+//     [messenger.Subscription.Stop].
 //
 // What this package does NOT yet do (deferred to later M4.2 sub-bullets):
 //
@@ -44,12 +54,6 @@
 //     (`users.setPhoto` multipart). Both currently return
 //     [messenger.ErrUnsupported] so the contract reserves the field
 //     rather than silently dropping it.
-//   - M4.2.c.2 — Socket Mode reconnect on `disconnect` envelope or
-//     transport error, exponential backoff, ping-pong heartbeat at
-//     the application layer, resilient-stream wrapper around the c.1
-//     happy-path primitive. The c.1 Subscribe is a single-attempt
-//     open; long-lived subscriptions across drops will use the c.2
-//     wrapper once it lands.
 //   - M4.2.d — `CreateApp` / `InstallApp` / `LookupUser` (Slack
 //     Manifest API + OAuth install flow + `users.info` / `bots.info`).
 //

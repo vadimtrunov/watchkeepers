@@ -3,6 +3,7 @@ package slack
 import (
 	"encoding/json"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger"
@@ -43,6 +44,13 @@ const (
 	envelopeTypeSlashCommands = "slash_commands"
 	envelopeTypeInteractive   = "interactive"
 	envelopeTypeDisconnect    = "disconnect"
+	// envelopeTypePing / envelopeTypePong carry the application-layer
+	// keepalive frames the c.2 reconnect loop emits when no inbound
+	// envelope has arrived within the configured ping interval. The
+	// server replies with a pong of matching id; on pong-timeout the
+	// loop triggers a reconnect.
+	envelopeTypePing = "ping"
+	envelopeTypePong = "pong"
 )
 
 // rawEnvelope is the minimal generic shape every Socket Mode frame
@@ -173,7 +181,9 @@ func decodeIncoming(env rawEnvelope) (messenger.IncomingMessage, bool) {
 // still delivers the message — Timestamp is informational).
 //
 // Slack `ts` format: `<seconds>.<microseconds>` since epoch. Parsing
-// with stdlib avoids pulling in a duration helper.
+// with [strconv.ParseInt] avoids pulling in a duration helper. The
+// strconv import is shared with [client.go]'s Retry-After parser, so
+// no extra dependency is incurred.
 func parseSlackTS(ts string) time.Time {
 	if ts == "" {
 		return time.Time{}
@@ -188,57 +198,23 @@ func parseSlackTS(ts string) time.Time {
 			break
 		}
 	}
-	var secs, micros int64
 	if dot < 0 {
-		// No fractional part — try whole string as seconds.
-		if _, err := fmtParseInt(ts, &secs); err != nil {
+		secs, err := strconv.ParseInt(ts, 10, 64)
+		if err != nil {
 			return time.Time{}
 		}
 		return time.Unix(secs, 0).UTC()
 	}
-	if _, err := fmtParseInt(ts[:dot], &secs); err != nil {
+	secs, err := strconv.ParseInt(ts[:dot], 10, 64)
+	if err != nil {
 		return time.Time{}
 	}
-	if _, err := fmtParseInt(ts[dot+1:], &micros); err != nil {
+	micros, err := strconv.ParseInt(ts[dot+1:], 10, 64)
+	if err != nil {
 		return time.Unix(secs, 0).UTC()
 	}
 	return time.Unix(secs, micros*1000).UTC()
 }
-
-// fmtParseInt is a tiny strconv-free integer parser; avoids the
-// unused-import noise of pulling strconv just for this one helper.
-// Returns (true, nil) on a clean parse, (false, err) on any
-// non-digit byte.
-func fmtParseInt(s string, out *int64) (bool, error) {
-	if s == "" {
-		return false, errEmptyInt
-	}
-	var v int64
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < '0' || c > '9' {
-			return false, errBadInt
-		}
-		v = v*10 + int64(c-'0')
-	}
-	*out = v
-	return true, nil
-}
-
-// errEmptyInt and errBadInt are sentinel errors fmtParseInt returns;
-// callers ignore them and fall back to zero time so a malformed ts
-// never crashes the read loop.
-var (
-	errEmptyInt = jsonErrorString("empty int")
-	errBadInt   = jsonErrorString("bad int")
-)
-
-// jsonErrorString is a tiny error-with-string shim so the parse
-// helpers stay zero-alloc on the happy path (no fmt.Errorf wrapping
-// inside a hot read loop).
-type jsonErrorString string
-
-func (e jsonErrorString) Error() string { return string(e) }
 
 // redactWSURL strips the query string from a `wss://` URL so a logger
 // receiving the URL never sees Slack's per-connection ticket. The
