@@ -41,7 +41,7 @@ Cons:
 Pros:
 
 - Separate OS process: SIGKILL-able, accountable in `ps`, isolated from the dispatcher's event loop. A segfaulting native dep crashes only the tool worker.
-- Built-in `process.send` / `message` IPC channel; messages round-trip via structured clone (Maps, Dates, typed arrays survive). The harness's existing JSON-RPC envelope rides natively without a second NDJSON framer.
+- Built-in `process.send` / `message` IPC channel. JSON serialization by default; structured-clone semantics (so `Map`, `Date`, typed arrays, and `undefined`-valued keys survive) require opting in via `serialization: 'advanced'` on the `fork()` call (see Node `child_process` docs). The harness MUST set this option. The JSON-RPC envelope rides natively without a second NDJSON framer.
 
 Cons:
 
@@ -58,11 +58,11 @@ Pros:
 Cons:
 
 - Reinvents the IPC channel that `fork` provides for free: framing, back-pressure, half-close handling all become harness code. Doubles the framing surface vs. `fork` and grows the test matrix in M5.3.b.b.e.
-- No structured clone — every value is JSON-stringified. Loses `Date`, typed arrays, and `undefined`-valued keys, all of which the existing JSON-RPC layer already tolerates but which become a footgun for tool authors used to `worker_threads`.
+- Stdio JSON-RPC framing means every value is JSON-stringified on the wire (no structured clone, no `serialization: 'advanced'` escape hatch as on `child_process.fork`). `Date`, typed arrays, and `undefined`-valued keys are lost.
 
 ## Consequences
 
-- **Transport surface**: the JSON-RPC sub-channel between harness and tool worker rides `process.send` / `process.on("message")`. Messages are structured-cloned, not JSON-stringified, so the wire shape is a superset of the harness↔Go core JSON-RPC envelope. M5.3.b.b.c will codify the sub-channel as the same envelope shape (`jsonrpc`, `id`, `method`, `params` / `result` / `error`).
+- **Transport surface**: the JSON-RPC sub-channel between harness and tool worker rides `process.send` / `process.on("message")`. M5.3.b.b.c MUST pass `serialization: 'advanced'` on the `fork()` call so that the wire shape uses structured-clone semantics (a superset of the harness↔Go core JSON-RPC envelope) rather than plain JSON. M5.3.b.b.c will codify the sub-channel as the same envelope shape (`jsonrpc`, `id`, `method`, `params` / `result` / `error`).
 - **Capability declaration ergonomics**: capabilities are declared at spawn time and frozen in the child's bootstrap module. Per-call capability mutation is rejected. M5.3.b.b.b's zod schema will model this as a single `capabilities` field on the spawn request, not as a per-`invokeTool` argument.
 - **Error-model alignment**: the existing `ToolErrorCode` band in `harness/src/invokeTool.ts` (`ToolExecutionError: -32000`, `ToolTimeout: -32001`, `ToolMemoryExceeded: -32002`) carries over unchanged. The worker path reserves `ToolCapabilityDenied: -32003` for capability-gating denials and `ToolWorkerCrashed: -32004` for unexpected child exits / signals. Both stay inside the JSON-RPC application-error band (`-32099..-32000`).
 - **Test ergonomics**: vitest tests will use the spawn-and-wait integration shape for happy paths (real `fork` of a fixture worker script under `harness/test/fixtures/`) and a thin `ChildProcess`-shaped fake for unit tests of the host-side dispatcher. `worker_threads` would have allowed in-process unit tests; that ergonomic loss is the price of the OS boundary and is accepted.
@@ -72,4 +72,4 @@ Cons:
 - Node `worker_threads` API — <https://nodejs.org/api/worker_threads.html>
 - Node `child_process` API — <https://nodejs.org/api/child_process.html>
 - `isolated-vm` README, security caveat on running untrusted code — <https://github.com/laverdet/isolated-vm/blob/main/README.md#security>
-- CodeRabbit review thread on PR #57 (same-process execution risk) — <https://github.com/vadimtrunov/watchkeepers/pull/57>
+- CodeRabbit review thread on PR #57 (same-process execution risk) — <https://github.com/vadimtrunov/watchkeepers/pull/57#discussion_r3190823845>
