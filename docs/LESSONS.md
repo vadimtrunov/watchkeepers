@@ -1373,3 +1373,29 @@ handlers AND test surfaces) was honest.
 - Docs: `docs/ROADMAP-phase1.md` §M3.5.a.2, §M3.5.a.3.
 
 ---
+
+## 2026-05-04 — M3.5.a.3.1: RLS + GUC plumbing fails closed by construction via nullif-empty-string
+
+**PR**: [#52](https://github.com/vadimtrunov/watchkeepers/pull/52)
+**Merged**: 2026-05-04
+
+### Pattern
+
+When adding RLS policies that filter on a per-request GUC, use
+`nullif(current_setting('namespace.key', true), '')::uuid` (or analog cast) in
+the USING/WITH CHECK clause. Legacy callers that don't set the GUC see empty
+string — nullif returns NULL — `column = NULL` is FALSE — zero rows visible AND
+zero rows insertable. Fail-closed by construction, no extra handler-layer guard
+needed for safety. Companion: pair with FORCE ROW LEVEL SECURITY (not just
+ENABLE) so the table owner role doesn't bypass policies, and ENABLE + FORCE both
+tables when one inherits tenancy via subquery (manifest_version inherits from
+manifest). Test discipline: migrate-schema-test.sh blocks for visibility + WITH
+CHECK on cross-tenant insert + FK violation + fail-closed (no GUC set) cover the
+four corners.
+
+### References
+
+- Files: `deploy/migrations/013_manifest_org_id_rls.sql`, `core/internal/keep/db/scope.go`, `scripts/migrate-schema-test.sh`
+- Docs: `docs/ROADMAP-phase1.md` §M3.5.a.3.1.
+
+---
