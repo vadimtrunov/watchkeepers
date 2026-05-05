@@ -1346,3 +1346,30 @@ API where breaking changes would cascade across many test files.
 - Docs: `docs/ROADMAP-phase1.md` §M3.5.a.1.
 
 ---
+
+## 2026-05-04 — M3.5.a.2: closing a security gap means auditing ALL handlers, not just the named ones
+
+**PR**: [#51](https://github.com/vadimtrunov/watchkeepers/pull/51)
+**Merged**: 2026-05-04
+
+### Pattern
+
+When wiring a security primitive (here `claim.OrganizationID`) into handlers to
+close a documented gap, audit EVERY handler that mutates the affected tables, not
+just the ones named in the original tracking item. M3.5.a.2's brief named handlers
+from M4.4 (`handleInsertHuman`, `handleSetWatchkeeperLead`); the audit revealed
+`handleUpdateWatchkeeperStatus` (same tenancy concern, mutates the same table) and
+`handleInsertWatchkeeper` (different shape — FK-implicit tenancy via `lead_human_id`)
+ALSO needed wiring. A fourth (`handlePutManifestVersion`) needed a schema migration
+to even have an org column to filter on, so it became M3.5.a.3. Companion lesson:
+integration tests use a SEPARATE token-mint helper from unit tests, so adding a
+security guard to the handler also requires updating the integration test mint path.
+Reviewers verify both: that named handlers are wired AND that the audit (across
+handlers AND test surfaces) was honest.
+
+### References
+
+- Files: `core/internal/keep/server/handlers_write.go`, `core/internal/keep/server/handlers_human.go`, `core/cmd/keep/human_integration_test.go`, `core/cmd/keep/read_integration_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M3.5.a.2, §M3.5.a.3.
+
+---
