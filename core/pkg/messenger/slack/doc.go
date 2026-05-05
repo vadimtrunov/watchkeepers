@@ -2,7 +2,7 @@
 // [github.com/vadimtrunov/watchkeepers/core/pkg/messenger.Adapter]
 // interface. ROADMAP §M4 → M4.2.
 //
-// # Scope (M4.2.a foundation + M4.2.b SendMessage/SetBotProfile + M4.2.c Subscribe with reconnect)
+// # Scope (M4.2.a foundation + M4.2.b SendMessage/SetBotProfile + M4.2.c Subscribe with reconnect + M4.2.d.1 CreateApp/LookupUser)
 //
 // The package currently ships:
 //
@@ -45,6 +45,20 @@
 //     consecutive failures the subscription unwinds with the wrapped
 //     [ErrReconnectExhausted] sentinel surfaced via
 //     [messenger.Subscription.Stop].
+//   - M4.2.d.1 — [Client.CreateApp] (`apps.manifest.create`) and
+//     [Client.LookupUser] (`users.info` / `bots.info` /
+//     `users.lookupByEmail`). Manifest serialisation honours Slack's
+//     mixed-type schema (string display fields, []string scopes,
+//     bool settings flags) per the M4.2.b wire-format LESSON; the
+//     manifest body is built from a `map[string]any` so boolean
+//     leaves like `socket_mode_enabled` land on the wire as JSON
+//     bools (a `map[string]string` envelope would force every leaf
+//     into a JSON string and break Slack validation). LookupUser
+//     discriminates by Slack id-prefix (`U`/`W` → users.info,
+//     `B` → bots.info) and routes by populated [messenger.UserQuery]
+//     field; an `@handle` query returns [messenger.ErrUnsupported]
+//     (Slack does not expose handle-resolution outside paged
+//     `users.list`).
 //
 // What this package does NOT yet do (deferred to later M4.2 sub-bullets):
 //
@@ -54,13 +68,16 @@
 //     (`users.setPhoto` multipart). Both currently return
 //     [messenger.ErrUnsupported] so the contract reserves the field
 //     rather than silently dropping it.
-//   - M4.2.d — `CreateApp` / `InstallApp` / `LookupUser` (Slack
-//     Manifest API + OAuth install flow + `users.info` / `bots.info`).
+//   - M4.2.d.2 — [messenger.Adapter.InstallApp] (Slack v2 OAuth
+//     `oauth.v2.access` token exchange + admin-preapproval path via
+//     `admin.apps.approve`). Once delivered, all six adapter methods
+//     exist and the compile-time assertion
+//     `var _ messenger.Adapter = (*Client)(nil)` lands.
 //
 // The [Client] therefore does NOT yet implement [messenger.Adapter] in
-// full — the compile-time assertion lands in M4.2.d once all six
-// methods exist. M4.2.c/d build their adapter methods on top of
-// [Client.Do] and the [RateLimiter] in the same shape M4.2.b uses.
+// full — the compile-time assertion lands in M4.2.d.2 once all six
+// methods exist. M4.2.d.2 builds InstallApp on top of [Client.Do] and
+// the [RateLimiter] in the same shape M4.2.b/c/d.1 use.
 //
 // # Design choices
 //
