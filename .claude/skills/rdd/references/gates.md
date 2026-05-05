@@ -85,77 +85,17 @@ Proceed? (yes / no / defer)
 - Never infer intent from similar-sounding answers. "looks good" is
   not `yes`.
 
-## Auto mode
+## Autonomous wrapping
 
-Activated when the orchestrator is invoked as `/rdd --auto …`. The
-gate prompts are still printed to the transcript for audit, but the
-orchestrator emits a deterministic decision instead of waiting for
-the operator. Each gate has exactly one auto-`yes` rule; everything
-else halts without side effects, mirroring the conservative posture of
-interactive halting.
-
-### Loop continuity
-
-`--auto` runs Phase 1 → Phase 7 back-to-back inside a single
-orchestrator turn and re-enters Phase 1 with the next ROADMAP
-candidate as soon as Phase 7c (`TASK-*.md` deletion) completes. **No
-ScheduleWakeup, no `/loop` wrapping, no inter-iteration sleep** — those
-add 60-second-minimum delays that are pure overhead. The only place
-the orchestrator is allowed to wait is Phase 6's CI poll, and that
-uses an inline bash loop (`while ! gh pr checks --watch …; do …;
-done`, or equivalent), not ScheduleWakeup. The orchestrator stops
-when the auto-rules cannot resolve a gate (halt — see per-gate rules
-below) or when the ROADMAP candidate list is empty (success —
-print "ROADMAP complete" and exit).
-
-### Gate 1 auto-decision
-
-- **Auto-`yes`** when the planner verdict is `fits one PR` AND exactly
-  one candidate sub-item is selectable (the first `[ ]` leaf whose
-  dependencies are all `[x]`, top-down in the ROADMAP file).
-- If the planner verdict is `too large` AND it returned a numbered
-  decomposition, apply the ROADMAP edits and auto-`yes` on the FIRST
-  decomposed sub-item. The remaining decomposed items become future
-  candidates.
-- Halt when: planner returned no verdict; planner returned `too large`
-  without a decomposition; the candidate list is empty (nothing to do
-  — print "ROADMAP complete" and halt); ROADMAP edits would touch
-  more than the candidate's own checkbox + parent cascade.
-
-### Gate 2 auto-decision
-
-- **Auto-`yes`** when the TASK file is fully populated (Scope,
-  Acceptance criteria with ≥1 item, Test plan with ≥1 item, Plan with
-  ≥1 numbered step) AND Hard rule 6 (PR size cap) is not predicted to
-  fail (rough heuristic: plan touches ≤ 5 files; if unknown, do not
-  block at this gate — let the bounded review loops catch it).
-- Halt when: any of Scope / Acceptance criteria / Test plan / Plan is
-  empty or placeholder text; the TASK is a toggle-only TASK that would
-  violate Hard rule 7.
-
-### Gate 3 auto-decision
-
-- **Auto-`yes`** when CI is reported all-green by `gh pr checks` AND
-  unresolved blocker+important review comments = 0 (the standard
-  Phase 6 exit condition is the precondition of Gate 3). Proceed
-  directly into Phase 7 (writer pass, merge, cleanup).
-- Halt when: CI is not all-green; unresolved blocker/important > 0;
-  the bounded Phase 6 loop escalated; the merge precondition was
-  computed from stale data (re-fetch once, then halt if still stale).
-
-### Audit format for an auto-decision
-
-After printing the gate's literal prompt, print exactly:
-
-```
-Auto-decision: yes
-Reason: <one sentence quoting the rule above that authorised this>
-```
-
-Or, on halt:
-
-```
-Auto-decision: halt
-Reason: <one sentence naming the specific halt condition above>
-Side effects rolled back: <list, or "none">
-```
+The skill itself has no auto-decision path; every gate is synchronous
+and waits for the operator. To run iteratively unattended, wrap
+`/rdd resume` in `/loop` (`/loop /rdd resume`) — each iteration
+re-enters the skill in a fresh turn driven by the scheduler, picks
+up state from disk via the State recovery protocol, and stops at the
+next gate that lacks an answer. The earlier inline `--auto` mode was
+retired on 2026-05-05 because running Phase 1 → Phase 7 in one
+orchestrator turn was unsafe under the model's post-`Agent`
+text-emission behaviour (silent-exit hung the runtime — see
+`FEEDBACK.md` 2026-05-05). The `/loop` boundary forces a clean turn
+between phases and makes the failure mode disappear at the cost of
+the scheduler's minimum interval, which is acceptable.

@@ -34,23 +34,18 @@ Phase map step 7).
 - `/rdd` — interactive: list available sub-items, operator picks one.
 - `/rdd <id>` — e.g. `/rdd M3` or `/rdd M1.9` — skip the selection prompt.
 - `/rdd resume` — continue the most recent in-progress `TASK-*.md`.
-- `/rdd --auto [<id>|resume]` — autonomous self-looping mode. **Run
-  directly; do NOT wrap with `/loop`.** `/loop` is for cron-style
-  recurring tasks and forces a 60-second-minimum sleep between
-  firings, which is pure overhead here. `--auto` instead runs Phase 1
-  through Phase 7 back-to-back inside a single orchestrator turn,
-  then immediately re-enters Phase 1 with the next ROADMAP candidate.
-  Auto-decides Gates 1/2/3 deterministically per
-  `references/gates.md` §"Auto mode". Phase 6 CI polling uses an
-  inline bash loop (`sleep 30 && gh pr checks`) rather than
-  ScheduleWakeup — no external scheduler is involved. Halts (no side
-  effects) on any condition the auto rules cannot resolve
-  unambiguously: planner verdict missing, bounded-loop escalation,
-  ambiguous candidate selection, CI-not-green-after-timeout at Gate
-  3, preflight failure, or empty candidate list (ROADMAP complete).
-  The operator-facing gate prompts are still emitted to the
-  transcript for audit, immediately followed by the auto-decision
-  and its justification.
+- `/loop /rdd resume` — autonomous loop. Wrap `/rdd resume` in `/loop`
+  to drive the skill iteratively in cron-style: each iteration runs in
+  a fresh turn started by the scheduler, the previous TASK file /
+  branch / ROADMAP checkboxes serve as continuation state, and the
+  scheduler's between-firing interval gives the runtime a clean turn
+  boundary that prevents silent-exit after `Agent` returns. The
+  earlier in-process `--auto` mode was retired on 2026-05-05 —
+  running Phase 1 → Phase 7 inline in one turn proved unsafe under
+  the model's post-`Agent` text-emission behaviour (see `FEEDBACK.md`
+  2026-05-05). Gates 1/2/3 remain synchronous; in unattended runs the
+  operator must still be reachable, otherwise the loop halts at the
+  next gate with no side effects.
 
 ## Phase map (hard sequence)
 
@@ -100,11 +95,10 @@ inside the squash commit. Toggle-only PRs are forbidden — see
    Delegate via `Agent`. Exceptions: TASK progress log only. ROADMAP
    checkbox toggles moved to the `writer` agent in Phase 7a (so they ride
    inside the squash commit, not as a follow-up commit on `main`).
-2. NEVER skip a gate, including Gate 3 (merge). In interactive mode, if
-   the operator is unreachable, halt. In `--auto` mode, gates are
-   auto-decided per `references/gates.md` §"Auto mode" — halting still
-   applies whenever the auto rules cannot resolve the gate
-   deterministically.
+2. NEVER skip a gate, including Gate 3 (merge). If the operator is
+   unreachable at a gate, halt without side effects. There is no
+   auto-decision path — every gate is synchronous, including under
+   `/loop` autonomous wrapping.
 3. All repo content is English.
 4. `TASK-*.md` is gitignored and must never be committed to `main`.
 5. After every `Agent` call, end the same reply with an orchestrator-authored
