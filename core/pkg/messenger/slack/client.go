@@ -137,6 +137,22 @@ type clientConfig struct {
 	// a deterministic jitter source. Production code uses
 	// [math/rand/v2.Float64].
 	socketRand func() float64
+
+	// installTokenSink is the caller-controlled hook
+	// [Client.InstallApp] invokes with the just-exchanged OAuth tokens.
+	// nil at construction means [Client.InstallApp] fails synchronously
+	// with [ErrInstallTokenSinkUnset] BEFORE contacting Slack — the
+	// security invariant: the response carries multiple long-lived
+	// secrets, the adapter MUST hand them off to the caller's secrets
+	// interface rather than discard or embed them.
+	installTokenSink InstallTokenSink
+
+	// installParamsResolver is the caller-controlled hook
+	// [Client.InstallApp] invokes to resolve the OAuth code + client
+	// credentials per-install. nil at construction means
+	// [Client.InstallApp] fails synchronously with
+	// [ErrInstallParamsUnset] BEFORE contacting Slack.
+	installParamsResolver InstallParamsResolver
 }
 
 // ClientOption configures a [Client] at construction time. Pass

@@ -2,7 +2,7 @@
 // [github.com/vadimtrunov/watchkeepers/core/pkg/messenger.Adapter]
 // interface. ROADMAP §M4 → M4.2.
 //
-// # Scope (M4.2.a foundation + M4.2.b SendMessage/SetBotProfile + M4.2.c Subscribe with reconnect + M4.2.d.1 CreateApp/LookupUser)
+// # Scope (M4.2.a foundation + M4.2.b SendMessage/SetBotProfile + M4.2.c Subscribe with reconnect + M4.2.d.1 CreateApp/LookupUser + M4.2.d.2 InstallApp)
 //
 // The package currently ships:
 //
@@ -15,6 +15,7 @@
 //     `Retry-After`-aware HTTP 429 handling; a sentinel-error
 //     vocabulary mapping common Slack `error` codes onto matchable
 //     [errors.Is] sentinels.
+//
 //   - M4.2.b — [Client.SendMessage] (`chat.postMessage`) and
 //     [Client.SetBotProfile] (`users.profile.set`). Both are layered
 //     on [Client.Do] and consume the rate-limiter / sentinel-error
@@ -25,6 +26,7 @@
 //     status_expiration, real_name, … for SetBotProfile) ride in
 //     [messenger.Message.Metadata] and [messenger.BotProfile.Metadata]
 //     respectively.
+//
 //   - M4.2.c.1 — [Client.Subscribe] via Socket Mode happy-path. POSTs
 //     `apps.connections.open` (rate-limited, tier-1) to obtain a
 //     one-shot WSS URL, dials it via [github.com/coder/websocket],
@@ -32,6 +34,7 @@
 //     that ACKS each event_api envelope back to Slack within the
 //     documented 3-second budget BEFORE dispatching the decoded
 //     [messenger.IncomingMessage] to the handler.
+//
 //   - M4.2.c.2 — resilient reconnect layered on top of c.1.
 //     [Client.Subscribe] now reconnects transparently on
 //     `disconnect` envelope, transport error, or pong-timeout. The
@@ -45,6 +48,7 @@
 //     consecutive failures the subscription unwinds with the wrapped
 //     [ErrReconnectExhausted] sentinel surfaced via
 //     [messenger.Subscription.Stop].
+//
 //   - M4.2.d.1 — [Client.CreateApp] (`apps.manifest.create`) and
 //     [Client.LookupUser] (`users.info` / `bots.info` /
 //     `users.lookupByEmail`). Manifest serialisation honours Slack's
@@ -60,6 +64,21 @@
 //     (Slack does not expose handle-resolution outside paged
 //     `users.list`).
 //
+//   - M4.2.d.2 — [Client.InstallApp] (`oauth.v2.access`). Exchanges a
+//     Slack-issued OAuth authorization code (the admin-preapproval
+//     flow's dev-workspace path is documented on the [Client.InstallApp]
+//     comment) for the bot/user token bundle. Tokens NEVER ride on the
+//     returned [messenger.Installation] — they are delivered out-of-band
+//     to the caller-supplied [InstallTokenSink] (configured via
+//     [WithInstallTokenSink]); only non-secret platform identifiers
+//     (bot user id, team id, enterprise id, scope, token type,
+//     enterprise-install flag) populate the Installation per the M4.1
+//     design "Tokens themselves are stored in the secrets interface,
+//     NOT here". The per-install OAuth code + client credentials ride
+//     via the typed [InstallParamsResolver] (configured via
+//     [WithInstallParamsResolver]) because [messenger.WorkspaceRef]
+//     does not carry a Metadata bag in M4.1.
+//
 // What this package does NOT yet do (deferred to later M4.2 sub-bullets):
 //
 //   - M4.2.b follow-ups — [messenger.Message.Attachments] support
@@ -68,16 +87,11 @@
 //     (`users.setPhoto` multipart). Both currently return
 //     [messenger.ErrUnsupported] so the contract reserves the field
 //     rather than silently dropping it.
-//   - M4.2.d.2 — [messenger.Adapter.InstallApp] (Slack v2 OAuth
-//     `oauth.v2.access` token exchange + admin-preapproval path via
-//     `admin.apps.approve`). Once delivered, all six adapter methods
-//     exist and the compile-time assertion
-//     `var _ messenger.Adapter = (*Client)(nil)` lands.
 //
-// The [Client] therefore does NOT yet implement [messenger.Adapter] in
-// full — the compile-time assertion lands in M4.2.d.2 once all six
-// methods exist. M4.2.d.2 builds InstallApp on top of [Client.Do] and
-// the [RateLimiter] in the same shape M4.2.b/c/d.1 use.
+// All six [messenger.Adapter] methods are implemented; the compile-time
+// assertion `var _ messenger.Adapter = (*Client)(nil)` lives in
+// `adapter_assertion_test.go` and pins the conformance during
+// `go test`.
 //
 // # Design choices
 //
