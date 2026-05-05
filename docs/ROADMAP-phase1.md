@@ -302,7 +302,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M5.3.a** Process scaffold + JSON-RPC stdio framing + hello/shutdown methods (`harness/` package; pnpm-workspace integrated; 39 vitest tests; framing per JSON-RPC 2.0 §4 incl. correct notification handling).
   - [x] **M5.3.b.a** Add isolated-vm pure-JS tool invocation path with invokeTool RPC method.
   - [ ] **M5.3.b.b** Add worker-process tool path with declared I/O capability gating.
-    - [ ] **M5.3.b.b.a** Decide worker substrate (worker_threads vs child_process) and record ADR.
+    - [x] **M5.3.b.b.a** Decide worker substrate (worker_threads vs child_process) and record ADR.
     - [ ] **M5.3.b.b.b** Define capability declaration schema and gating policy types with zod.
     - [ ] **M5.3.b.b.c** Implement worker spawn + JSON-RPC transport over chosen substrate.
     - [ ] **M5.3.b.b.d** Wire worker-process tool.kind into invokeTool with capability-gated dispatcher.
