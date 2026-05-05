@@ -28,16 +28,17 @@ on. The package today is intentionally narrow:
 
 Deferred to later M4.2 sub-bullets:
 
-| Sub-bullet   | Scope                                                                                  |
-| ------------ | -------------------------------------------------------------------------------------- |
-| **M4.2.b**   | `SendMessage` / `SetBotProfile` (`chat.postMessage`, `users.profile.set`, `bots.info`) |
-| **M4.2.c.1** | `Subscribe` via Socket Mode happy-path                                                 |
-| **M4.2.c.2** | Resilient reconnect on `disconnect` envelope, transport error, or pong-timeout         |
-| **M4.2.d**   | `CreateApp` / `InstallApp` (Slack Manifest API + OAuth install flow)                   |
+| Sub-bullet   | Scope                                                                                                    |
+| ------------ | -------------------------------------------------------------------------------------------------------- |
+| **M4.2.b**   | `SendMessage` / `SetBotProfile` (`chat.postMessage`, `users.profile.set`)                                |
+| **M4.2.c.1** | `Subscribe` via Socket Mode happy-path                                                                   |
+| **M4.2.c.2** | Resilient reconnect on `disconnect` envelope, transport error, or pong-timeout                           |
+| **M4.2.d.1** | `CreateApp` (`apps.manifest.create`) + `LookupUser` (`users.info` / `bots.info` / `users.lookupByEmail`) |
+| **M4.2.d.2** | `InstallApp` (Slack v2 OAuth + admin-preapproval) — final method                                         |
 
 `Client` therefore does NOT yet implement `messenger.Adapter`. The
-compile-time `var _ messenger.Adapter = (*Adapter)(nil)` assertion
-lands in M4.2.d once all six adapter methods exist.
+compile-time `var _ messenger.Adapter = (*Client)(nil)` assertion
+lands in M4.2.d.2 once all six adapter methods exist.
 
 ## Public API
 
