@@ -1424,3 +1424,30 @@ genuinely defense-in-depth versus safety-critical.
 - Docs: `docs/ROADMAP-phase1.md` §M3.5.a.3.2.
 
 ---
+
+## 2026-05-04 — M5.1: portable runtime interface decouples from wire schema via post-loader projection
+
+**PR**: [#54](https://github.com/vadimtrunov/watchkeepers/pull/54)
+**Merged**: 2026-05-04
+
+### Pattern
+
+When defining a runtime-facing type that mirrors a wire-format type (here
+`runtime.Manifest` mirrors `keepclient.ManifestVersion`), do not import the wire
+type directly. Define a runtime-local type that represents the POST-LOADER shape —
+`system_prompt` already templated with personality+language, `tools` decoded from
+raw JSON to `[]string`, `authority_matrix` projected to the access-control shape
+the runtime actually consults. The mapping (M5.5 loader) owns the projection.
+Decoupling means a future Keep schema change does not ripple into the runtime, and
+the runtime interface stays portable across providers (Claude Code, FakeProvider,
+future LLMs). Companion: alias-import the package (`agentruntime "core/pkg/runtime"`)
+since `runtime` clashes with stdlib. Apply when extending any boundary type that
+lives both in storage and in computation — store layer carries wire shape, compute
+layer carries logical shape, loader layer is the projection.
+
+### References
+
+- Files: `core/pkg/runtime/runtime.go`, `core/pkg/runtime/doc.go`, `core/pkg/runtime/errors.go`
+- Docs: `docs/ROADMAP-phase1.md` §M5.1.
+
+---
