@@ -377,17 +377,21 @@ func parsePutManifestVersionRequest(w http.ResponseWriter, req *http.Request) (p
 // violation on `(manifest_id, version_no)` is translated to
 // 409 version_conflict without leaking the raw Postgres error text.
 //
-// KNOWN GAP, M3.5.a.3 (security): this handler does NOT filter writes
-// by `claim.OrganizationID`. Unlike `handleInsertWatchkeeper` /
-// `handleSetWatchkeeperLead` / `handleUpdateWatchkeeperStatus` (closed
-// in M3.5.a.2), the `manifest` table has no `organization_id` column
-// (see migration 002:30-35 — only a nullable `created_by_human_id`),
-// so the handler cannot infer tenancy from the row. Closing the gap
-// requires a schema migration (add `manifest.organization_id` + FK +
-// RLS policy on `manifest` / `manifest_version`) BEFORE the handler
-// wire-up. Tracked at M3.5.a.3 in ROADMAP-phase1.md; deploy with an
-// operator-only network boundary in front of this route until that
-// lands.
+// Cross-tenant posture (M3.5.a.3.2): the INSERT routes through a
+// `WHERE EXISTS (SELECT 1 FROM watchkeeper.manifest WHERE id = $manifest_id
+// AND organization_id = $claim_org)` subquery so a caller for org A
+// cannot anchor a manifest_version at org B's manifest just by knowing
+// the manifest UUID. The cross-tenant case produces no row through
+// `RETURNING` → pgx.ErrNoRows → 404 not_found, mirroring the contract
+// on handleInsertWatchkeeper. The schema half landed in M3.5.a.3.1
+// (migration 013): `manifest.organization_id NOT NULL` plus per-role
+// `ENABLE + FORCE ROW LEVEL SECURITY` on both `manifest` and
+// `manifest_version`. RLS keyed off the `watchkeeper.org` GUC remains
+// the defense-in-depth backstop; this handler-layer filter ensures the
+// 404 surface (rather than an RLS-level error) by construction. An
+// empty `claim.OrganizationID` (legacy pre-M3.5.a.1 token) is rejected
+// up front with 403 organization_required before WithScope opens any
+// transaction — no DB round-trip on legacy callers.
 func handlePutManifestVersion(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())
@@ -411,6 +415,16 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 			return
 		}
 
+		// M3.5.a.3.2: the claim must carry an explicit tenant. Phase 1
+		// rejects legacy claims rather than fall through to an
+		// unfiltered INSERT that would let any authenticated caller
+		// write a version against any tenant's manifest. Fires before
+		// WithScope so a malicious legacy token never opens a tx.
+		if claim.OrganizationID == "" {
+			writeError(w, http.StatusForbidden, "organization_required")
+			return
+		}
+
 		// The three jsonb columns default to '[]' / '{}' / '[]' at the
 		// table level; pass SQL NULL via nil interface when the client
 		// omits the field so the default fires instead of Postgres
@@ -423,6 +437,15 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
+			// INSERT … SELECT … WHERE EXISTS shape mirrors
+			// handleInsertWatchkeeper: Postgres rejects the row in a
+			// single statement when the manifest's org does not match
+			// the claim's tenant, returning no row through RETURNING.
+			// The handler surfaces that as 404 not_found without
+			// leaking row existence to the wrong tenant. The RLS
+			// policy from migration 013 is the defense-in-depth
+			// backstop; the explicit EXISTS keeps the 404 surface
+			// (rather than the RLS-level error path) deterministic.
 			return tx.QueryRow(
 				ctx, `
                 INSERT INTO watchkeeper.manifest_version (
@@ -430,20 +453,27 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
                     tools, authority_matrix, knowledge_sources,
                     personality, language
                 )
-                VALUES (
+                SELECT
                     $1, $2, $3,
                     coalesce($4::jsonb, '[]'::jsonb),
                     coalesce($5::jsonb, '{}'::jsonb),
                     coalesce($6::jsonb, '[]'::jsonb),
                     $7, $8
+                WHERE EXISTS (
+                    SELECT 1 FROM watchkeeper.manifest
+                    WHERE id = $1 AND organization_id = $9
                 )
                 RETURNING id
             `, manifestID, body.VersionNo, body.SystemPrompt,
 				tools, authorityMatrix, knowledgeSources,
-				personality, language,
+				personality, language, claim.OrganizationID,
 			).Scan(&id)
 		})
 		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "not_found")
+				return
+			}
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 				writeError(w, http.StatusConflict, "version_conflict")
