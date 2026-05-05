@@ -8,6 +8,14 @@
 // per-transaction role switch is what activates the RLS policies from
 // migration 005; the watchkeeper.scope GUC is what those policies match
 // against.
+//
+// M3.5.a.3.1 added a sibling GUC `watchkeeper.org` that the manifest /
+// manifest_version RLS policies (migration 013) match on. WithScope
+// always issues SET LOCAL on the GUC; an empty claim.OrganizationID
+// becomes SQL NULL via the policies' `nullif(..., ”)::uuid` cast and
+// the policies are fail-closed (zero rows visible, no INSERT permitted)
+// for legacy tokens. Handler-layer rejection of legacy claims is
+// M3.5.a.3.2's responsibility — this layer is plumbing only.
 package db
 
 import (
@@ -93,6 +101,15 @@ func WithScope(ctx context.Context, pool *pgxpool.Pool, claim auth.Claim, fn fun
 	}
 	if _, err := tx.Exec(ctx, "SELECT set_config('watchkeeper.scope', $1, true)", claim.Scope); err != nil {
 		return fmt.Errorf("set watchkeeper.scope: %w", err)
+	}
+	// `watchkeeper.org` is consulted by the manifest / manifest_version
+	// RLS policies from migration 013. Setting the empty string when the
+	// claim has no OrganizationID is intentional: the policies cast via
+	// `nullif(..., '')::uuid` so an empty value evaluates to SQL NULL and
+	// the comparison fails closed. Legacy-claim rejection is enforced at
+	// the handler layer (M3.5.a.3.2).
+	if _, err := tx.Exec(ctx, "SELECT set_config('watchkeeper.org', $1, true)", claim.OrganizationID); err != nil {
+		return fmt.Errorf("set watchkeeper.org: %w", err)
 	}
 
 	if err := fn(ctx, tx); err != nil {

@@ -188,14 +188,21 @@ WHERE id = $lead_human_id AND organization_id = $claim_org)`, so a
   surfaces as `404 not_found`.
 
 **Remaining gap.** `PUT /v1/manifests/{manifest_id}/versions`
-(`handlePutManifestVersion`) is NOT yet filtered by tenant. The
-`manifest` table has no `organization_id` column (see migration 002),
-so the handler cannot infer tenancy from the row without a schema
-migration. Tracked at **M3.5.a.3** (ROADMAP-phase1.md): adds
-`manifest.organization_id` + FK + RLS policy on
-`manifest` / `manifest_version`, then mirrors the M3.5.a.2 wire-up
-shape. Until that lands, deploy this route behind an operator-only
-network boundary.
+(`handlePutManifestVersion`) is NOT yet filtered by tenant at the
+handler layer. The schema half of the fix landed in **M3.5.a.3.1**
+(migration 013): `manifest.organization_id NOT NULL` plus FK to
+`watchkeeper.organization`, plus per-role `ENABLE + FORCE ROW LEVEL
+SECURITY` on `manifest` and `manifest_version` keyed off a new
+`watchkeeper.org` GUC. `db.WithScope` sets the GUC from
+`claim.OrganizationID` so existing handlers continue to function;
+legacy claims with empty `OrganizationID` cause Postgres-level RLS
+to fail closed (zero rows visible, INSERT rejected by `WITH CHECK`)
+as defense in depth. Handler-layer rejection (mirroring the
+M3.5.a.2 shape: `403 organization_required` on empty claim,
+`404 not_found` on cross-tenant `manifest_id`) is tracked at
+**M3.5.a.3.2** (ROADMAP-phase1.md). Until that lands, deploy this
+route behind an operator-only network boundary even though the RLS
+backstop is now active.
 
 A network-boundary that admits only authenticated operators is no
 longer required for tenant safety on the four wired handlers above,

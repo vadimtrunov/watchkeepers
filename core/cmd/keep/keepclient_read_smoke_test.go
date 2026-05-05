@@ -34,6 +34,25 @@ func newKeepClient(t *testing.T, addr, scope string, ti *auth.TestIssuer) *keepc
 	)
 }
 
+// newKeepClientWithOrg is the org-aware sibling of newKeepClient. The
+// minted token carries OrganizationID so the spawned binary's WithScope
+// sets the watchkeeper.org GUC, which the manifest / manifest_version
+// RLS policies (migration 013) consult. Manifest-touching smoke tests
+// MUST go through this helper; non-manifest tests can stay on the
+// scope-only newKeepClient since those code paths don't hit the new
+// RLS policies.
+func newKeepClientWithOrg(t *testing.T, addr, scope, orgID string, ti *auth.TestIssuer) *keepclient.Client {
+	t.Helper()
+	tok, err := ti.Issue(auth.Claim{Subject: "smoke-subject", Scope: scope, OrganizationID: orgID}, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	return keepclient.NewClient(
+		keepclient.WithBaseURL("http://"+addr),
+		keepclient.WithTokenSource(keepclient.StaticToken(tok)),
+	)
+}
+
 // TestKeepClient_Smoke_Search_AgentScope drives the real binary with an
 // agent-scope token and asserts the client decodes the seeded chunk row
 // (only the agent + org rows are visible to the agent scope per RLS).
@@ -107,7 +126,9 @@ func TestKeepClient_Smoke_GetManifest_Latest(t *testing.T) {
 	addr, teardown := bootKeep(t, env)
 	defer teardown()
 
-	c := newKeepClient(t, addr, "org", issuerForTest(t))
+	// Manifest tables are RLS-gated on `watchkeeper.org` (migration 013),
+	// so the smoke client must mint a tenant-bound token to see the seed.
+	c := newKeepClientWithOrg(t, addr, "org", env.orgID, issuerForTest(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -133,7 +154,9 @@ func TestKeepClient_Smoke_GetManifest_NotFound(t *testing.T) {
 	addr, teardown := bootKeep(t, env)
 	defer teardown()
 
-	c := newKeepClient(t, addr, "org", issuerForTest(t))
+	// Use the seeded org so the not-found result reflects an actual
+	// missing UUID rather than RLS hiding everything (migration 013).
+	c := newKeepClientWithOrg(t, addr, "org", env.orgID, issuerForTest(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

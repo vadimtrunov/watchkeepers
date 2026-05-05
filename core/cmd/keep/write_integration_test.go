@@ -243,7 +243,11 @@ func TestWriteAPI_PutManifestVersion_NewVersion(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	// manifest_version is RLS-gated on watchkeeper.org via a subquery on
+	// manifest (migration 013); the WITH CHECK clause requires the GUC
+	// to match the parent manifest's organization_id, so the token must
+	// carry the seed's organization_id.
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	// Seeded versions are 1 and 2 (see read_integration_test seed).
 	_, body := doJSON(t, http.MethodPut,
@@ -286,7 +290,8 @@ func TestWriteAPI_PutManifestVersion_OptionalFields(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	// Tenant-bound mint required by manifest_version RLS (migration 013).
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	// Use a high version_no to avoid collisions with the seed.
 	_, body := doJSON(t, http.MethodPut,
@@ -346,7 +351,8 @@ func TestWriteAPI_PutManifestVersion_DuplicateRejected(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	// Tenant-bound mint required by manifest_version RLS (migration 013).
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	// Seed has version_no=2 already; try to insert another v2.
 	status, body := doJSON(t, http.MethodPut,
@@ -693,7 +699,8 @@ func TestWriteAPI_PutManifestVersion_LanguageBCP47Variants(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	// Tenant-bound mint required by manifest_version RLS (migration 013).
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	// Each variant gets a distinct version_no above the seed (1 and 2) so
 	// the inserts never collide on the unique (manifest_id, version_no)
@@ -751,6 +758,9 @@ func TestWriteAPI_PutManifestVersion_InvalidLanguage(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
+	// 400 invalid_language is raised by parsePutManifestVersionRequest
+	// before WithScope is opened, so the token need not carry an org —
+	// migration 013's RLS is irrelevant on this rejection path.
 	tok := mintToken(t, ti, "org")
 
 	status, body := doJSON(t, http.MethodPut,

@@ -80,7 +80,10 @@ func TestKeepClient_Smoke_PutManifestVersion_NewAndConflict(t *testing.T) {
 	addr, teardown := bootKeep(t, env)
 	defer teardown()
 
-	c := newKeepClient(t, addr, "org", issuerForTest(t))
+	// Manifest tables are RLS-gated on `watchkeeper.org` (migration 013),
+	// so the smoke client must mint a tenant-bound token; without it the
+	// INSERT would be rejected by the manifest_version WITH CHECK clause.
+	c := newKeepClientWithOrg(t, addr, "org", env.orgID, issuerForTest(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
