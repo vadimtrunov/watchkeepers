@@ -1,0 +1,36 @@
+# Watchkeeper dev-workspace parent app manifest. ROADMAP §M4 → M4.3.
+#
+# Consumed by `make spawn-dev-bot` (core/cmd/spawn-dev-bot). The script
+# reads this file, calls Slack's apps.manifest.create with the
+# transformed body, and writes the returned credentials to the
+# --credentials-out path.
+#
+# Schema (see core/cmd/spawn-dev-bot/manifest.go for the strict-mode
+# YAML decoder — typo'd top-level keys fail fast):
+#
+#   name        : required, the app's display name in Slack
+#   description : long-form blurb shown in the app catalogue
+#   scopes      : bot OAuth scopes (Slack documented values)
+#   metadata    : optional Slack manifest extensions; only the keys
+#                 listed in core/pkg/messenger/slack/create_app.go
+#                 (`recognisedManifestDisplayKeys` /
+#                 `recognisedManifestSettingsKeys`) are forwarded —
+#                 unknown keys are dropped at the adapter boundary.
+#
+# Phase 1 keeps the scope set conservative: chat:write to post and
+# users:read to look up message authors. Add scopes here as M4.4 + the
+# downstream Watchkeeper milestones need them.
+
+name: Watchkeeper Dev
+description: Watchkeeper development bot — provisioned by spawn-dev-bot (M4.3).
+scopes:
+  - chat:write
+  - users:read
+  - im:history
+metadata:
+  socket_mode_enabled: "true"
+  long_description: >-
+    Watchkeeper is the Phase-1 messenger-adapter integration for the
+    Watchkeeper development workspace. This app is created by the
+    spawn-dev-bot bootstrap script and is intended to host child apps
+    spawned per-Watchkeeper at runtime.

@@ -40,13 +40,87 @@ type appsManifestCreateRequest struct {
 // appsManifestCreateResponse is the subset of the Slack response
 // CreateApp decodes. Slack returns the assigned `app_id` plus a
 // `credentials` object (client_id, client_secret, verification_token,
-// signing_secret); this adapter surfaces only the AppID through the
-// portable contract — credentials are the secrets-interface concern
-// (and the LESSON-driven redaction discipline below ensures they
-// never appear in logs).
+// signing_secret). The portable [messenger.Adapter] contract surfaces
+// only the AppID; the credentials are routed OUT-OF-BAND to the
+// caller-controlled [CreateAppCredsSink] so the tokens are never
+// embedded in any return value (mirrors the M4.2.d.2 install-token-sink
+// design — see [InstallTokenSink]).
 type appsManifestCreateResponse struct {
-	OK    bool   `json:"ok"`
-	AppID string `json:"app_id"`
+	OK          bool                          `json:"ok"`
+	AppID       string                        `json:"app_id"`
+	Credentials appsManifestCreateCredentials `json:"credentials"`
+}
+
+// appsManifestCreateCredentials is the `credentials` sub-object Slack
+// returns from `apps.manifest.create`. Every field is a long-lived
+// secret; the [Client] never logs them, never embeds them in a return
+// value, and only forwards them to a configured [CreateAppCredsSink].
+type appsManifestCreateCredentials struct {
+	ClientID          string `json:"client_id"`
+	ClientSecret      string `json:"client_secret"`
+	VerificationToken string `json:"verification_token"`
+	SigningSecret     string `json:"signing_secret"`
+}
+
+// CreateAppCredentials is the value passed to a configured
+// [CreateAppCredsSink] when [Client.CreateApp] succeeds. It carries
+// every credential `apps.manifest.create` returned plus the assigned
+// [messenger.AppID] the caller needs to key its secrets store.
+//
+// Persistence is the caller's job; the adapter does not retain any field
+// after the sink callback returns.
+type CreateAppCredentials struct {
+	// AppID is the Slack-assigned app id this credentials bundle belongs
+	// to. Echoed from the response so a sink that fans multiple bootstraps
+	// into a single store has the natural keying context.
+	AppID messenger.AppID
+
+	// ClientID is the OAuth client_id Slack assigned to the app. Required
+	// at install time (`oauth.v2.access`).
+	ClientID string
+
+	// ClientSecret is the OAuth client_secret matching ClientID. Required
+	// at install time. The adapter never logs it.
+	ClientSecret string
+
+	// VerificationToken is the legacy verification token Slack issues
+	// for outbound event verification. Modern apps verify via the
+	// signing secret instead; included here for completeness.
+	VerificationToken string
+
+	// SigningSecret is the request-signing secret used to verify
+	// inbound Events API / Interactivity payloads. Required if the app
+	// ever falls back from Socket Mode to HTTP event delivery.
+	SigningSecret string
+}
+
+// CreateAppCredsSink is the function shape [WithCreateAppCredsSink]
+// accepts. The hook receives every secret bytestring `apps.manifest.create`
+// returned; the caller writes them to its own secrets interface (vault,
+// AWS SSM, keychain, env, structured JSON file the operator pipes into
+// their store, …) and returns a non-nil error to abort the bootstrap
+// when the secret-store write fails. Returning an error causes
+// [Client.CreateApp] to surface it wrapped — the adapter does NOT
+// rollback the app creation (Slack's manifest.create is server-side
+// complete; the caller must handle reconciliation upstream).
+type CreateAppCredsSink func(ctx context.Context, creds CreateAppCredentials) error
+
+// WithCreateAppCredsSink wires the [CreateAppCredsSink] consulted at
+// the end of every successful [Client.CreateApp] call. A nil hook is
+// ignored so callers can apply a conditional override without explicit
+// branching.
+//
+// When no sink is wired, [Client.CreateApp] silently discards the
+// returned credentials — the historical behaviour from M4.2.d.1, kept
+// for backward compatibility with callers that only need the AppID.
+// The bootstrap script (M4.3) wires a sink that writes the credentials
+// to a structured JSON file the operator ingests into the secrets store.
+func WithCreateAppCredsSink(sink CreateAppCredsSink) ClientOption {
+	return func(c *clientConfig) {
+		if sink != nil {
+			c.createAppCredsSink = sink
+		}
+	}
 }
 
 // recognisedManifestDisplayKeys is the closed set of metadata keys
@@ -155,6 +229,26 @@ func (c *Client) CreateApp(ctx context.Context, manifest messenger.AppManifest) 
 		// importing the slack package.
 		return "", liftInvalidManifest(err)
 	}
+
+	// Hand the just-issued credentials off to the configured sink (if
+	// any) BEFORE returning. Mirrors the M4.2.d.2 install-token-sink
+	// pattern: secrets ride OUT-OF-BAND through a caller-controlled
+	// callback so the portable [messenger.Adapter] surface stays free of
+	// raw token bytes. A nil sink silently discards the credentials —
+	// callers that only need the AppID stay backwards compatible.
+	if sink := c.cfg.createAppCredsSink; sink != nil {
+		creds := CreateAppCredentials{
+			AppID:             messenger.AppID(resp.AppID),
+			ClientID:          resp.Credentials.ClientID,
+			ClientSecret:      resp.Credentials.ClientSecret,
+			VerificationToken: resp.Credentials.VerificationToken,
+			SigningSecret:     resp.Credentials.SigningSecret,
+		}
+		if err := sink(ctx, creds); err != nil {
+			return "", fmt.Errorf("slack: %s: credentials sink: %w", appsManifestCreateMethod, err)
+		}
+	}
+
 	return messenger.AppID(resp.AppID), nil
 }
 

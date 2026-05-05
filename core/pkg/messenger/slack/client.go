@@ -153,6 +153,16 @@ type clientConfig struct {
 	// [Client.InstallApp] fails synchronously with
 	// [ErrInstallParamsUnset] BEFORE contacting Slack.
 	installParamsResolver InstallParamsResolver
+
+	// createAppCredsSink is the caller-controlled hook
+	// [Client.CreateApp] invokes with the just-issued app credentials
+	// (client_id, client_secret, signing_secret, verification_token).
+	// nil at construction means [Client.CreateApp] discards the
+	// credentials silently — callers that only need the AppID retain
+	// the historical M4.2.d.1 behaviour. Mirrors the M4.2.d.2
+	// install-token-sink pattern: secrets ride OUT-OF-BAND through a
+	// caller-controlled callback rather than a return value.
+	createAppCredsSink CreateAppCredsSink
 }
 
 // ClientOption configures a [Client] at construction time. Pass

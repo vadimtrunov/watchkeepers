@@ -463,6 +463,105 @@ The Make target enforces the env guard before invoking
 DSN fails loudly. CI runs the same target under the `Keep Integration
 CI` job.
 
+## Provisioning the dev Slack workspace
+
+ROADMAP §M4.3 wires a parent Slack app via Slack's Manifest API. The
+parent app is the long-lived configuration root; child apps that
+individual Watchkeepers run as land in M4.4+ via the same adapter
+surface.
+
+### One-shot operator prerequisites
+
+Performed manually in the Slack admin console — the bootstrap script
+does NOT mediate these:
+
+1. Create a dev Slack workspace (free tier suffices) and admin yourself
+   into it.
+2. From <https://api.slack.com/apps> → "Your Apps" → "New App" → "From
+   an app manifest", create a TINY placeholder app whose only purpose
+   is to host the **app configuration token** (see step 4). Slack's
+   bootstrap is chicken-and-egg here: you need an app to mint a config
+   token, and you need a config token to call `apps.manifest.create`.
+3. In the placeholder app, navigate to "Settings" → "Manage app
+   configuration tokens" → "Generate Token". Slack returns an
+   `xoxe-*`-prefixed token. This is the single secret the bootstrap
+   script consumes.
+4. Export the token in your shell:
+
+   ```sh
+   export WATCHKEEPER_SLACK_CONFIG_TOKEN='xoxe-...'
+   ```
+
+   The script reads this env var via the secrets interface stub
+   (`core/pkg/secrets`); future milestones will swap the env-backed
+   `SecretSource` for a vault-backed implementation without changing
+   the script.
+
+### Running the bootstrap
+
+```sh
+make spawn-dev-bot
+```
+
+The target builds `bin/spawn-dev-bot`, validates the
+`WATCHKEEPER_SLACK_CONFIG_TOKEN` env var, calls Slack's
+`apps.manifest.create` with the YAML at
+`deploy/slack/dev-bot-manifest.yaml`, and writes the returned
+credentials (client_id, client_secret, signing_secret,
+verification_token) to a JSON file at
+`.omc/secrets/dev-bot-credentials.json` (mode `0600`). The credentials
+are NEVER printed to stdout / stderr / logs — the file at that path is
+the single observation point.
+
+Override the manifest or output path via env:
+
+```sh
+SPAWN_DEV_BOT_MANIFEST=path/to/manifest.yaml \
+SPAWN_DEV_BOT_CREDENTIALS_OUT=path/to/credentials.json \
+make spawn-dev-bot
+```
+
+### Dry-run
+
+Validate a manifest WITHOUT contacting Slack or reading the
+configuration token:
+
+```sh
+make spawn-dev-bot-dry-run
+```
+
+The script prints the JSON body it would send to
+`apps.manifest.create` to stdout and exits 0. Useful as a CI gate
+against malformed manifests.
+
+### Ingesting the credentials
+
+Phase 1's secrets interface is read-only (`secrets.SecretSource.Get`).
+The credentials file is therefore a structured JSON document the
+operator pipes into their own secrets store (vault, AWS SSM,
+1Password CLI):
+
+```sh
+jq -r .signing_secret < .omc/secrets/dev-bot-credentials.json | \
+  vault kv put secret/watchkeeper/slack/parent signing_secret=-
+```
+
+When Phase 2+ adds a vault-backed `SecretSink`, the bootstrap script
+will route credentials directly via the new interface and the JSON
+file will become an optional debug affordance.
+
+### Verification gates
+
+- `make spawn-dev-bot-dry-run` validates the manifest in CI without
+  any external dependency (ROADMAP §M4 → M4.3 verification slot —
+  partial; live `make spawn-dev-bot` requires a provisioned dev
+  workspace).
+- `go test -race ./core/cmd/spawn-dev-bot/...` includes a binary-grep
+  test (`TestSpawnDevBot_BinaryHasNoTokenLeaks`) that builds the
+  binary and asserts no `xoxe-* / xoxb-* / xoxp-* / xapp-*` token
+  prefixes appear in the resulting bytes — ROADMAP bullet 279
+  (parent-app credentials never leave the secrets interface).
+
 ## Pre-commit hooks
 
 `lefthook` runs a subset of the above on staged files only, so local feedback
