@@ -297,7 +297,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 **Scope**
 
 - [x] **M5.1** `AgentRuntime` Go interface: `Start`, `SendMessage`, `InvokeTool`, `Terminate`, plus streaming event hook.
-- [ ] **M5.2** `LLMProvider` interface (separate from `AgentRuntime`): `Complete`, `Stream`, `CountTokens`, `ReportCost`. Default implementation wraps Claude Code (via Claude Agent SDK if embedding, or as a subprocess if shelling out).
+- [x] **M5.2** `LLMProvider` interface (separate from `AgentRuntime`): `Complete`, `Stream`, `CountTokens`, `ReportCost`. Default implementation wraps Claude Code (via Claude Agent SDK if embedding, or as a subprocess if shelling out). _Interface ships in `core/pkg/llm/` (M5.2.a); the Claude Code default impl is deferred to a follow-up M5.2.b._
 - [ ] **M5.3** TS harness process:
   - Claude Code integration via the `LLMProvider` wrapper — model, system prompt, and context parameterized from Manifest.
   - JSON-RPC over stdio with Go core (request/response + streaming notifications).
