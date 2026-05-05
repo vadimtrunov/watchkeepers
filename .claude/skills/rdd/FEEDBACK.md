@@ -1052,3 +1052,69 @@ The git-master pr-mode agent's verification log showed STALE local main referenc
 - Total wall time from /rdd to merge: ~30 min
 
 ---
+
+## 2026-05-05 — incident: silent-exit after planner in `--auto` mode (process, no PR)
+
+**PR**: n/a (Phase 1 halted by operator before any branch/commit)
+**Phases with incidents**: 1
+
+### What happened
+
+`/rdd --auto` reached Phase 1 cleanly (preflight green, candidate selected:
+M5.3.b.a). Planner agent dispatched → returned `fits=true` in 9 seconds.
+The orchestrator's NEXT reply was supposed to (a) mark the companion todo
+`in_progress`, (b) print the Gate 1 prompt + `Auto-decision: yes`, and (c)
+proceed into Phase 2. Instead the reply closed with no user-facing text —
+exactly the silent-exit failure mode `FEEDBACK.md` 2026-04-22 catalogued.
+The runtime "churned" for 2m 29s waiting for the orchestrator's next
+output before the operator interrupted manually.
+
+### Why companion-todo did not catch it
+
+The companion-todo was created (`TaskCreate` ran before the `Agent`
+dispatch) but never escalated to `in_progress` after the agent returned —
+because the same reply that received the `Agent` tool result also wrote
+nothing else. The todo became a dangling list item rather than the
+workflow anchor it is described as in `SKILL.md` §"Dispatching agents
+→ Companion-todo". The mechanic only works if the FIRST line of the reply
+that holds the `Agent` tool result is also the verdict text — not "I'll
+write the verdict in a follow-up reply".
+
+### What wasted effort
+
+About 2m 29s of wall time, plus a full conversation round-trip to
+diagnose. Zero repo side effects (no branch, no TASK file, no commit, no
+PR), so rollback was free.
+
+### Suggested skill changes
+
+- **Tighten Hard rule 5 in `SKILL.md`**: add an explicit "first-line
+  rule" — the reply that contains an `Agent` tool result MUST start its
+  text block with the orchestrator-authored verdict on the very next
+  text segment, before any further tool call. Current wording ("end the
+  same reply with…") is satisfied by lazy interpretations where the
+  text comes after additional tool calls; a "first text segment after
+  Agent return is the verdict" framing is harder to defeat.
+- **Reframe companion-todo as a hard-blocking ritual in `--auto`**: the
+  `--auto` orchestrator should refuse to dispatch the next phase's first
+  tool call until the prior phase's companion-todo has been moved through
+  `in_progress` → `completed`. Either add a soft check (orchestrator
+  self-discipline language) or, better, make the auto-decision audit
+  block the literal trigger that flips the todo — the audit print is
+  unconditional, so binding todo-update to it removes the silent-exit
+  surface.
+- **Add a bench-style stitched example to `SKILL.md`**: a single short
+  fenced example showing a turn that ends correctly — the `Agent` tool
+  result, then `TaskUpdate(completed)`, then the Gate prompt + audit, all
+  in one reply — would make the contract concrete. Operators are clearly
+  better at recognising the right shape than at synthesising it from a
+  prose rule.
+
+### Metrics
+
+- Review iterations: 0 (halted before code)
+- PR-fix iterations: 0 (no PR opened)
+- Operator interventions outside of gates: 1 (manual halt + diagnosis ask)
+- Total wall time from /rdd to halt: 00:05 (mostly the 2m 29s silent stall)
+
+---
