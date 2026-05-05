@@ -1217,3 +1217,28 @@ implementing any reconnect-resilient streaming consumer (WebSocket, SSE, gRPC st
 - Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
 
 ---
+
+## 2026-05-04 — M4.2.d.1: Slack `apps.manifest.create` modern shape uses OBJECT-typed manifest, not string-encoded JSON
+
+**PR**: [#46](https://github.com/vadimtrunov/watchkeepers/pull/46)
+**Merged**: 2026-05-04 (squash sha `a7ef1b5`)
+
+### Pattern
+
+When implementing an HTTP wire adapter, always re-read the target API's CURRENT
+documentation rather than relying on prior intuition. The legacy
+`apps.manifest.update` (form-urlencoded) wrapped the manifest as a STRING-typed
+field carrying inner JSON. The modern JSON-bodied `apps.manifest.create` expects
+the manifest as a regular object field: `{"manifest": {...}}`. The byte-level
+wire-format discipline from M4.2.b applies — assert `"manifest":{` (object
+literal) required AND `"manifest":"{` (escaped-string-encoded inner) banned. The
+typed `manifestSettingKey{name, kind}` registry catches future drift where new
+fields might land with the wrong JSON type. Apply when adapting any external API
+surface that has multi-version contracts.
+
+### References
+
+- Files: `core/pkg/messenger/slack/create_app.go`, `core/pkg/messenger/slack/create_app_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
+
+---
