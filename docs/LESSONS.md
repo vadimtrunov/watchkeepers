@@ -1294,3 +1294,29 @@ to the application but the secrets contract isn't ready for write-side yet.
 - Docs: `docs/ROADMAP-phase1.md` §M4 → M4.3.
 
 ---
+
+## 2026-05-04 — M4.4: documenting a security gap requires a TRACKED follow-up item, not "see review"
+
+**PR**: [#49](https://github.com/vadimtrunov/watchkeepers/pull/49)
+**Merged**: 2026-05-04
+
+### Pattern
+
+When a security fix is deferred (e.g., cross-tenant authorization in M4.4
+deferred pending `auth.Claim` refactor), the deferral comment must point at a
+CONCRETE, UNCHECKED, TRACKED roadmap/backlog item — not at the review thread,
+the milestone label, or "future work". Pointers like "see M4.4 review" become
+dead references the moment the milestone is marked `[x]`. Reviewers verify
+both: that the deferral is honest (gap named, threat described, fix shape
+sketched) AND that there is a discoverable line item a future contributor can
+pick up. Companion: also surface the operator-deployment posture in
+`DEVELOPING.md` so ops/SRE see it without reading source code. Apply when
+shipping any code with a known security posture different from the eventual
+production posture.
+
+### References
+
+- Files: `core/internal/keep/server/handlers_human.go`, `docs/DEVELOPING.md`
+- Docs: `docs/ROADMAP-phase1.md` §M3.5.a (tracked cross-tenant gap), §M4 → M4.4.
+
+---
