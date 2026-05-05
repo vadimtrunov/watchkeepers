@@ -133,6 +133,87 @@ func TestInsertWatchkeeper_NoToken_401(t *testing.T) {
 	}
 }
 
+// TestInsertWatchkeeper_CrossTenantRejected — claim carries org X; the
+// supplied lead_human_id resolves (in a real DB) to a human in org Y.
+// M3.5.a.2 review fix: the INSERT routes through a WHERE EXISTS subquery
+// on watchkeeper.human keyed by the claim org, so a cross-tenant caller
+// cannot anchor a watchkeeper at another tenant's human. Under the new
+// SQL the INSERT … RETURNING returns no row, surfaced as pgx.ErrNoRows
+// → 404 not_found (mirrors the 404 contract on
+// handleSetWatchkeeperLead). We assert (1) the handler bound the claim
+// org parameter and (2) the response is 404 not_found.
+func TestInsertWatchkeeper_CrossTenantRejected(t *testing.T) {
+	const otherOrgID = "77777777-7777-4777-8777-777777777777"
+	var gotSQL string
+	var gotArgs []any
+	queryRow := func(_ context.Context, sql string, args ...any) pgx.Row {
+		gotSQL = sql
+		gotArgs = args
+		// Stage ErrNoRows: under the new SQL the INSERT … SELECT …
+		// WHERE EXISTS clause matches zero rows when the lead human's
+		// org does not equal the claim org, so RETURNING produces no
+		// row and Scan surfaces pgx.ErrNoRows.
+		return server.NewFakeRowErr(pgx.ErrNoRows)
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintTokenForOrg(t, ti, "org", otherOrgID)
+
+	rec := writeDo(t, h, http.MethodPost, "/v1/watchkeepers", tok, map[string]any{
+		"manifest_id":   wkManifestID,
+		"lead_human_id": wkLeadHumanID,
+	}, "")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	// Org filter MUST be on the SQL — without it any authenticated
+	// caller could anchor a watchkeeper at any human in any tenant.
+	if !strings.Contains(gotSQL, "organization_id") {
+		t.Errorf("INSERT missing organization_id filter; got SQL: %s", gotSQL)
+	}
+	// The handler binds the claim org as the fourth parameter
+	// (manifest_id, lead_human_id, active_manifest_version_id, claim_org).
+	if len(gotArgs) < 4 {
+		t.Fatalf("args len = %d, want >= 4 (manifest_id, lead_human_id, active_mv_id, claim_org); args=%v", len(gotArgs), gotArgs)
+	}
+	if gotArgs[3] != otherOrgID {
+		t.Errorf("args[3] = %v, want claim org %q", gotArgs[3], otherOrgID)
+	}
+}
+
+// TestInsertWatchkeeper_LegacyClaimRejected — claim carries an EMPTY
+// OrganizationID (the pre-M3.5.a.1 wire shape). M3.5.a.2 review fix
+// mirrors the contract on handleInsertHuman / handleSetWatchkeeperLead /
+// handleUpdateWatchkeeperStatus: 403 organization_required before any
+// DB work runs.
+func TestInsertWatchkeeper_LegacyClaimRejected(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: wkFakeID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintLegacyToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPost, "/v1/watchkeepers", tok, map[string]any{
+		"manifest_id":   wkManifestID,
+		"lead_human_id": wkLeadHumanID,
+	}, "")
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked despite empty-org claim; expected pre-tx 403")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "organization_required" {
+		t.Errorf("error = %q, want organization_required", env.Error)
+	}
+}
+
 // -----------------------------------------------------------------------
 // Update: PATCH /v1/watchkeepers/{id}/status
 // -----------------------------------------------------------------------

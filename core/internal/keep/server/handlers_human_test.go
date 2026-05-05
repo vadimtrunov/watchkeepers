@@ -36,7 +36,12 @@ const (
 // TestInsertHuman_HappyPath asserts a minimal body returns 201 + id and
 // the runner sees claim.Scope. The minted token carries OrganizationID =
 // testClaimOrgID (which equals humanOrgID), so the M3.5.a.2 claim-vs-body
-// org check passes by construction.
+// org check passes by construction. We also pin the positive direction of
+// the M3.5.a.1 plumb: the runner's observed `LastClaim.OrganizationID`
+// must equal the minted tenant — a regression that drops the field
+// somewhere along the verifier → middleware → handler → runner chain
+// would surface here as an empty value, distinct from the rejection
+// tests below that assert the *negative* paths.
 func TestInsertHuman_HappyPath(t *testing.T) {
 	runner := &server.FakeScopedRunner{FakeID: humanFakeID}
 	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
@@ -61,6 +66,9 @@ func TestInsertHuman_HappyPath(t *testing.T) {
 	}
 	if !runner.FnInvoked {
 		t.Error("WithScope not invoked")
+	}
+	if runner.LastClaim.OrganizationID != testClaimOrgID {
+		t.Errorf("LastClaim.OrganizationID = %q, want %q", runner.LastClaim.OrganizationID, testClaimOrgID)
 	}
 }
 

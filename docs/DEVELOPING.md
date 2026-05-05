@@ -157,30 +157,54 @@ configurable timeout and closes the pool.
 Per-tenant authorization in the keep service is enforced at the handler
 layer via `claim.OrganizationID`, plumbed through `auth.Claim` and the
 capability broker by **M3.5.a** (foundation in **M3.5.a.1**, handler
-wire-up in **M3.5.a.2**). Concretely:
+wire-up in **M3.5.a.2**). Four mutating handlers carry the wire-up:
+`handleInsertHuman`, `handleSetWatchkeeperLead`,
+`handleUpdateWatchkeeperStatus`, and `handleInsertWatchkeeper`.
+Concretely:
 
 - Token-bearing requests carry `claim.OrganizationID` extracted from the
   JWT `org_id` field. The verifier still accepts pre-M3.5.a.1 tokens
-  with no `org_id` for rolling-deploy safety, but every keep handler
-  that mutates a tenant-scoped row rejects an empty value with
+  with no `org_id` for rolling-deploy safety, but each of the four keep
+  handlers above rejects an empty value with
   `403 organization_required`.
 - `POST /v1/humans` cross-checks the request-body `organization_id`
   against `claim.OrganizationID`; a mismatch returns
   `403 organization_mismatch` before any DB work runs.
-- `PATCH /v1/watchkeepers/{id}/lead` and
-  `PATCH /v1/watchkeepers/{id}/status` filter the target row through a
-  JOIN on `watchkeeper.human` keyed by the claim's tenant
+- `PATCH /v1/watchkeepers/{id}/lead` filters the target row through a
+  subquery on `watchkeeper.human` keyed by the claim's tenant
   (`watchkeeper.watchkeeper` carries no `organization_id` column of its
   own — see migration 002), so a cross-tenant caller's UPDATE matches
   zero rows and surfaces as `404 not_found`.
+- `PATCH /v1/watchkeepers/{id}/status` filters the
+  `SELECT … FOR UPDATE` step through a JOIN on `watchkeeper.human`
+  keyed by the claim's tenant; a cross-tenant caller's SELECT returns
+  no rows and surfaces as `404 not_found` without ever reaching the
+  UPDATE branch.
+- `POST /v1/watchkeepers` wraps the INSERT in
+  `INSERT … SELECT … WHERE EXISTS (SELECT 1 FROM watchkeeper.human
+WHERE id = $lead_human_id AND organization_id = $claim_org)`, so a
+  caller cannot anchor a new watchkeeper at another tenant's human;
+  the cross-tenant case produces no row through `RETURNING` and
+  surfaces as `404 not_found`.
+
+**Remaining gap.** `PUT /v1/manifests/{manifest_id}/versions`
+(`handlePutManifestVersion`) is NOT yet filtered by tenant. The
+`manifest` table has no `organization_id` column (see migration 002),
+so the handler cannot infer tenancy from the row without a schema
+migration. Tracked at **M3.5.a.3** (ROADMAP-phase1.md): adds
+`manifest.organization_id` + FK + RLS policy on
+`manifest` / `manifest_version`, then mirrors the M3.5.a.2 wire-up
+shape. Until that lands, deploy this route behind an operator-only
+network boundary.
 
 A network-boundary that admits only authenticated operators is no
-longer required for tenant safety, but is still recommended as
-defense-in-depth alongside the existing `KEEP_TOKEN_*` controls. The
-per-org RLS policies on `human` / `watchkeeper` mentioned in
-ROADMAP-phase1 §M3 M3.5.a remain a follow-up backstop; the
-handler-layer enforcement above closes the M4.4 cross-tenant gap on
-its own.
+longer required for tenant safety on the four wired handlers above,
+but is still **recommended** as defense-in-depth alongside the
+existing `KEEP_TOKEN_*` controls AND remains the only mitigation for
+`handlePutManifestVersion` until M3.5.a.3 lands. The per-org RLS
+policies on `human` / `watchkeeper` mentioned in ROADMAP-phase1 §M3
+M3.5.a remain a follow-up backstop; the handler-layer enforcement
+above closes the M4.4 cross-tenant gap on the four wired handlers.
 
 ### Protocol choice: HTTP over gRPC
 
