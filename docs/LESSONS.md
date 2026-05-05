@@ -1269,3 +1269,28 @@ either read secrets-by-key or write secrets without contract gymnastics.
 - Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
 
 ---
+
+## 2026-05-04 — M4.3: write-out JSON file is the right Phase-1 bridge when secrets interface is read-only
+
+**PR**: [#48](https://github.com/vadimtrunov/watchkeepers/pull/48)
+**Merged**: 2026-05-04
+
+### Pattern
+
+When an existing `secrets.SecretSource` interface is read-only and adding a
+write side would be out-of-scope (interface change blast radius), bridge the
+gap with a structured-JSON write-out file (mode `0o600`) the operator pipes
+into their secrets store via `jq | vault kv put` (or analogous). Pair this
+with a future-proof callback option on the adapter (`WithCreateAppCredsSink`)
+so the file-output sink is just a Phase-1 binding — a vault-backed sink drops
+in later without script rewrite. Companion verification: a binary-grep test
+that builds the binary with `-trimpath` + `CGO_ENABLED=0` and asserts no
+`xox[bpe]-` / `xapp-` patterns appear. Apply when an adapter must hand secrets
+to the application but the secrets contract isn't ready for write-side yet.
+
+### References
+
+- Files: `core/cmd/spawn-dev-bot/run.go`, `core/cmd/spawn-dev-bot/secrets_grep_test.go`, `core/pkg/messenger/slack/create_app.go`
+- Docs: `docs/ROADMAP-phase1.md` §M4 → M4.3.
+
+---

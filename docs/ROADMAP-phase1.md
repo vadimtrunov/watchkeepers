@@ -267,7 +267,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - Bot profile setup via `users.profile.set`, `bots.info`.
   - Event intake via **Socket Mode** (no public HTTPS required for Phase 1).
   - Rate limiter aware of Slack tier-2/tier-3 budgets.
-- [ ] **M4.3** Dev workspace bootstrap script (creates parent app from manifest, grants scopes, stores credentials via secrets interface).
+- [x] **M4.3** Dev workspace bootstrap script (creates parent app from manifest, grants scopes, stores credentials via secrets interface).
 - [ ] **M4.4** Human identity mapping: `human` row keyed by Slack user ID; lead → Watchkeeper relation modeled.
 
 **Artifacts**: `messenger/` package, `messenger/slack/` adapter, bootstrap script, operator doc section "Provisioning the dev Slack workspace".
@@ -276,7 +276,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 - [ ] `make spawn-dev-bot` creates a new Slack child app in the dev workspace, installs it, the bot appears as a workspace member and echoes a DM sent to it.
 - [ ] Rate limiter honors tier-2 burst + sustained limits under load test.
-- [ ] Parent-app credentials never leave the secrets interface (grep the built binary for raw tokens — none).
+- [x] Parent-app credentials never leave the secrets interface (grep the built binary for raw tokens — none).
 
 **Dependencies**: M3.
 **External prerequisite**: dev Slack workspace provisioned.
