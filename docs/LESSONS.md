@@ -1242,3 +1242,30 @@ surface that has multi-version contracts.
 - Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
 
 ---
+
+## 2026-05-04 — M4.2.d.2: token-sink callback beats interface change for adapter→secrets handoff
+
+**PR**: [#47](https://github.com/vadimtrunov/watchkeepers/pull/47)
+**Merged**: 2026-05-04
+
+### Pattern
+
+When an adapter must hand secrets (OAuth tokens, API keys) to the application's
+secrets store, but the existing `secrets.SecretSource` interface is read-only and
+adding a `secrets.SecretSink` would be out-of-scope, use a per-Client functional
+option that takes a callback: `WithInstallTokenSink(func(ctx, AppID, WorkspaceRef,
+InstallTokens) error)`. The callback runs inside the operation's ctx (cancellation
+propagates), the missing-sink case fails synchronously before any external call
+(no transient leak window), and the caller wires whatever secret-store they have
+— vault, SSM, env, in-memory test fake — without forcing an interface change.
+Companion pattern: per-call params resolver via `WithInstallParamsResolver(...)`
+for read-side secrets when the input type lacks a Metadata bag (here
+`messenger.WorkspaceRef`). Apply when adding an adapter method that needs to
+either read secrets-by-key or write secrets without contract gymnastics.
+
+### References
+
+- Files: `core/pkg/messenger/slack/install_app.go`, `core/pkg/messenger/slack/install_app_test.go`
+- Docs: `docs/ROADMAP-phase1.md` §M4 → M4.2.
+
+---
