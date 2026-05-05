@@ -238,6 +238,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M3.4.a** Secrets pluggable interface: `core/pkg/secrets/` defining `SecretSource` interface, `EnvSource` implementation (env-first for Phase 1, Vault-ready abstraction); functional-options constructor; cross-package compile-time interface check.
   - [x] **M3.4.b** Config loader: `core/pkg/config/` loading env vars + `config.yaml` via `gopkg.in/yaml.v3` into a strongly-typed Config struct with per-service sub-structs; validates required fields at Load time; resolves `*_secret` fields through the M3.4.a SecretSource interface (depends on M3.4.a).
 - [x] **M3.5** Capability broker: issues scoped, short-lived tokens to tools and to `keepclient` / `notebook` / `archivestore` calls; validates on invocation; enforces TTL.
+- [ ] **M3.5.a** (security): plumb `organization_id` through `auth.Claim` so per-tenant filtering is enforceable in keep handlers — cross-tenant gap blocking PR #49 production-ready posture. Requires (1) adding `OrganizationID` field to `auth.Claim` and the capability-broker mint path, and (2) landing per-org RLS policies on `human` and `watchkeeper` tables (keyed off the same scope/org GUC that `knowledge_chunk` uses — migration 005). Until this lands, deploy behind a network boundary that admits only authenticated operators.
 - [x] **M3.6** Keeper's Log writer (thin wrapper on `keepclient.log_append`): structured event schema, correlation IDs, trace context propagation.
 - [x] **M3.7** Outbox consumer: reads `outbox` from Keep via `keepclient.subscribe`, publishes to event bus with at-least-once semantics and idempotency keys.
 
@@ -254,7 +255,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 ---
 
-### M4 — Messenger adapter + Slack integration [ ]
+### M4 — Messenger adapter + Slack integration [x]
 
 **Goal**: A Watchkeeper can appear as a Slack bot, receive and send messages.
 
@@ -268,7 +269,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - Event intake via **Socket Mode** (no public HTTPS required for Phase 1).
   - Rate limiter aware of Slack tier-2/tier-3 budgets.
 - [x] **M4.3** Dev workspace bootstrap script (creates parent app from manifest, grants scopes, stores credentials via secrets interface).
-- [ ] **M4.4** Human identity mapping: `human` row keyed by Slack user ID; lead → Watchkeeper relation modeled.
+- [x] **M4.4** Human identity mapping: `human` row keyed by Slack user ID; lead → Watchkeeper relation modeled.
 
 **Artifacts**: `messenger/` package, `messenger/slack/` adapter, bootstrap script, operator doc section "Provisioning the dev Slack workspace".
 
