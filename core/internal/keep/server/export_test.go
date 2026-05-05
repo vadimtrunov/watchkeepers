@@ -123,8 +123,11 @@ func NewRouterWithRunner(v auth.Verifier, runner *FakeScopedRunner) http.Handler
 		mux.Handle("PUT /v1/manifests/{manifest_id}/versions", authed(handlePutManifestVersion(runner)))
 		mux.Handle("POST /v1/watchkeepers", authed(handleInsertWatchkeeper(runner)))
 		mux.Handle("PATCH /v1/watchkeepers/{id}/status", authed(handleUpdateWatchkeeperStatus(runner)))
+		mux.Handle("PATCH /v1/watchkeepers/{id}/lead", authed(handleSetWatchkeeperLead(runner)))
 		mux.Handle("GET /v1/watchkeepers/{id}", authed(handleGetWatchkeeper(runner)))
 		mux.Handle("GET /v1/watchkeepers", authed(handleListWatchkeepers(runner)))
+		mux.Handle("POST /v1/humans", authed(handleInsertHuman(runner)))
+		mux.Handle("GET /v1/humans/by-slack/{slack_user_id}", authed(handleLookupHumanBySlackID(runner)))
 	}
 	return mux
 }

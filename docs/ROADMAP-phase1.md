@@ -254,7 +254,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 ---
 
-### M4 — Messenger adapter + Slack integration [ ]
+### M4 — Messenger adapter + Slack integration [x]
 
 **Goal**: A Watchkeeper can appear as a Slack bot, receive and send messages.
 
@@ -268,7 +268,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - Event intake via **Socket Mode** (no public HTTPS required for Phase 1).
   - Rate limiter aware of Slack tier-2/tier-3 budgets.
 - [x] **M4.3** Dev workspace bootstrap script (creates parent app from manifest, grants scopes, stores credentials via secrets interface).
-- [ ] **M4.4** Human identity mapping: `human` row keyed by Slack user ID; lead → Watchkeeper relation modeled.
+- [x] **M4.4** Human identity mapping: `human` row keyed by Slack user ID; lead → Watchkeeper relation modeled.
 
 **Artifacts**: `messenger/` package, `messenger/slack/` adapter, bootstrap script, operator doc section "Provisioning the dev Slack workspace".
 
