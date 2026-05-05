@@ -8,6 +8,7 @@ to host a Watchkeeper agent. The harness owns:
 - JSON-RPC 2.0 over stdio with the Go core.
 - Tool invocation in `isolated-vm` (pure-JS tools) or a worker process
   (I/O-capable tools), once M5.3.b lands.
+  > Substrate decision: see [`docs/adr/0001-worker-substrate.md`](../docs/adr/0001-worker-substrate.md).
 - `zod`-derived tool schemas auto-derived from the Tool Manifest, once
   M5.3.c lands.
 
