@@ -300,7 +300,8 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [x] **M5.2** `LLMProvider` interface (separate from `AgentRuntime`): `Complete`, `Stream`, `CountTokens`, `ReportCost`. Default implementation wraps Claude Code (via Claude Agent SDK if embedding, or as a subprocess if shelling out). _Interface ships in `core/pkg/llm/` (M5.2.a); the Claude Code default impl is deferred to a follow-up M5.2.b._
 - [ ] **M5.3** TS harness process:
   - [x] **M5.3.a** Process scaffold + JSON-RPC stdio framing + hello/shutdown methods (`harness/` package; pnpm-workspace integrated; 39 vitest tests; framing per JSON-RPC 2.0 §4 incl. correct notification handling).
-  - [ ] **M5.3.b** Tool invocation path via `isolated-vm` (pure-JS) and worker process (I/O tools with declared capabilities).
+  - [ ] **M5.3.b.a** Add isolated-vm pure-JS tool invocation path with invokeTool RPC method.
+  - [ ] **M5.3.b.b** Add worker-process tool path with declared I/O capability gating.
   - [ ] **M5.3.c** Tool schemas defined with `zod`, auto-derived from Tool Manifest.
   - [ ] **M5.3.d** Claude Code integration via the `LLMProvider` wrapper — model, system prompt, context parameterized from Manifest.
 - [ ] **M5.4** Per-tool resource limits: wall-clock, CPU time, memory ceiling, output-byte cap; enforced by Go core via process controls and isolate options.
