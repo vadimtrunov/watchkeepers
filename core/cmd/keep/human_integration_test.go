@@ -62,7 +62,7 @@ func TestHumanAPI_Insert_RoundTrip(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	slackID := "U-" + env.subjectTag + "-rt"
 	displayName := "Round Trip Human " + env.subjectTag
@@ -129,7 +129,7 @@ func TestHumanAPI_Insert_DuplicateSlackID_Conflict(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	slackID := "U-" + env.subjectTag + "-dup"
 
@@ -183,7 +183,7 @@ func TestHumanAPI_LookupBySlackID_NotFound(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	status, body := doJSON(t, http.MethodGet,
 		"http://"+addr+"/v1/humans/by-slack/U-NOT-PRESENT-"+env.subjectTag, tok, nil)
@@ -201,7 +201,7 @@ func TestHumanAPI_SetLead_HappyPath(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	// Insert a fresh human row to act as the new lead. The seed already
 	// has env.humanID; we deliberately rebind to a brand new row to
@@ -271,7 +271,7 @@ func TestHumanAPI_SetLead_UnknownHuman_400(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	bogusHumanID := newUUID(t)
 	status, body := doJSON(t, http.MethodPatch,
@@ -299,7 +299,7 @@ func TestHumanAPI_SetLead_UnknownWatchkeeper_404(t *testing.T) {
 	defer teardown()
 
 	ti := issuerForTest(t)
-	tok := mintToken(t, ti, "org")
+	tok := mintTokenWithOrg(t, ti, "org", env.orgID)
 
 	bogusWKID := newUUID(t)
 	status, body := doJSON(t, http.MethodPatch,

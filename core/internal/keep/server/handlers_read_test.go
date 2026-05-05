@@ -33,8 +33,48 @@ func newRouterForTest(t *testing.T, now func() time.Time) (http.Handler, *auth.T
 	return server.NewRouter(v, nil, nil, 0), ti
 }
 
-// mustMintToken mints a valid short-lived token with the given scope.
+// testClaimOrgID is the default OrganizationID stamped on every claim
+// minted via [mustMintToken]. M3.5.a.2 introduces handler-side per-tenant
+// enforcement; carrying a non-empty org on every test token keeps the
+// pre-existing happy-path assertions valid (the handler now requires
+// `claim.OrganizationID` to be non-empty AND, for body-pinned routes,
+// to equal the request body's `organization_id`). Tests that
+// fixture-write rows with `humanOrgID` use this same value so the
+// claim-vs-body comparison stays balanced. Cross-tenant rejection
+// tests use [mustMintTokenForOrg] with a deliberately mismatched
+// constant; legacy-claim tests (no org at all) use [mustMintLegacyToken].
+const testClaimOrgID = "66666666-6666-4666-8666-666666666666"
+
+// mustMintToken mints a valid short-lived token with the given scope and
+// the [testClaimOrgID] tenant. Tests that need a different tenant on the
+// claim use [mustMintTokenForOrg]; tests that need a no-org claim (the
+// legacy mint shape from before M3.5.a.1) use [mustMintLegacyToken].
 func mustMintToken(t *testing.T, ti *auth.TestIssuer, scope string) string {
+	t.Helper()
+	return mustMintTokenForOrg(t, ti, scope, testClaimOrgID)
+}
+
+// mustMintTokenForOrg mints a valid short-lived token whose claim
+// carries an explicit OrganizationID. Used by cross-tenant rejection
+// tests where the claim's tenant must NOT equal the row/body tenant the
+// handler reads.
+func mustMintTokenForOrg(t *testing.T, ti *auth.TestIssuer, scope, orgID string) string {
+	t.Helper()
+	tok, err := ti.Issue(auth.Claim{Subject: "test-subject", Scope: scope, OrganizationID: orgID}, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	return tok
+}
+
+// mustMintLegacyToken mints a short-lived token whose claim carries an
+// EMPTY OrganizationID — the pre-M3.5.a.1 wire shape. Tests that pin
+// the "handler must reject claims without an explicit tenant" contract
+// use this helper so the rolling-deploy compat path documented in
+// auth.payload still produces a verifiable token. Production handlers
+// MUST 403 such claims; this helper exists solely to forge the negative
+// case in a `handlers_*` rejection test.
+func mustMintLegacyToken(t *testing.T, ti *auth.TestIssuer, scope string) string {
 	t.Helper()
 	tok, err := ti.Issue(auth.Claim{Subject: "test-subject", Scope: scope}, 5*time.Minute)
 	if err != nil {

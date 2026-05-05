@@ -376,6 +376,18 @@ func parsePutManifestVersionRequest(w http.ResponseWriter, req *http.Request) (p
 // It inserts a new manifest_version row under the scoped tx; a unique
 // violation on `(manifest_id, version_no)` is translated to
 // 409 version_conflict without leaking the raw Postgres error text.
+//
+// KNOWN GAP, M3.5.a.3 (security): this handler does NOT filter writes
+// by `claim.OrganizationID`. Unlike `handleInsertWatchkeeper` /
+// `handleSetWatchkeeperLead` / `handleUpdateWatchkeeperStatus` (closed
+// in M3.5.a.2), the `manifest` table has no `organization_id` column
+// (see migration 002:30-35 — only a nullable `created_by_human_id`),
+// so the handler cannot infer tenancy from the row. Closing the gap
+// requires a schema migration (add `manifest.organization_id` + FK +
+// RLS policy on `manifest` / `manifest_version`) BEFORE the handler
+// wire-up. Tracked at M3.5.a.3 in ROADMAP-phase1.md; deploy with an
+// operator-only network boundary in front of this route until that
+// lands.
 func handlePutManifestVersion(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())
@@ -411,7 +423,8 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `
+			return tx.QueryRow(
+				ctx, `
                 INSERT INTO watchkeeper.manifest_version (
                     manifest_id, version_no, system_prompt,
                     tools, authority_matrix, knowledge_sources,
@@ -527,6 +540,20 @@ func parseInsertWatchkeeperRequest(w http.ResponseWriter, req *http.Request) (in
 // status='pending' and NULL spawned_at/retired_at, and returns the new id.
 // The status and timestamps are stamped server-side: clients cannot supply
 // them via the request body (DisallowUnknownFields rejects those keys).
+//
+// Cross-tenant posture (M3.5.a.2 review fix): the body has no
+// `organization_id` field, but `lead_human_id` is FK-validated against
+// `watchkeeper.human(id)` and the FK alone does NOT enforce that the
+// human belongs to the claim's tenant. Without an extra filter a caller
+// for org A could anchor a watchkeeper at org B's human just by knowing
+// the human UUID. The INSERT is wrapped in a `WHERE EXISTS` subquery on
+// `watchkeeper.human` keyed by `(id, organization_id)` so a cross-tenant
+// caller's INSERT … RETURNING produces no row → pgx.ErrNoRows → 404
+// not_found, mirroring the 404 contract on handleSetWatchkeeperLead.
+// `watchkeeper.watchkeeper` carries no `organization_id` column of its
+// own (see migration 002); tenancy is inferred from the row's lead
+// human. An empty `claim.OrganizationID` (legacy pre-M3.5.a.1 token) is
+// rejected up front with 403 organization_required.
 func handleInsertWatchkeeper(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())
@@ -540,6 +567,15 @@ func handleInsertWatchkeeper(r scopedRunner) http.Handler {
 			return
 		}
 
+		// M3.5.a.2 review fix: the claim must carry an explicit tenant.
+		// Phase 1 rejects legacy claims rather than silently fall through
+		// to an unfiltered INSERT that would let any authenticated caller
+		// anchor a watchkeeper at any tenant's human.
+		if claim.OrganizationID == "" {
+			writeError(w, http.StatusForbidden, "organization_required")
+			return
+		}
+
 		// active_manifest_version_id is nullable; pass SQL NULL when empty
 		// so the FK-typed column holds NULL rather than an empty-string
 		// value that would fail the uuid cast.
@@ -547,16 +583,31 @@ func handleInsertWatchkeeper(r scopedRunner) http.Handler {
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
+			// JOIN-through-human org filter: the watchkeeper table has no
+			// `organization_id` column of its own; tenancy is inferred
+			// from the row's lead human. The INSERT … SELECT … WHERE
+			// EXISTS shape lets Postgres reject the row in a single
+			// statement when the lead human's org does not match the
+			// claim, returning no row through RETURNING. The handler
+			// surfaces that as 404 not_found.
 			return tx.QueryRow(ctx, `
                 INSERT INTO watchkeeper.watchkeeper (
                     manifest_id, lead_human_id, active_manifest_version_id,
                     status, spawned_at, retired_at
                 )
-                VALUES ($1, $2, $3, 'pending', NULL, NULL)
+                SELECT $1, $2, $3, 'pending', NULL, NULL
+                WHERE EXISTS (
+                    SELECT 1 FROM watchkeeper.human
+                    WHERE id = $2 AND organization_id = $4
+                )
                 RETURNING id
-            `, body.ManifestID, body.LeadHumanID, activeManifestVersionID).Scan(&id)
+            `, body.ManifestID, body.LeadHumanID, activeManifestVersionID, claim.OrganizationID).Scan(&id)
 		})
 		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "not_found")
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "insert_watchkeeper_failed")
 			return
 		}
@@ -620,6 +671,16 @@ func parseUpdateWatchkeeperStatusRequest(w http.ResponseWriter, req *http.Reques
 // concurrent transitions are serialised by Postgres' row-level lock semantics
 // (the SELECT … FOR UPDATE pattern); see migration 002 for the table CHECK
 // constraint that backs this at the storage layer.
+//
+// Cross-tenant posture (M3.5.a.2 fix): the SELECT … FOR UPDATE filter
+// matches BOTH on the watchkeeper id AND on the claim's tenant
+// (resolved through the row's `lead_human_id → human.organization_id`
+// relation; `watchkeeper.watchkeeper` carries no `organization_id`
+// column of its own — see migration 002). A cross-tenant caller's
+// SELECT returns no rows and the handler surfaces 404 not_found,
+// hiding row existence from the wrong tenant. An empty
+// `claim.OrganizationID` (legacy pre-M3.5.a.1 token) is rejected up
+// front with 403 organization_required.
 func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())
@@ -643,6 +704,13 @@ func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
 			return
 		}
 
+		// M3.5.a.2: legacy claims (no org) cannot pin tenancy and are
+		// rejected. Mirrors handleInsertHuman / handleSetWatchkeeperLead.
+		if claim.OrganizationID == "" {
+			writeError(w, http.StatusForbidden, "organization_required")
+			return
+		}
+
 		// transitionResult lets the closure signal the handler that the row
 		// existed but the requested transition is not allowed, so the
 		// outer code can map that to a 400 invalid_status_transition
@@ -655,15 +723,35 @@ func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
 
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
 			// Lock the row so a concurrent PATCH cannot race the
-			// transition validation. SELECT … FOR UPDATE blocks any
+			// transition validation. SELECT … FOR UPDATE OF w blocks any
 			// other tx that targets the same row until ours commits.
+			//
+			// JOIN-through-human org filter: a cross-tenant caller's
+			// SELECT returns zero rows and the handler emits 404. The
+			// `FOR UPDATE OF w` form locks ONLY the watchkeeper row;
+			// the human side is read-only and locking it would
+			// over-serialize unrelated traffic.
+			//
+			// DO NOT drop the `OF w` qualifier in a future refactor.
+			// A bare `FOR UPDATE` would also lock the joined `human`
+			// row, which (a) widens the lock scope to include rows
+			// that this handler does not mutate and (b) introduces a
+			// lock-ordering hazard with other handlers that read
+			// `watchkeeper.human` (e.g. `handleSetWatchkeeperLead`'s
+			// `lead_human_id IN (SELECT … FROM watchkeeper.human …)`
+			// subquery), opening a deadlock window when two
+			// transactions touch the same human + watchkeeper pair in
+			// opposite orders. Keep the qualifier explicit; the
+			// human-row visibility comes from the JOIN's read snapshot,
+			// not from a row lock.
 			var current string
 			row := tx.QueryRow(ctx, `
-                SELECT status
-                FROM watchkeeper.watchkeeper
-                WHERE id = $1
-                FOR UPDATE
-            `, id)
+                SELECT w.status
+                FROM watchkeeper.watchkeeper AS w
+                JOIN watchkeeper.human AS h ON h.id = w.lead_human_id
+                WHERE w.id = $1 AND h.organization_id = $2
+                FOR UPDATE OF w
+            `, id, claim.OrganizationID)
 			if err := row.Scan(&current); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					res.notFound = true
