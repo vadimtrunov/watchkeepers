@@ -1,0 +1,381 @@
+package runtime
+
+import (
+	"context"
+)
+
+// ID is the opaque handle the [AgentRuntime] assigns when
+// [AgentRuntime.Start] succeeds. The bytes are runtime-defined; callers
+// treat the value as an opaque string and pass it back to subsequent
+// methods ([AgentRuntime.SendMessage], [AgentRuntime.InvokeTool],
+// [AgentRuntime.Subscribe], [AgentRuntime.Terminate]) verbatim.
+//
+// Different runtime implementations encode different bytes here — the
+// Claude Code TS-harness runtime (M5.3) emits a "<pid>:<boot-nonce>"
+// pair, a future in-process runtime might emit a UUID, an SDK-embedded
+// runtime might emit the SDK's session id. The interface package never
+// inspects the bytes.
+//
+// Callers typically alias-import this package (e.g.
+// `agentruntime "github.com/vadimtrunov/watchkeepers/core/pkg/runtime"`)
+// because the bare name collides with the standard library; the
+// resulting `agentruntime.ID` reads cleanly at the call site.
+type ID string
+
+// AutonomyLevel describes the supervision regime under which the runtime
+// drives the agent. Values are vendor-neutral string aliases so the
+// runtime, the manifest loader, and downstream policies can compare
+// them without an enum-import cycle. The set is intentionally small for
+// Phase 1; future levels are additive and MUST preserve existing
+// values' meaning.
+type AutonomyLevel string
+
+const (
+	// AutonomyManual blocks every tool invocation on a human ack via
+	// the lead-approval flow before the runtime executes it. The
+	// runtime still drives the LLM but pauses on tool calls.
+	AutonomyManual AutonomyLevel = "manual"
+
+	// AutonomySupervised lets the runtime execute tool calls but
+	// requires the leader to approve manifest / personality / language
+	// changes. The default for fresh Watchkeepers.
+	AutonomySupervised AutonomyLevel = "supervised"
+
+	// AutonomyAutonomous lets the runtime execute tool calls and
+	// adjust its own [Manifest.Personality] / [Manifest.Language]
+	// without per-change approval (subject to the authority matrix).
+	AutonomyAutonomous AutonomyLevel = "autonomous"
+)
+
+// Manifest is the portable subset of an agent's runtime configuration
+// the [AgentRuntime] needs to boot a session. ROADMAP §M5 → M5.5
+// promotes a wire-format `keepclient.ManifestVersion` into a Manifest
+// here; the M5.5 loader is responsible for the mapping (template-
+// composing [Manifest.Personality] and [Manifest.Language] into
+// [Manifest.SystemPrompt], decoding the `tools` jsonb into
+// [Manifest.Toolset], and projecting the `authority_matrix` into
+// [Manifest.AuthorityMatrix]).
+//
+// The fields here are the minimum the runtime needs at Start time.
+// Cross-cutting fields (rate-limiter knobs, secrets handles) flow via
+// [StartOptions.Metadata] until a portable concept emerges.
+type Manifest struct {
+	// AgentID is the stable identifier of the Watchkeeper this runtime
+	// session is for. Treat as opaque on this surface; the runtime
+	// MAY embed it in subprocess argv / env for diagnostics. Required;
+	// an empty AgentID returns [ErrInvalidManifest] from
+	// [AgentRuntime.Start].
+	AgentID string
+
+	// SystemPrompt is the fully-composed system prompt the runtime
+	// installs at session bootstrap. The M5.5 loader is responsible
+	// for templating Personality and Language into this string; the
+	// runtime does NOT re-template. Required; an empty SystemPrompt
+	// returns [ErrInvalidManifest].
+	SystemPrompt string
+
+	// Personality is the persona blob the manifest carries verbatim.
+	// The runtime does not consume it directly (the loader already
+	// folded it into SystemPrompt); it is preserved here so meta-tools
+	// (M6 Watchmaster's `adjust_personality`) can introspect.
+	Personality string
+
+	// Language is the language code (BCP-47) the manifest carries
+	// verbatim. The runtime forwards it to the LLM provider when the
+	// provider exposes a language hint; otherwise it is informational.
+	Language string
+
+	// Model is the [LLMProvider] model identifier (e.g.
+	// `claude-sonnet-4`). The runtime passes it to the provider as-is;
+	// validation against the provider's catalogue is the provider's
+	// job (M5.2). An empty Model returns [ErrInvalidManifest].
+	Model string
+
+	// Autonomy is the supervision regime per [AutonomyLevel]. The
+	// runtime consults it when a tool invocation needs human approval.
+	// An empty Autonomy defaults to [AutonomySupervised].
+	Autonomy AutonomyLevel
+
+	// Toolset is the set of tool names the agent is permitted to call
+	// via [AgentRuntime.InvokeTool]. The runtime MUST reject calls for
+	// names outside this set with [ErrToolUnauthorized] before
+	// touching the tool. An empty / nil Toolset means "no tools".
+	Toolset []string
+
+	// AuthorityMatrix is the projection of the manifest's
+	// authority_matrix the runtime consults at lifecycle / approval
+	// gates. The shape is portable string→string so the runtime
+	// package never depends on the manifest jsonb schema; the M5.5
+	// loader is the projection's owner.
+	AuthorityMatrix map[string]string
+
+	// Metadata carries runtime-specific extensions (TS-harness module
+	// path, Claude Code subprocess flags, isolate options, …). The
+	// runtime consumes only the keys it recognises and ignores the
+	// rest. Nil is fine.
+	Metadata map[string]string
+}
+
+// StartOptions is the value supplied to [AgentRuntime.Start] alongside
+// a [Manifest]. Currently empty-by-design; future fields (working
+// directory, environment overrides, secrets handle) land here as the
+// concrete runtimes (M5.3+) discover what they need. Defining the type
+// up front keeps the call site stable: [AgentRuntime.Start] takes
+// `(ctx, manifest, ...StartOption)` and grows via functional options
+// rather than positional-arg refactors.
+type StartOptions struct {
+	// Metadata carries runtime-specific Start-time extensions. Same
+	// opacity contract as [Manifest.Metadata]; the runtime consumes
+	// only the keys it recognises.
+	Metadata map[string]string
+}
+
+// StartOption mutates the [StartOptions] passed to [AgentRuntime.Start].
+// Functional-options pattern; mirrors the [capability.Option] /
+// [outbox.Option] surfaces. Implementations apply the options in order;
+// later options override earlier ones for the same field.
+type StartOption func(*StartOptions)
+
+// WithStartMetadata seeds [StartOptions.Metadata] with the supplied
+// map. A nil map is a no-op so callers can always pass through whatever
+// they have. Subsequent calls merge: keys present in both maps take
+// the later option's value.
+func WithStartMetadata(meta map[string]string) StartOption {
+	return func(o *StartOptions) {
+		if len(meta) == 0 {
+			return
+		}
+		if o.Metadata == nil {
+			o.Metadata = make(map[string]string, len(meta))
+		}
+		for k, v := range meta {
+			o.Metadata[k] = v
+		}
+	}
+}
+
+// Runtime is the lifecycle handle returned by [AgentRuntime.Start]. The
+// concrete type the runtime returns is opaque; callers interact with
+// it via [Runtime.ID] and pass that id to subsequent
+// [AgentRuntime.SendMessage] / [AgentRuntime.InvokeTool] /
+// [AgentRuntime.Subscribe] / [AgentRuntime.Terminate] calls. The handle
+// itself is intentionally a single-method interface so future runtime
+// implementations can attach cancellation / cleanup helpers without
+// breaking callers.
+type Runtime interface {
+	// ID returns the [ID] the runtime assigned at Start time.
+	// Stable for the lifetime of the handle; safe for concurrent reads.
+	ID() ID
+}
+
+// Message is the value supplied to [AgentRuntime.SendMessage]. The
+// shape is intentionally minimal — a body plus a metadata bag for
+// runtime-specific extensions. Future fields are additive only;
+// callers needing runtime-specific knobs reach for [Message.Metadata]
+// until a portable concept exists.
+type Message struct {
+	// Text is the message body the runtime forwards to the agent. The
+	// runtime treats it as an opaque user-turn input — no parsing, no
+	// templating. Required; empty Text returns [ErrInvalidMessage]
+	// synchronously.
+	Text string
+
+	// Metadata carries runtime-specific extensions (channel id,
+	// thread anchor, sender platform id, …). The runtime consumes
+	// only the keys it recognises. Nil is fine.
+	Metadata map[string]string
+}
+
+// ToolCall is the value supplied to [AgentRuntime.InvokeTool]. Captures
+// the tool name plus the JSON-shaped arguments the runtime forwards to
+// the underlying tool implementation. The shape is intentionally
+// portable — neither the call vocabulary nor the args schema is
+// runtime-specific.
+type ToolCall struct {
+	// Name is the tool's manifest-declared name (e.g.
+	// `notebook.remember`). Required; empty Name returns
+	// [ErrInvalidToolCall]. Names not in [Manifest.Toolset] return
+	// [ErrToolUnauthorized].
+	Name string
+
+	// Arguments is the JSON-shaped payload the runtime hands to the
+	// tool. Empty / nil is fine — the tool decides whether its
+	// signature requires arguments.
+	Arguments map[string]any
+
+	// Metadata carries runtime-specific extensions (call id, parent
+	// turn id, supervisor approval ack, …). The runtime consumes
+	// only the keys it recognises. Nil is fine.
+	Metadata map[string]string
+}
+
+// ToolResult is the value returned by [AgentRuntime.InvokeTool] on
+// successful execution. Tool-side errors that do not abort the runtime
+// (e.g. a tool reports `not found`) flow back here with [ToolResult.Error]
+// populated; transport-level / authorization errors surface as the
+// returned `error`.
+type ToolResult struct {
+	// Output is the tool's payload the runtime feeds back to the agent
+	// turn loop. Opaque JSON shape; the runtime does not inspect it.
+	Output map[string]any
+
+	// Error is the tool-reported failure when the tool ran but its
+	// own logic decided the call could not be satisfied (e.g.
+	// `record not found`). The runtime forwards the error string to
+	// the agent so it can react. Empty when the call succeeded.
+	Error string
+
+	// Metadata carries runtime-specific extensions (cost, latency,
+	// cache hit indicator, …). The runtime consumes only the keys it
+	// recognises. Nil is fine.
+	Metadata map[string]string
+}
+
+// EventKind discriminates [Event] payloads. The set is small and
+// intentionally additive — future kinds extend the type without
+// breaking switch-statements that have a default branch (callers MUST
+// include one and treat unknown kinds as informational).
+type EventKind string
+
+const (
+	// EventKindMessage carries an agent-emitted text turn. The body
+	// text rides on [Event.Message].
+	EventKindMessage EventKind = "message"
+
+	// EventKindToolCall carries a tool-invocation request the runtime
+	// observed BEFORE executing it. Useful for audit / approval
+	// pipelines. The call rides on [Event.ToolCall].
+	EventKindToolCall EventKind = "tool_call"
+
+	// EventKindToolResult carries the result of a tool invocation
+	// after the runtime executed it. The result rides on
+	// [Event.ToolResult].
+	EventKindToolResult EventKind = "tool_result"
+
+	// EventKindError carries a runtime-level error that did not
+	// terminate the session (e.g. a transient provider hiccup the
+	// runtime will retry). The error string rides on
+	// [Event.ErrorMessage]. Terminal errors surface via the
+	// method-call return value, NOT through Subscribe.
+	EventKindError EventKind = "error"
+)
+
+// Event is the value delivered to an [EventHandler] from
+// [AgentRuntime.Subscribe]. The discriminated [Event.Kind] tells
+// the handler which of the optional payload pointers
+// ([Event.Message], [Event.ToolCall],
+// [Event.ToolResult], [Event.ErrorMessage]) carries the
+// payload. Unknown kinds are forwards-compatible: handlers MUST treat
+// them as informational and not panic on absent payload pointers.
+type Event struct {
+	// Kind discriminates the payload. Required; an empty Kind is a
+	// programmer error in the runtime implementation and SHOULD be
+	// dropped by the handler.
+	Kind EventKind
+
+	// RuntimeID is the [ID] of the session that produced the
+	// event. Always populated; mirrors the [Manifest.AgentID] →
+	// [ID] mapping the runtime stamped at Start.
+	RuntimeID ID
+
+	// Message is non-nil when Kind == [EventKindMessage]. Carries an
+	// agent-emitted text turn.
+	Message *Message
+
+	// ToolCall is non-nil when Kind == [EventKindToolCall]. Carries
+	// the call the runtime observed before executing.
+	ToolCall *ToolCall
+
+	// ToolResult is non-nil when Kind == [EventKindToolResult].
+	// Carries the result the runtime emitted after executing.
+	ToolResult *ToolResult
+
+	// ErrorMessage carries the error text when Kind == [EventKindError].
+	// Empty for non-error kinds. The interface intentionally does NOT
+	// surface a Go `error` here — the handler does not need to react
+	// programmatically; it just observes.
+	ErrorMessage string
+
+	// Metadata carries runtime-specific extensions (turn index,
+	// upstream provider request id, …). Handlers consume only the
+	// keys they recognise. Nil is fine.
+	Metadata map[string]string
+}
+
+// EventHandler is the callback supplied to [AgentRuntime.Subscribe].
+// The handler runs in a goroutine the runtime owns; returning a non-nil
+// error is logged by the runtime but does NOT redeliver the event
+// (Phase 1 is at-most-once at this layer; durable redelivery rides on
+// the M3.7 outbox upstream).
+type EventHandler func(ctx context.Context, ev Event) error
+
+// Subscription is the lifecycle handle returned by
+// [AgentRuntime.Subscribe]. Calling [Subscription.Stop] terminates the
+// event stream and returns once the in-flight [EventHandler] (if any)
+// has completed. Stop is idempotent. Mirrors the
+// [messenger.Subscription] shape so callers wiring both surfaces share
+// a mental model.
+type Subscription interface {
+	// Stop signals the underlying stream to close and blocks until
+	// the dispatch loop exits. Idempotent — a second Stop returns the
+	// same (typically nil) result without re-running the shutdown.
+	Stop() error
+}
+
+// AgentRuntime is the portable interface every concrete agent runtime
+// implementation satisfies. The five methods cover the lifecycle of an
+// agent session: provision the session ([AgentRuntime.Start]), feed it
+// human input ([AgentRuntime.SendMessage]), execute tool invocations on
+// the agent's behalf ([AgentRuntime.InvokeTool]), observe streaming
+// events the agent emits ([AgentRuntime.Subscribe]), and tear it down
+// ([AgentRuntime.Terminate]).
+//
+// Implementations are expected to be safe for concurrent use after
+// construction; the interface itself does not impose synchronization
+// requirements but every Phase 1 implementation does.
+//
+// The interface intentionally has NO knowledge of Claude Code,
+// isolate-vm, JSON-RPC, or the TS harness — those concepts are M5.2
+// (LLMProvider) / M5.3 (TS harness) / M5.4 (resource limits) concerns.
+// A future in-process runtime, an SDK-embedded runtime, or a fake
+// runtime for tests all implement the same surface. M5.10's
+// provider-swap conformance test exercises this contract.
+type AgentRuntime interface {
+	// Start provisions a fresh agent session driven by `manifest`.
+	// Returns the [Runtime] handle whose [Runtime.ID] the caller passes
+	// back to subsequent methods. Returns [ErrInvalidManifest] when
+	// the manifest fails synchronous validation (empty AgentID, empty
+	// SystemPrompt, empty Model).
+	Start(ctx context.Context, manifest Manifest, opts ...StartOption) (Runtime, error)
+
+	// SendMessage feeds `msg` to the runtime session identified by
+	// `runtimeID` as a user-turn input. Returns [ErrRuntimeNotFound]
+	// when `runtimeID` is unknown or has already been Terminated.
+	// Returns [ErrInvalidMessage] when `msg.Text` is empty.
+	SendMessage(ctx context.Context, runtimeID ID, msg Message) error
+
+	// InvokeTool runs the tool identified by `call.Name` with
+	// `call.Arguments` against the session identified by `runtimeID`.
+	// Returns [ErrRuntimeNotFound] when `runtimeID` is unknown.
+	// Returns [ErrToolUnauthorized] when the tool name is absent from
+	// the session manifest's [Manifest.Toolset]. Returns
+	// [ErrInvalidToolCall] when `call.Name` is empty. Tool-side
+	// failures (the tool ran but reported an error) ride on
+	// [ToolResult.Error]; this method's `error` return is reserved for
+	// transport / authorization failures.
+	InvokeTool(ctx context.Context, runtimeID ID, call ToolCall) (ToolResult, error)
+
+	// Subscribe opens a streaming-event channel for the session
+	// identified by `runtimeID` and dispatches every emitted
+	// [Event] to `handler`. The returned [Subscription]
+	// terminates the stream when [Subscription.Stop] is called.
+	// Returns [ErrRuntimeNotFound] when `runtimeID` is unknown.
+	// Returns [ErrInvalidHandler] when `handler` is nil.
+	Subscribe(ctx context.Context, runtimeID ID, handler EventHandler) (Subscription, error)
+
+	// Terminate ends the session identified by `runtimeID` and
+	// releases its resources. Subsequent calls (SendMessage,
+	// InvokeTool, Subscribe) on the same id return [ErrTerminated].
+	// Idempotent: a second Terminate returns nil.
+	Terminate(ctx context.Context, runtimeID ID) error
+}
