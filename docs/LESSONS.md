@@ -1320,3 +1320,29 @@ production posture.
 - Docs: `docs/ROADMAP-phase1.md` §M3.5.a (tracked cross-tenant gap), §M4 → M4.4.
 
 ---
+
+## 2026-05-04 — M3.5.a.1: sibling methods preserve backward compat better than positional-arg refactors
+
+**PR**: [#50](https://github.com/vadimtrunov/watchkeepers/pull/50)
+**Merged**: 2026-05-04
+
+### Pattern
+
+When an established API method (here `capability.Broker.Issue(scope, ttl)` with
+19 callers) needs a new mandatory parameter (`organization_id`), DO NOT change
+the existing signature. Add a sibling method (`IssueForOrg(scope, organizationID,
+ttl)`) that accepts the new field. Apply the same to validation (`ValidateForOrg`).
+Both shapes coexist; legacy callers stay unchanged; new callers opt into the
+stricter check. JWT wire format uses `omitempty` on the new field so legacy tokens
+(without the field) parse cleanly with zero value, and new tokens omit the field
+on the wire when the caller doesn't supply it. Test discipline: forge a byte-exact
+legacy payload via a test-only helper (`MintLegacyTokenForTest`) so backward compat
+is pinned by the test, not by hope. Apply when extending any external-facing typed
+API where breaking changes would cascade across many test files.
+
+### References
+
+- Files: `core/pkg/capability/broker.go`, `core/internal/keep/auth/auth.go`, `core/internal/keep/auth/testing.go`
+- Docs: `docs/ROADMAP-phase1.md` §M3.5.a.1.
+
+---
