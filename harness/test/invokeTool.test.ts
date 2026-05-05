@@ -130,7 +130,7 @@ describe("invokeToolHandler — wall-clock timeout", () => {
       code: ToolErrorCode.ToolTimeout,
     });
     const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(2000);
+    expect(elapsed).toBeLessThan(300);
   }, 5000);
 
   it("enforces the default wall-clock timeout when limits is omitted", async () => {
