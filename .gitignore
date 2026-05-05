@@ -37,6 +37,8 @@ node_modules/
 *.tsbuildinfo
 coverage/
 .vitest-cache/
+# TS package build outputs (per-package dist/)
+**/dist/
 
 # Tooling state
 .cache/
