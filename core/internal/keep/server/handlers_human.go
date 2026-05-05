@@ -134,7 +134,7 @@ func parseInsertHumanRequest(w http.ResponseWriter, req *http.Request) (insertHu
 // per-org RLS policy on `human` keyed off the same scope/org GUC the
 // knowledge_chunk policy uses (migration 005). Until then, deploy with
 // operator-only access at the network/auth boundary. See ROADMAP-phase1
-// §M4 → M4.4 review.
+// §M3 M3.5.a for the tracked fix.
 func handleInsertHuman(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())
@@ -313,8 +313,8 @@ func parseUpdateWatchkeeperLeadRequest(w http.ResponseWriter, req *http.Request)
 // `auth.Claim.OrganizationID` (broker refactor) and (2) `WHERE id = $1
 // AND organization_id = $claim_org`. The same gap exists on every
 // watchkeeper-table mutator (see migration 011), so M4.4 inherits the
-// posture rather than introducing it. See ROADMAP-phase1 §M4 → M4.4
-// review for the consolidated fix.
+// posture rather than introducing it. See ROADMAP-phase1 §M3 M3.5.a
+// for the consolidated fix.
 func handleSetWatchkeeperLead(r scopedRunner) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		claim, ok := ClaimFromContext(req.Context())

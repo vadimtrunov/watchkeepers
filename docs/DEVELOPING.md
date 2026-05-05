@@ -152,6 +152,14 @@ loads config from env vars, opens a `pgxpool.Pool` against
 `SIGINT` / `SIGTERM`, at which point it drains in-flight requests with a
 configurable timeout and closes the pool.
 
+### Security posture (Phase 1)
+
+The Phase 1 keep service is not yet per-tenant safe — handlers currently accept
+`org_id` from request bodies and cannot pin the value to the authenticated caller
+because `auth.Claim` does not yet carry an `OrganizationID`. Deploy behind a
+network boundary that admits only authenticated operators until the per-tenant
+authorization gap is closed (see ROADMAP-phase1 §M3 M3.5.a).
+
 ### Protocol choice: HTTP over gRPC
 
 M2.7.a records the Keep protocol decision that
