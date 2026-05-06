@@ -298,21 +298,21 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 - [x] **M5.1** `AgentRuntime` Go interface: `Start`, `SendMessage`, `InvokeTool`, `Terminate`, plus streaming event hook.
 - [x] **M5.2** `LLMProvider` interface (separate from `AgentRuntime`): `Complete`, `Stream`, `CountTokens`, `ReportCost`. Default implementation wraps Claude Code (via Claude Agent SDK if embedding, or as a subprocess if shelling out). _Interface ships in `core/pkg/llm/` (M5.2.a); the Claude Code default impl is deferred to a follow-up M5.2.b._
-- [ ] **M5.3** **TS harness process** — JSON-RPC stdio scaffold, isolated-vm + worker-process tool paths, zod-derived schemas, Claude Code wired via the `LLMProvider` wrapper.
+- [x] **M5.3** **TS harness process** — JSON-RPC stdio scaffold, isolated-vm + worker-process tool paths, zod-derived schemas, Claude Code wired via the `LLMProvider` wrapper.
   - [x] **M5.3.a** Scaffold + JSON-RPC framing + hello/shutdown.
   - [x] **M5.3.b.a** isolated-vm pure-JS invocation path.
   - [x] **M5.3.b.b** Worker-process tool path with capability gating (substrate ADR + zod policy + transport + dispatcher landed; runtime test suite still pending under M5.3.c).
-  - [ ] **M5.3.c** **Finish harness**: vitest suite covering worker-path execution and capability-gating denials; tool schemas auto-derived from Tool Manifest via `zod`; Claude Code integration via the `LLMProvider` wrapper (model, system prompt, context parameterized from Manifest). _(vitest suite portion already satisfied by tests landed in PRs #57–#61: `worker-spawn.test.ts`, `invokeTool-worker.test.ts`, `worker-broker.test.ts` — 172 tests / 95% harness coverage; outstanding work decomposed below.)_
+  - [x] **M5.3.c** **Finish harness**: vitest suite covering worker-path execution and capability-gating denials; tool schemas auto-derived from Tool Manifest via `zod`; Claude Code integration via the `LLMProvider` wrapper (model, system prompt, context parameterized from Manifest). _(vitest suite portion already satisfied by tests landed in PRs #57–#61: `worker-spawn.test.ts`, `invokeTool-worker.test.ts`, `worker-broker.test.ts` — 172 tests / 95% harness coverage; outstanding work decomposed below.)_
     - [x] **M5.3.c.a** Auto-derive zod tool schemas from Tool Manifest at harness boot
     - [x] **M5.3.c.b** LLMProvider wrapper: parameterize model/system-prompt/context from Manifest
-    - [ ] **M5.3.c.c** Wire Claude Code as default LLMProvider impl into harness loop
+    - [x] **M5.3.c.c** Wire Claude Code as default LLMProvider impl into harness loop
       - [x] **M5.3.c.c.a** Add TS LLMProvider interface + FakeProvider mirroring Go contract
       - [x] **M5.3.c.c.b** Implement ClaudeCodeProvider adapter (default impl) with unit tests
-      - [ ] **M5.3.c.c.c** Wire LLMProvider into harness loop via complete/stream JSON-RPC methods
+      - [x] **M5.3.c.c.c** Wire LLMProvider into harness loop via complete/stream JSON-RPC methods
         - [x] **M5.3.c.c.c.a** Wire complete + countTokens + reportCost JSON-RPC methods with provider injection
-        - [ ] **M5.3.c.c.c.b** Wire stream JSON-RPC method with multi-event notification protocol
+        - [x] **M5.3.c.c.c.b** Wire stream JSON-RPC method with multi-event notification protocol
           - [x] **M5.3.c.c.c.b.a** Add JSON-RPC notification builder + inject shared stdout writer into LLM method wiring
-          - [ ] **M5.3.c.c.c.b.b** Implement stream + stream/cancel JSON-RPC methods with stream registry and multi-event notification protocol
+          - [x] **M5.3.c.c.c.b.b** Implement stream + stream/cancel JSON-RPC methods with stream registry and multi-event notification protocol
 - [ ] **M5.4** **Sandbox guardrails** — per-tool resource limits (wall-clock, CPU time, memory ceiling, output-byte cap) enforced by Go core via process controls and isolate options.
 - [ ] **M5.5** **Manifest-driven boot + Notebook integration** — harness calls `keepclient.GetManifest(agent_id)` on boot, composes `personality`/`language` into the effective system prompt via a templater, applies toolset ACLs / model / autonomy, opens its per-agent SQLite Notebook, auto-recalls top-K relevant entries each turn (configurable K + relevance threshold), and exposes `Remember` as a built-in tool.
 - [ ] **M5.6** **Reflection lifecycle** — auto-reflection on tool error writes a `lesson` entry with `evidence_log_ref`, `tool_version`, and `active_after = now() + 24h` (visible but not auto-injected during the cooling-off window); on tool hot-load, lessons tied to a superseded version are flagged `needs_review` and excluded from auto-injection until reviewed (never deleted).
