@@ -74,7 +74,13 @@ function isInitMessage(message: unknown): message is WorkerInitMessage {
 }
 
 function enterJsonRpcLoop(proc: NodeJS.Process, capabilities: Readonly<unknown>): void {
-  // `capabilities` retained for the M5.3.b.b.d gating wire-up.
+  // TODO(M5.3.b.b.e): runtime capability enforcement (intercept fs / net /
+  // proc / env from inside the worker). The dispatcher's pre-gate via
+  // `requiredOps` (M5.3.b.b.d) is currently the only check — a tool body
+  // can still call e.g. `fs.readFileSync` directly with no gate.
+  // `capabilities` is retained on this stack frame so the next executor
+  // does not need to re-thread it through bootstrap when wiring runtime
+  // interception.
   void capabilities;
   const transport = new IpcJsonRpcTransport(ipcChannelFromProcess(proc));
   transport.onRequest((req) => {

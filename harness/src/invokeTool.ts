@@ -22,8 +22,17 @@
 
 import ivm from "isolated-vm";
 
+import { CapabilityDeclarationSchema, type CapabilityDeclaration } from "./capabilities.js";
 import { MethodError } from "./methods.js";
 import { JsonRpcErrorCode, type JsonRpcErrorCodeValue, type JsonRpcValue } from "./types.js";
+import { gateToolInvocation, type ToolOperation } from "./worker/broker.js";
+import {
+  spawnWorker,
+  type SpawnWorkerOptions,
+  type WorkerCrashEvent,
+  type WorkerHandle,
+} from "./worker/spawn.js";
+import { JsonRpcRemoteError } from "./worker/transport.js";
 
 /**
  * Application-range JSON-RPC error codes for the tool runner. Codes
@@ -68,15 +77,45 @@ export const DEFAULT_WALL_CLOCK_MS = 1000;
 export const DEFAULT_MEMORY_MB = 16;
 
 /**
- * Wire shape of `invokeTool` params. Discriminator is `tool.kind` —
- * future M5.3.b.b will add a second variant `worker-process` for the
- * I/O-gated tool path. Today only `isolated-vm` is accepted.
+ * Pure-JS sandbox tool — see {@link runIsolatedJs}. The runner compiles
+ * `source` as a function body and calls it with the JSON-RPC `input`.
+ */
+export interface IsolatedVmTool {
+  readonly kind: "isolated-vm";
+  readonly source: string;
+}
+
+/**
+ * I/O-capable worker tool (ADR §0001). The dispatcher forks a Node
+ * child with `capabilities` frozen at spawn, then sends a single
+ * JSON-RPC request `method`(args=`input`) over the IPC channel.
+ *
+ * `requiredOps` lists statically-deniable operations the dispatcher
+ * MUST gate via {@link gateToolInvocation} BEFORE spawning. A single
+ * deny aborts the call with {@link ToolErrorCode.ToolCapabilityDenied}
+ * and never pays the fork cost.
+ *
+ * **Wire-safe**: this shape is what {@link invokeToolHandler} accepts
+ * over JSON-RPC. There is intentionally NO `spawnOptions` /
+ * `bootstrapPath` field — letting a wire caller pick the bootstrap
+ * module would be arbitrary code execution from the JSON-RPC boundary.
+ * The test-only seam lives on {@link runWorkerTool}'s second parameter
+ * and is unreachable from {@link invokeToolHandler}.
+ */
+export interface WorkerTool {
+  readonly kind: "worker";
+  readonly method: string;
+  readonly capabilities: CapabilityDeclaration;
+  readonly requiredOps?: readonly ToolOperation[];
+}
+
+/**
+ * Wire shape of `invokeTool` params. Discriminator is `tool.kind`. The
+ * `'isolated-vm'` variant runs an in-process sandbox; the `'worker'`
+ * variant forks an OS-isolated child for I/O-gated tool calls.
  */
 export interface InvokeToolParams {
-  readonly tool: {
-    readonly kind: "isolated-vm";
-    readonly source: string;
-  };
+  readonly tool: IsolatedVmTool | WorkerTool;
   readonly input: JsonRpcValue;
   readonly limits?: {
     readonly wallClockMs?: number;
@@ -143,20 +182,136 @@ export async function runIsolatedJs(args: RunIsolatedJsArgs): Promise<JsonRpcVal
 
 /**
  * `invokeTool` JSON-RPC handler. Validates the params shape WITHOUT
- * allocating an Isolate (AC6) and delegates to {@link runIsolatedJs} on
- * success. Returns the canonical `{ output }` envelope.
+ * allocating an Isolate / spawning a worker (AC6) and dispatches to the
+ * matching backend on success. Returns the canonical `{ output }`
+ * envelope.
  */
 export async function invokeToolHandler(params: JsonRpcValue | undefined): Promise<JsonRpcValue> {
   const validated = validateParams(params);
-  const wallClockMs = validated.limits?.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
-  const memoryMb = validated.limits?.memoryMb ?? DEFAULT_MEMORY_MB;
-  const output = await runIsolatedJs({
-    source: validated.tool.source,
-    input: validated.input,
-    wallClockMs,
-    memoryMb,
-  });
+  if (validated.tool.kind === "isolated-vm") {
+    const wallClockMs = validated.limits?.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
+    const memoryMb = validated.limits?.memoryMb ?? DEFAULT_MEMORY_MB;
+    const output = await runIsolatedJs({
+      source: validated.tool.source,
+      input: validated.input,
+      wallClockMs,
+      memoryMb,
+    });
+    return { output } satisfies InvokeToolResult;
+  }
+  const output = await runWorkerTool(validated.tool, validated.input);
   return { output } satisfies InvokeToolResult;
+}
+
+/**
+ * In-process internal entry point for the worker dispatcher path.
+ * Identical behaviour to {@link invokeToolHandler}'s worker branch but
+ * accepts a typed `WorkerTool` directly AND an `internalSpawnOptions`
+ * escape hatch (e.g. `bootstrapPath` for fixture workers in tests).
+ *
+ * **NEVER call from JSON-RPC code**. The wire boundary uses the
+ * (unexported) inner runner via {@link invokeToolHandler}, which never
+ * threads `spawnOptions` through — that field was deliberately removed
+ * from {@link WorkerTool} so a wire caller cannot pick the bootstrap
+ * module and trigger arbitrary code execution.
+ */
+export async function runWorkerTool(
+  tool: WorkerTool,
+  input: JsonRpcValue,
+  internalSpawnOptions?: SpawnWorkerOptions,
+): Promise<JsonRpcValue> {
+  // 1. Pre-gate every requested op against the frozen declaration.
+  //    Pure / synchronous — never pays the fork cost on a deny (AC3).
+  for (const op of tool.requiredOps ?? []) {
+    const decision = gateToolInvocation(tool.capabilities, op);
+    if (!decision.allow) {
+      throw toolError(
+        ToolErrorCode.ToolCapabilityDenied,
+        decision.reason ?? "tool capability denied",
+        { reason: decision.reason ?? "tool capability denied" },
+      );
+    }
+  }
+
+  // 2. Spawn the worker. A spawn failure surfaces as ToolExecutionError —
+  //    the worker never came up, so there is nothing to terminate.
+  let worker: WorkerHandle;
+  try {
+    worker = await spawnWorker(tool.capabilities, internalSpawnOptions);
+  } catch (err) {
+    throw toolError(
+      ToolErrorCode.ToolExecutionError,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  // 3. Capture the crash event in a closure flag and await the request.
+  //    spawn.ts's exit handler calls transport.dispose() BEFORE notifying
+  //    crash listeners, so a pending request rejects with
+  //    "transport disposed" instead of a typed crash error. The catch
+  //    arm consults `crashEvent` to surface the correct -32004 wire code
+  //    regardless of which rejection happened to fire first.
+  let crashEvent: WorkerCrashEvent | undefined;
+  const crashHandler = (event: WorkerCrashEvent): void => {
+    crashEvent = event;
+  };
+  worker.on("crash", crashHandler);
+  try {
+    return await worker.request(tool.method, input);
+  } catch (err) {
+    if (crashEvent !== undefined) {
+      throw toolError(
+        ToolErrorCode.ToolWorkerCrashed,
+        buildCrashMessage(crashEvent),
+        crashEventData(crashEvent),
+      );
+    }
+    if (err instanceof MethodError) throw err;
+    if (err instanceof JsonRpcRemoteError) throw translateRemoteError(err);
+    throw toolError(
+      ToolErrorCode.ToolExecutionError,
+      err instanceof Error ? err.message : String(err),
+    );
+  } finally {
+    // AC5: terminate on every code path. `off` first so a crash event
+    // arriving during terminate() does not retrigger the handler after
+    // the surrounding promise has already settled.
+    worker.off("crash", crashHandler);
+    // Swallow terminate() failures: if a future spawn.ts change makes
+    // terminate reject, we MUST NOT let that rejection mask the original
+    // crash / deny / remote error already in flight (Phase 4 I3).
+    try {
+      await worker.terminate();
+    } catch {
+      /* terminate failures are non-fatal; the original error wins. */
+    }
+  }
+}
+
+function buildCrashMessage(event: WorkerCrashEvent): string {
+  if (event.exitCode !== undefined && event.signal !== undefined) {
+    return `worker crashed: exitCode=${String(event.exitCode)} signal=${event.signal}`;
+  }
+  if (event.exitCode !== undefined) return `worker crashed: exitCode=${String(event.exitCode)}`;
+  if (event.signal !== undefined) return `worker crashed: signal=${event.signal}`;
+  return "worker crashed";
+}
+
+function crashEventData(event: WorkerCrashEvent): JsonRpcValue {
+  const out: { exitCode?: number; signal?: string } = {};
+  if (event.exitCode !== undefined) out.exitCode = event.exitCode;
+  if (event.signal !== undefined) out.signal = event.signal;
+  return out;
+}
+
+function translateRemoteError(err: JsonRpcRemoteError): MethodError {
+  if (err.code === ToolErrorCode.ToolCapabilityDenied) {
+    return toolError(ToolErrorCode.ToolCapabilityDenied, err.message, err.data);
+  }
+  if (err.code === ToolErrorCode.ToolWorkerCrashed) {
+    return toolError(ToolErrorCode.ToolWorkerCrashed, err.message, err.data);
+  }
+  return toolError(ToolErrorCode.ToolExecutionError, err.message, err.data);
 }
 
 /**
@@ -173,45 +328,125 @@ function validateParams(params: JsonRpcValue | undefined): InvokeToolParams {
   if (typeof obj.tool !== "object" || obj.tool === null || Array.isArray(obj.tool)) {
     throw invalidParams("params.tool must be an object");
   }
-  const tool = obj.tool as { kind?: unknown; source?: unknown };
-  if (tool.kind !== "isolated-vm") {
-    throw invalidParams('params.tool.kind must be "isolated-vm"');
-  }
-  if (typeof tool.source !== "string") {
-    throw invalidParams("params.tool.source must be a string");
+  const toolRaw = obj.tool as { kind?: unknown };
+  if (toolRaw.kind !== "isolated-vm" && toolRaw.kind !== "worker") {
+    throw invalidParams('params.tool.kind must be "isolated-vm" or "worker"');
   }
   if (!("input" in obj)) {
     throw invalidParams("params.input is required");
   }
-  let limits: InvokeToolParams["limits"];
-  if (obj.limits !== undefined) {
-    if (typeof obj.limits !== "object" || obj.limits === null || Array.isArray(obj.limits)) {
-      throw invalidParams("params.limits must be an object when present");
-    }
-    const rawLimits = obj.limits as { wallClockMs?: unknown; memoryMb?: unknown };
-    const wallClockMs = rawLimits.wallClockMs;
-    const memoryMb = rawLimits.memoryMb;
-    if (wallClockMs !== undefined && (typeof wallClockMs !== "number" || wallClockMs <= 0)) {
-      throw invalidParams("params.limits.wallClockMs must be a positive number");
-    }
-    if (memoryMb !== undefined && (typeof memoryMb !== "number" || memoryMb <= 0)) {
-      throw invalidParams("params.limits.memoryMb must be a positive number");
-    }
-    limits = {
-      ...(wallClockMs === undefined ? {} : { wallClockMs }),
-      ...(memoryMb === undefined ? {} : { memoryMb }),
-    };
-  }
+  const tool = validateTool(toolRaw);
+  const limits = validateLimits(obj.limits);
   return limits === undefined
-    ? {
-        tool: { kind: "isolated-vm", source: tool.source },
-        input: obj.input as JsonRpcValue,
+    ? { tool, input: obj.input as JsonRpcValue }
+    : { tool, input: obj.input as JsonRpcValue, limits };
+}
+
+function validateTool(raw: { kind?: unknown }): IsolatedVmTool | WorkerTool {
+  if (raw.kind === "isolated-vm") {
+    const t = raw as { kind: "isolated-vm"; source?: unknown };
+    if (typeof t.source !== "string") {
+      throw invalidParams("params.tool.source must be a string");
+    }
+    return { kind: "isolated-vm", source: t.source };
+  }
+  // raw.kind === "worker" (narrowed by caller).
+  const t = raw as {
+    kind: "worker";
+    method?: unknown;
+    capabilities?: unknown;
+    requiredOps?: unknown;
+  };
+  // SECURITY: reject any wire payload carrying `spawnOptions`. The
+  // bootstrap-path override is a test-only seam exposed via
+  // `runWorkerTool`'s internal parameter — letting a JSON-RPC caller
+  // pick the bootstrap module would be arbitrary code execution from
+  // the wire boundary. Detect it via a property probe (the field is no
+  // longer in the type) and fail closed with InvalidParams.
+  if ("spawnOptions" in (raw as object)) {
+    throw invalidParams("params.tool.spawnOptions is not permitted on the wire (test-only seam)");
+  }
+  if (typeof t.method !== "string" || t.method.length === 0) {
+    throw invalidParams("params.tool.method must be a non-empty string");
+  }
+  const capsParsed = CapabilityDeclarationSchema.strict().safeParse(t.capabilities);
+  if (!capsParsed.success) {
+    throw invalidParams(`params.tool.capabilities invalid: ${capsParsed.error.message}`);
+  }
+  let requiredOps: readonly ToolOperation[] | undefined;
+  if (t.requiredOps !== undefined) {
+    if (!Array.isArray(t.requiredOps)) {
+      throw invalidParams("params.tool.requiredOps must be an array when present");
+    }
+    requiredOps = t.requiredOps.map((op, i) => validateOp(op, i));
+  }
+  return requiredOps === undefined
+    ? { kind: "worker", method: t.method, capabilities: capsParsed.data }
+    : { kind: "worker", method: t.method, capabilities: capsParsed.data, requiredOps };
+}
+
+function validateOp(raw: unknown, index: number): ToolOperation {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw invalidParams(`params.tool.requiredOps[${String(index)}] must be an object`);
+  }
+  const op = raw as {
+    kind?: unknown;
+    path?: unknown;
+    host?: unknown;
+    port?: unknown;
+    name?: unknown;
+  };
+  switch (op.kind) {
+    case "fs.read":
+    case "fs.write":
+      if (typeof op.path !== "string") {
+        throw invalidParams(`params.tool.requiredOps[${String(index)}].path must be a string`);
       }
-    : {
-        tool: { kind: "isolated-vm", source: tool.source },
-        input: obj.input as JsonRpcValue,
-        limits,
-      };
+      return { kind: op.kind, path: op.path };
+    case "net.connect":
+      if (typeof op.host !== "string") {
+        throw invalidParams(`params.tool.requiredOps[${String(index)}].host must be a string`);
+      }
+      if (op.port !== undefined && typeof op.port !== "number") {
+        throw invalidParams(
+          `params.tool.requiredOps[${String(index)}].port must be a number when present`,
+        );
+      }
+      return op.port === undefined
+        ? { kind: "net.connect", host: op.host }
+        : { kind: "net.connect", host: op.host, port: op.port };
+    case "env.get":
+      if (typeof op.name !== "string") {
+        throw invalidParams(`params.tool.requiredOps[${String(index)}].name must be a string`);
+      }
+      return { kind: "env.get", name: op.name };
+    case "proc.spawn":
+      return { kind: "proc.spawn" };
+    default:
+      throw invalidParams(
+        `params.tool.requiredOps[${String(index)}].kind is not a known operation`,
+      );
+  }
+}
+
+function validateLimits(raw: unknown): InvokeToolParams["limits"] {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw invalidParams("params.limits must be an object when present");
+  }
+  const rawLimits = raw as { wallClockMs?: unknown; memoryMb?: unknown };
+  const wallClockMs = rawLimits.wallClockMs;
+  const memoryMb = rawLimits.memoryMb;
+  if (wallClockMs !== undefined && (typeof wallClockMs !== "number" || wallClockMs <= 0)) {
+    throw invalidParams("params.limits.wallClockMs must be a positive number");
+  }
+  if (memoryMb !== undefined && (typeof memoryMb !== "number" || memoryMb <= 0)) {
+    throw invalidParams("params.limits.memoryMb must be a positive number");
+  }
+  return {
+    ...(wallClockMs === undefined ? {} : { wallClockMs }),
+    ...(memoryMb === undefined ? {} : { memoryMb }),
+  };
 }
 
 function invalidParams(message: string): MethodError {
@@ -242,10 +477,10 @@ function translateIsolateError(err: unknown): MethodError {
   return toolError(ToolErrorCode.ToolExecutionError, message);
 }
 
-function toolError(code: ToolErrorCodeValue, message: string): MethodError {
+function toolError(code: ToolErrorCodeValue, message: string, data?: JsonRpcValue): MethodError {
   // Codes intentionally widen into the application slice of the
   // JSON-RPC server-error range; cast preserves the `MethodError`
   // contract without polluting the protocol-level union in
   // `JsonRpcErrorCode`.
-  return new MethodError(code as unknown as JsonRpcErrorCodeValue, message);
+  return new MethodError(code as unknown as JsonRpcErrorCodeValue, message, data);
 }

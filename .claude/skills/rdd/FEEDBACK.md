@@ -1256,3 +1256,30 @@ Executor dispatch, fixer dispatch, and Phase 4 loop were all well-scoped. 4 impo
 - Total wall time from /rdd to merge: ~00:35 (Phase 3–5a; Phase 5b–7 pending)
 
 ---
+
+## 2026-05-06 — M5.3.b.b.d: worker dispatcher (B1 caught at review, 6-file PR)
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 iter 1 (1 BLOCKER + 3 important), 4 iter 2 converged
+
+### What worked
+- Executor (opus) committed per logical step on its own this time (4 commits: broker / dispatcher wire / crash-translation fix / tests). M5.3.b.b.c FEEDBACK lesson about "do NOT push ≠ do NOT commit" landed: this iteration did not need orchestrator-level post-hoc commit cleanup.
+- Repo-wide `pnpm exec prettier --check .` was run by executor as a PR-readiness gate (M5.3.b.b.c CI prettier failure addressed structurally).
+- Code-reviewer caught a real ACE (B1) before merge — wire-reachable arbitrary `bootstrapPath` via unvalidated `spawnOptions`. Fixer dispatch + 3 wire-boundary regression tests resolved it without operator escalation.
+
+### What wasted effort
+- **Hard rule 6 hit BOTH soft caps** (6 files / +1261 LOC). Past Gate 1; planner returned fits=true with predicted 3-4 files. Test-LOC inflation (B1 regression tests + I1 pinning tests) pushed file count from 4 → 6. Suggest planner brief multiplies src LOC by ~1.5 for test inflation and includes paired test files in file count estimates.
+- **Writer agent timeout (44m, partial response received)** on this Phase 5a dispatch. Orchestrator picked up the writer steps inline (append + toggle + commit). Suggest writer brief (a) cap the agent prompt size (this dispatch was very long), (b) document orchestrator-fallback path so the agent timeout doesn't strand the PR.
+
+### Suggested skill changes
+- `references/agent-briefs/planner.md`: add file-count rule "Include matching test file(s) in estimate; multiply src LOC by ~1.5 to account for test inflation."
+- `references/agent-briefs/writer.md`: add a "If writer agent times out or returns partial: orchestrator may complete the append+toggle+commit steps inline (mechanical operations on already-drafted topic notes), then proceed to Phase 5b" footnote.
+- `references/agent-briefs/code-reviewer.md`: add to Severity definitions §blocker — "wire-reachable ACE (caller-controllable spawn-target / argv / env / cwd in any subprocess invocation)" so the reviewer flags it consistently.
+
+### Metrics
+- Review iterations: 2 (iter 1: 1 BLOCKER + 3 important + 5 nit; iter 2: 0/0/3)
+- PR-fix iterations: TBD (Phase 5b/6 pending)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to Phase 5a: ~40m (heavy Phase 4 fix loop + 44m writer timeout)
+
+---
