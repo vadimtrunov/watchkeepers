@@ -1304,3 +1304,40 @@ Phase 1 planner decomposed M5.3.c into 5 sub-items based on the literal ROADMAP 
 - Total wall time from /rdd to merge: pending (Phase 5–7)
 
 ---
+
+## 2026-05-06 — M5.3.c.b: LLMProvider wrapper: parameterize model/system-prompt/context from Manifest
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 (single iteration, zero blockers)
+
+### What worked
+
+Executor (opus) consolidated redundant tests once (`e3a3fc9`) before reporting the
+residual LOC overage, cutting 260 LOC unprompted. Phase 2 gate correctly classified the
+work as "boundary-layer builders" with locked projection contract before downstream
+consumers (M5.3.c.c, M5.5). Phase 4 code-reviewer accepted the 519-LOC-over reading as
+per cross-cutting "source-side" convention (production LOC 219 ≪ 500-cap; tests = 300
+at 100% coverage). No second consolidation pass needed.
+
+### What wasted effort
+
+Hard rule 6 currently states "≤500 LOC added AND ≤5 files changed" without disambiguating
+tests from source. Executor read "≤500 LOC total" and consolidated tests; code-reviewer
+accepted the residual overage citing conventional "source-side" reading. The ambiguity
+cost one extra consolidation iteration. Production LOC was never under question (219);
+the friction was entirely at interpretation-time.
+
+### Suggested skill changes
+
+- Restate cross-cutting's "source-side" reading verbatim in `SKILL.md` Hard rule 6, or
+  split into explicit `≤300 LOC source` + `≤500 LOC total` so the executor has a clear
+  signal at consolidation time without needing code-reviewer sign-off.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to Phase 5a: ~01:30 (Phase 3 exec + Phase 4 + Phase 5a)
+
+---
