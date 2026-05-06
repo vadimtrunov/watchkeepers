@@ -13,9 +13,9 @@ import (
 )
 
 // Termination-reason constants surfaced via [RunResult.TermReason]. The
-// set is closed for M5.4.a; M5.4.b extends it with `cpu_time` and
-// `memory_cap` once rlimits land. Callers MUST match against these
-// constants instead of string literals so future renames are
+// set extends across M5.4.a (wall-clock, output-cap, context-cancel)
+// and M5.4.b (cpu-time, memory-ceiling). Callers MUST match against
+// these constants instead of string literals so future renames are
 // compiler-checked.
 const (
 	// TermReasonNatural — the process exited on its own. The exit
@@ -40,18 +40,39 @@ const (
 	// error so the call site can match either signal via
 	// [errors.Is].
 	TermReasonContextCanceled = "context_canceled"
+
+	// TermReasonCPUTime — the kernel raised SIGXCPU after the
+	// process consumed [SandboxConfig.CPUTimeSeconds] of CPU time
+	// (Linux RLIMIT_CPU). Best-effort: the runner inspects the wait
+	// status for SIGXCPU specifically, so this reason only fires on
+	// platforms that enforce the rlimit (Linux). Run returns an
+	// error wrapping [ErrSandboxKilled]. M5.4.b.
+	TermReasonCPUTime = "cpu_time"
+
+	// TermReasonMemoryCeiling — the kernel raised SIGKILL/SIGSEGV
+	// after the process tried to grow its address space past
+	// [SandboxConfig.MemoryCeilingBytes] (Linux RLIMIT_AS). The
+	// classification is heuristic: if the configured ceiling is
+	// non-zero AND the wait status reports an unprompted SIGKILL or
+	// SIGSEGV (not one of our own kill paths), the runner attributes
+	// the death to the memory ceiling. Run returns an error wrapping
+	// [ErrSandboxKilled]. M5.4.b.
+	TermReasonMemoryCeiling = "memory_ceiling"
 )
 
 // SandboxConfig is the value-typed, plain-data configuration the
 // [SandboxRunner] reads at [SandboxRunner.Run] time. Zero values are
-// valid: a zero [SandboxConfig.WallClockTimeout] arms no timer and a
-// zero [SandboxConfig.OutputByteCap] applies no cap. Callers wire
-// non-zero values from upstream policy (manifest fields, M5.5 loader).
+// valid: a zero [SandboxConfig.WallClockTimeout] arms no timer, a
+// zero [SandboxConfig.OutputByteCap] applies no cap, and a zero rlimit
+// field disables that rlimit. Callers wire non-zero values from
+// upstream policy (manifest fields, M5.5 loader).
 //
-// CPU-time and memory-ceiling fields are deferred to M5.4.b because
-// they require platform-specific `setrlimit` plumbing and carry
-// CI-flake risk that warrants a dedicated review. M5.4.a is the
-// syscall-free leaf.
+// The wall-clock and output-cap guardrails are platform-portable
+// (M5.4.a). The rlimit guardrails (M5.4.b) are Linux-only at the
+// kernel-enforcement layer: Darwin accepts the configuration but
+// silently does not enforce; other platforms reject non-zero rlimit
+// values with [ErrUnsupportedPlatform]. See [SandboxRunner.Run] for
+// the enforcement contract.
 type SandboxConfig struct {
 	// WallClockTimeout is the maximum wall-clock duration the
 	// process may run from [exec.Cmd.Start] to [exec.Cmd.Wait]
@@ -65,6 +86,26 @@ type SandboxConfig struct {
 	// [exec.Cmd.Process.Kill] call once the counter crosses the
 	// threshold; some overrun is expected because the kill is async.
 	OutputByteCap int64
+
+	// CPUTimeSeconds caps total CPU time (user+system) the process
+	// may consume before the kernel raises SIGXCPU. Zero means "no
+	// limit". Enforced on Linux via RLIMIT_CPU applied with
+	// [unix.Prlimit] after [exec.Cmd.Start] returns. On Darwin the
+	// value is accepted but silently NOT enforced (the M5.4.a
+	// wall-clock guard remains the active fence). On other
+	// platforms a non-zero value surfaces [ErrUnsupportedPlatform].
+	// M5.4.b.
+	CPUTimeSeconds uint64
+
+	// MemoryCeilingBytes caps the process's virtual address space
+	// (RLIMIT_AS). Zero means "no limit". Enforced on Linux via
+	// RLIMIT_AS applied with [unix.Prlimit] after [exec.Cmd.Start]
+	// returns; the kernel kills the process with SIGKILL/SIGSEGV
+	// when an allocation would push it past the ceiling. On Darwin
+	// the value is accepted but silently NOT enforced. On other
+	// platforms a non-zero value surfaces [ErrUnsupportedPlatform].
+	// M5.4.b.
+	MemoryCeilingBytes uint64
 }
 
 // RunResult is the value [SandboxRunner.Run] returns alongside the
