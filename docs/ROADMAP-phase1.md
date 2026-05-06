@@ -303,7 +303,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M5.3.b.a** Add isolated-vm pure-JS tool invocation path with invokeTool RPC method.
   - [ ] **M5.3.b.b** Add worker-process tool path with declared I/O capability gating.
     - [x] **M5.3.b.b.a** Decide worker substrate (worker_threads vs child_process) and record ADR.
-    - [ ] **M5.3.b.b.b** Define capability declaration schema and gating policy types with zod.
+    - [x] **M5.3.b.b.b** Define capability declaration schema and gating policy types with zod.
     - [ ] **M5.3.b.b.c** Implement worker spawn + JSON-RPC transport over chosen substrate.
     - [ ] **M5.3.b.b.d** Wire worker-process tool.kind into invokeTool with capability-gated dispatcher.
     - [ ] **M5.3.b.b.e** Add vitest suite covering worker path execution and capability gating denials.
