@@ -304,7 +304,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M5.3.b.b** Worker-process tool path with capability gating (substrate ADR + zod policy + transport + dispatcher landed; runtime test suite still pending under M5.3.c).
   - [ ] **M5.3.c** **Finish harness**: vitest suite covering worker-path execution and capability-gating denials; tool schemas auto-derived from Tool Manifest via `zod`; Claude Code integration via the `LLMProvider` wrapper (model, system prompt, context parameterized from Manifest). _(vitest suite portion already satisfied by tests landed in PRs #57–#61: `worker-spawn.test.ts`, `invokeTool-worker.test.ts`, `worker-broker.test.ts` — 172 tests / 95% harness coverage; outstanding work decomposed below.)_
     - [x] **M5.3.c.a** Auto-derive zod tool schemas from Tool Manifest at harness boot
-    - [ ] **M5.3.c.b** LLMProvider wrapper: parameterize model/system-prompt/context from Manifest
+    - [x] **M5.3.c.b** LLMProvider wrapper: parameterize model/system-prompt/context from Manifest
     - [ ] **M5.3.c.c** Wire Claude Code as default LLMProvider impl into harness loop
 - [ ] **M5.4** **Sandbox guardrails** — per-tool resource limits (wall-clock, CPU time, memory ceiling, output-byte cap) enforced by Go core via process controls and isolate options.
 - [ ] **M5.5** **Manifest-driven boot + Notebook integration** — harness calls `keepclient.GetManifest(agent_id)` on boot, composes `personality`/`language` into the effective system prompt via a templater, applies toolset ACLs / model / autonomy, opens its per-agent SQLite Notebook, auto-recalls top-K relevant entries each turn (configurable K + relevance threshold), and exposes `Remember` as a built-in tool.
