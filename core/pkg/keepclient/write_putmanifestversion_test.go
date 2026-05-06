@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const validManifestID = "11111111-1111-4111-8111-111111111111"
@@ -387,5 +388,103 @@ func TestPutManifestVersion_ContextCancellation(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("errors.Is(err, context.Canceled) = false; err = %v", err)
+	}
+}
+
+// TestPutManifestVersionRequest_MarshalIncludesModel asserts that a request
+// with a non-empty Model carries `"model":"<value>"` on the wire (M5.5.b.b.b).
+func TestPutManifestVersionRequest_MarshalIncludesModel(t *testing.T) {
+	t.Parallel()
+
+	const wantModel = "claude-sonnet-4-7"
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		rawBody = raw
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"row-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	if _, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:    1,
+		SystemPrompt: "sp",
+		Model:        wantModel,
+	}); err != nil {
+		t.Fatalf("PutManifestVersion: %v", err)
+	}
+	if !strings.Contains(string(rawBody), `"model":"`+wantModel+`"`) {
+		t.Errorf("body missing model field; got %s", rawBody)
+	}
+}
+
+// TestPutManifestVersion_Model100Runes_Accepted asserts the boundary: a Model
+// value with exactly 100 Unicode codepoints (mixed multi-byte) passes the
+// pre-HTTP rune-length check and the request is dispatched.
+func TestPutManifestVersion_Model100Runes_Accepted(t *testing.T) {
+	t.Parallel()
+
+	// 50 runes of "ä" (2 bytes each) + 50 ASCII runes => 100 runes / 150 bytes,
+	// so a byte-based cap would have rejected this and a rune-based cap accepts it.
+	model := strings.Repeat("ä", 50) + strings.Repeat("a", 50)
+	if got := utf8.RuneCountInString(model); got != 100 {
+		t.Fatalf("test fixture: rune count = %d, want 100", got)
+	}
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"row-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	if _, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:    1,
+		SystemPrompt: "sp",
+		Model:        model,
+	}); err != nil {
+		t.Fatalf("PutManifestVersion: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("network hits = %d, want 1", got)
+	}
+}
+
+// TestPutManifestVersion_Model101Runes_RejectedBeforeHTTP asserts the negative
+// case: a 101-rune Model returns ErrInvalidRequest synchronously and the
+// transport records zero requests.
+func TestPutManifestVersion_Model101Runes_RejectedBeforeHTTP(t *testing.T) {
+	t.Parallel()
+
+	model := strings.Repeat("a", 101)
+	if got := utf8.RuneCountInString(model); got != 101 {
+		t.Fatalf("test fixture: rune count = %d, want 101", got)
+	}
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		atomic.AddInt32(&hits, 1)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:    1,
+		SystemPrompt: "sp",
+		Model:        model,
+	})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("network hits = %d, want 0", got)
 	}
 }
