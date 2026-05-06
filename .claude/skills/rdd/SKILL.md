@@ -18,9 +18,9 @@ phase / retry / escalate.
 
 One narrow write exception: the orchestrator itself appends short
 Progress-log entries to the current `TASK-*.md`. Everything else goes
-through an agent — including ROADMAP checkbox toggles, which moved to the
-`writer` agent in Phase 7a so they ride inside the squash commit (see
-Phase map step 7).
+through an agent — including ROADMAP checkbox toggles, which live in the
+`writer` agent (Phase 5a) so they ride inside the same squash commit
+as the executor's code (see Phase map step 5).
 
 > **Turn-closure invariant** — every `Agent` tool result MUST be
 > followed, in the SAME reply, by at least one user-facing sentence
@@ -70,33 +70,44 @@ Phase map step 7).
    §Phase 4; uses the `code-reviewer` agent per
    `references/agent-briefs/code-reviewer.md` and the `executor` (fixer
    mode).
-5. **Commit & push & PR** — dispatch the `git-master` agent per
-   `references/agent-briefs/git-master.md` (`pr` mode). Returns the PR URL.
-6. **PR-fix loop** — bounded loop per `references/bounded-loop.md` §Phase 6.
-   Stops when CI is green and review is clean.
-7. **Learn → merge → cleanup** — **GATE 3** before this phase begins.
-   - **7a. Writer pass** — dispatch the `writer` agent per
+5. **Writer pass + Commit & push & PR** — two agents in sequence on the
+   feature branch BEFORE the PR is opened, so CI runs only once:
+   - **5a. Writer pass** — dispatch the `writer` agent per
      `references/agent-briefs/writer.md`. The writer commits to
      `rdd/<slug>` (NOT `main`) one combined commit containing: lesson
      append into `docs/lessons/<milestone>.md`, FEEDBACK append, and
      ROADMAP checkbox toggle (leaf + cascade per
-     `references/roadmap-migration.md`).
-   - **7b. Merge** — dispatch `git-master` in `merge` mode. Squash-merges
+     `references/roadmap-migration.md`). Writer does NOT push — git-master
+     handles push in 5b. (CI does not run on push to a feature branch
+     without an open PR — `on: pull_request` triggers only on PR events.)
+   - **5b. PR** — dispatch the `git-master` agent per
+     `references/agent-briefs/git-master.md` (`pr` mode). Pushes ALL
+     local commits (executor's + writer's) and opens the PR. Returns the
+     PR URL. The single `pull_request:opened` event triggers ONE CI run
+     covering the full HEAD.
+6. **PR-fix loop** — bounded loop per `references/bounded-loop.md` §Phase 6.
+   Stops when CI is green and review is clean.
+7. **Merge → cleanup** — **GATE 3** before this phase begins.
+   - **7a. Merge** — dispatch `git-master` in `merge` mode. Squash-merges
      the PR (the writer's commit is folded in). No follow-up commit on
      `main`.
-   - **7c. Cleanup** — orchestrator deletes the `TASK-*.md` file.
+   - **7b. Cleanup** — orchestrator deletes the `TASK-*.md` file.
 
-The Phase 7 reordering removes the prior pattern of two follow-up commits
-on `main` after merge (`chore(roadmap)` + `docs: lessons`). Both now ride
-inside the squash commit. Toggle-only PRs are forbidden — see
-`references/roadmap-migration.md` §"Verification batches".
+The Phase 5/7 reordering (writer moved from Phase 7a to Phase 5a, before
+PR open) removes a wasted second CI run on the writer's text-only commit.
+Previously the writer pushed AFTER Phase 6 converged, retriggering CI on
+docs/lessons + ROADMAP toggle for no functional reason. The earlier
+reordering (writer collapsed into the squash commit) eliminated the
+post-merge `chore(roadmap)` + `docs: lessons` follow-ups; this round
+eliminates the duplicate CI cycle. Toggle-only PRs are still forbidden —
+see `references/roadmap-migration.md` §"Verification batches".
 
 ## Hard rules
 
 1. NEVER write code, tests, or long-form documentation from the orchestrator.
    Delegate via `Agent`. Exceptions: TASK progress log only. ROADMAP
-   checkbox toggles moved to the `writer` agent in Phase 7a (so they ride
-   inside the squash commit, not as a follow-up commit on `main`).
+   checkbox toggles are owned by the `writer` agent in Phase 5a (so they
+   ride inside the squash commit, not as a follow-up commit on `main`).
 2. NEVER skip a gate, including Gate 3 (merge). In interactive mode,
    if the operator is unreachable, halt. In `--auto` mode (which MUST
    be wrapped in `/loop`), gates are auto-decided per
@@ -209,7 +220,7 @@ iteration count, current unresolved issues, diff summary, and three choices
 acceptance criteria and restart Phase 3 or 4), `abort` (mark TASK
 `cancelled`, keep branch for inspection).
 
-## Knowledge loop (Phase 7a)
+## Knowledge loop (Phase 5a)
 
 - `docs/lessons/<milestone>.md` — project patterns, one file per milestone
   family. Written by the `writer` agent using

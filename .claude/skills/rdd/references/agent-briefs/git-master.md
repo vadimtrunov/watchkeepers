@@ -9,7 +9,7 @@ Two modes:
 
 `oh-my-claudecode:git-master` (fallback: `general-purpose`).
 
-## Mode — pr (Phase 5)
+## Mode — pr (Phase 5b)
 
 Input:
 - **TASK file path** (for Scope, Acceptance criteria, Test plan — used to
@@ -18,7 +18,16 @@ Input:
 - **Base branch** (`main`).
 - **Commit-style policy**: follow the style already present in `git log` on
   `main` (heuristic: if ≥ 3 of the last 10 commits use conventional-commits,
-  use conventional-commits; otherwise use plain imperative prose).
+  use conventional-commits; otherwise use plain imperative prose). **PR title
+  MUST itself match the same conventional-commits format if the repo has
+  `commitlint.config.cjs` or equivalent enforcing it on PR titles via
+  Meta CI** — the PR title is what commitlint validates, not the merge commit.
+
+**Branch state on entry**: The feature branch typically carries
+**executor's commits** (from Phase 3) PLUS **the writer's lessons +
+ROADMAP-toggle commit** (from Phase 5a — the writer ran first to avoid a
+second CI cycle). All of these still need to be pushed to origin: writer
+intentionally did not push.
 
 Actions:
 1. Review the commit series on the branch. If commits are coherent, leave
@@ -53,14 +62,21 @@ Hard rules:
 - Do NOT merge in this mode.
 - Do NOT force-push. If the remote branch exists and diverges, stop and
   report.
-- PR title ≤ 70 chars. Derived from TASK title (prepend `<roadmap-id>: `).
+- PR title ≤ 70 chars and **conventional-commits-shaped** when the repo
+  enforces commitlint on PR titles via Meta CI. Use
+  `<type>(<scope>): <subject> (<roadmap-id>)` not `<roadmap-id>: <title>`
+  — the latter fails `type-empty` / `subject-empty` rules. Pick the type
+  from the repo's allowed enum (`feat`/`fix`/`docs`/`refactor`/`perf`/
+  `test`/`build`/`ci`/`chore`/`revert`/`style`) based on the dominant
+  change in the diff; scope is usually the package directory
+  (`harness`, `core`, `keep`, `rdd`, etc.).
 - `--draft` is off (ready for review).
 
-## Mode — merge (Phase 7b)
+## Mode — merge (Phase 7a)
 
-Phase 7b is **merge-only**. The lessons append, the FEEDBACK append, and
+Phase 7a is **merge-only**. The lessons append, the FEEDBACK append, and
 the ROADMAP checkbox toggle have already been committed to the feature
-branch by the `writer` agent in Phase 7a. They reach `main` as part of
+branch by the `writer` agent in Phase 5a. They reach `main` as part of
 the squash commit. There is no follow-up commit on `main`.
 
 Input:
