@@ -1553,3 +1553,24 @@ reported `gh` active account.
 - Total wall time so far: ~15 min (this writer entry is the last action before Phase 5b)
 
 ---
+## 2026-05-06 — M5.3.c.c.b: Implement ClaudeCodeProvider adapter (default impl) with unit tests
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+The Phase 4 bounded loop (1 iteration, 3 important + 4 nit) accurately detected real defects. The `maxTokens===0` contract violation was a genuine bug — the executor's fix (new `resolveMaxTokens()` helper + validation tests) resolved all three importants in a single fixer round with zero regressions. The auto-decision gates (Gate 1 and Gate 2 auto-yes) ran cleanly; no operator intervention required outside gates. Iteration converged after fixer verification (Phase 4 iter 2: 0/0/0).
+
+### What wasted effort
+The TASK listed `OverloadedError` as a dedicated SDK export. The executor discovered via trial that the SDK (`@anthropic-ai/sdk@^0.94.0`) doesn't export it — overloaded responses surface as `APIError(status: 529)`. The TASK could have been more cautious about asserting external SDK API shapes, or the planner brief could push for "verify SDK shape via context7 docs during planning" rather than discovering it at executor time. Cost: ~1 executor round of head-scratching + one trial-and-error error handler.
+
+### Suggested skill changes
+- Add a line to `references/agent-briefs/planner.md` under "SDK-wrapping sub-items": "Request a context7 docs check during planning to verify the SDK's actual export list and API shape before drafting ACs."
+
+### Metrics
+- Review iterations: 2 (1 fix round + 1 verification)
+- PR-fix iterations: 0 (Phase 6 not yet run)
+- Operator interventions outside of gates: 0
+- Total wall time so far: ~25 min from /loop tick
+
+---

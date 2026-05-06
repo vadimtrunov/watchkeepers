@@ -307,7 +307,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
     - [x] **M5.3.c.b** LLMProvider wrapper: parameterize model/system-prompt/context from Manifest
     - [ ] **M5.3.c.c** Wire Claude Code as default LLMProvider impl into harness loop
       - [x] **M5.3.c.c.a** Add TS LLMProvider interface + FakeProvider mirroring Go contract
-      - [ ] **M5.3.c.c.b** Implement ClaudeCodeProvider adapter (default impl) with unit tests
+      - [x] **M5.3.c.c.b** Implement ClaudeCodeProvider adapter (default impl) with unit tests
       - [ ] **M5.3.c.c.c** Wire LLMProvider into harness loop via complete/stream JSON-RPC methods
 - [ ] **M5.4** **Sandbox guardrails** — per-tool resource limits (wall-clock, CPU time, memory ceiling, output-byte cap) enforced by Go core via process controls and isolate options.
 - [ ] **M5.5** **Manifest-driven boot + Notebook integration** — harness calls `keepclient.GetManifest(agent_id)` on boot, composes `personality`/`language` into the effective system prompt via a templater, applies toolset ACLs / model / autonomy, opens its per-agent SQLite Notebook, auto-recalls top-K relevant entries each turn (configurable K + relevance threshold), and exposes `Remember` as a built-in tool.
