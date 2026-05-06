@@ -89,7 +89,10 @@ describe("wireLLMMethods — writer parameter", () => {
     expect(registry.has("complete")).toBe(true);
     expect(registry.has("countTokens")).toBe(true);
     expect(registry.has("reportCost")).toBe(true);
-    expect(registry.size).toBe(3);
+    // M5.3.c.c.c.b.b: writer-bearing wireLLMMethods now also registers
+    // `stream` and `stream/cancel` (the deferred handlers consume the
+    // writer captured here). Total surface = 5.
+    expect(registry.size).toBe(5);
   });
 
   it("does NOT call the writer from any of the three sync handlers", async () => {
