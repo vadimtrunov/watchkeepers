@@ -1212,3 +1212,24 @@ band-aid rather than a structural fix.
 - Total wall time from /rdd to merge: ~01:30 (estimate; Phase 1 fast-track + Phase 6 single-pass)
 
 ---
+## 2026-05-06 — M5.3.b.b.b: capability declaration schema and gating policy types
+
+**PR**: [#59](https://github.com/vadimtrunov/watchkeepers/pull/59)
+**Phases with incidents**: 6
+
+### What worked
+Executor dispatch with build mode (vitest + zod) was clean; 71/71 tests green, 100% coverage on first try. Code-reviewer iteration 1 produced no blockers—schema structure and test coverage aligned with the ADR spec from the start.
+
+### What wasted effort
+**Phase 6 friction (commitlint + Monitor):** PR title `M5.3.b.b.b: ...` was rejected by conventional-commits enforcement on `type-empty` (M5.3.b.b.b is not a valid commit type). Orchestrator-level workaround: `gh pr edit 59 --title "feat(harness): ..."` + `gh pr close && gh pr reopen` to force CI retrigger (workflow `on: [opened, synchronize, reopened]` does not include `edited`). Monitor tool was rejected by sandbox obfuscation guard on jq escapes inside braces; tick-based polling via ScheduleWakeup is cheaper for in-cache windows.
+
+### Suggested skill changes
+- Document in `references/pr-title-constraints.md` that rdd PR titles MUST follow conventional-commits format when repo enforces commitlint, even if ROADMAP ids suggest an alternate form.
+
+### Metrics
+- Review iterations: 1
+- PR-fix iterations: 0 (Phase 6 was orchestrator metadata fix, no code dispatch)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~01:40 (Phase 3–6, Phase 1–2 were fast-track)
+
+---
