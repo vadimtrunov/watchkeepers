@@ -8,12 +8,16 @@
  * error code (e.g. InvalidParams from a future zod-validating handler).
  *
  * M5.3.a registered `hello` and `shutdown`. M5.3.b.a adds the pure-JS
- * sandbox path via `invokeTool` (see `invokeTool.ts`). The remaining
- * Claude Code passthrough and zod-derived tool schemas land in
- * M5.3.b.b/c/d as separate sub-tasks.
+ * sandbox path via `invokeTool` (see `invokeTool.ts`). M5.3.c.c.c.a
+ * threads an optional {@link LLMProvider} through {@link createDefaultRegistry}
+ * and registers `complete` / `countTokens` / `reportCost` via
+ * {@link wireLLMMethods} when a provider is supplied; the streaming
+ * `stream` method is deferred to M5.3.c.c.c.b.
  */
 
 import { invokeToolHandler } from "./invokeTool.js";
+import { wireLLMMethods } from "./llm/methods.js";
+import type { LLMProvider } from "./llm/provider.js";
 import {
   JsonRpcErrorCode,
   type JsonRpcErrorCodeValue,
@@ -74,10 +78,20 @@ export interface ShutdownSignal {
 }
 
 /**
- * Build the default registry — `hello` and `shutdown`. Pure; safe to
- * call once at boot.
+ * Build the default registry — `hello`, `shutdown`, `invokeTool`, plus
+ * the LLM methods when `provider` is supplied. Pure; safe to call once
+ * at boot.
+ *
+ * The optional `provider` parameter (M5.3.c.c.c.a) wires the three
+ * synchronous LLM JSON-RPC methods (`complete`, `countTokens`,
+ * `reportCost`) via {@link wireLLMMethods}. When omitted, the harness
+ * runs in degraded mode and clients calling those methods receive
+ * `MethodNotFound` from the dispatcher.
  */
-export function createDefaultRegistry(signal: ShutdownSignal): MethodRegistry {
+export function createDefaultRegistry(
+  signal: ShutdownSignal,
+  provider?: LLMProvider,
+): MethodRegistry {
   const registry = new Map<string, MethodHandler>();
 
   registry.set("hello", () => {
@@ -90,6 +104,10 @@ export function createDefaultRegistry(signal: ShutdownSignal): MethodRegistry {
   });
 
   registry.set("invokeTool", invokeToolHandler);
+
+  if (provider !== undefined) {
+    wireLLMMethods(registry, provider);
+  }
 
   return registry;
 }
