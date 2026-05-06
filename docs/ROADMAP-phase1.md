@@ -313,9 +313,9 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
         - [x] **M5.3.c.c.c.b** Wire stream JSON-RPC method with multi-event notification protocol
           - [x] **M5.3.c.c.c.b.a** Add JSON-RPC notification builder + inject shared stdout writer into LLM method wiring
           - [x] **M5.3.c.c.c.b.b** Implement stream + stream/cancel JSON-RPC methods with stream registry and multi-event notification protocol
-- [ ] **M5.4** **Sandbox guardrails** — per-tool resource limits (wall-clock, CPU time, memory ceiling, output-byte cap) enforced by Go core via process controls and isolate options.
+- [x] **M5.4** **Sandbox guardrails** — per-tool resource limits (wall-clock, CPU time, memory ceiling, output-byte cap) enforced by Go core via process controls and isolate options.
   - [x] **M5.4.a** Sandbox guardrails — wall-clock timeout + output-byte cap (Go-side timer + wrapped stdout/stderr readers, no syscalls)
-  - [ ] **M5.4.b** Sandbox guardrails — CPU-time + memory-ceiling rlimits (platform-specific setrlimit via SysProcAttr, build-tagged sandbox_linux.go / sandbox_darwin.go)
+  - [x] **M5.4.b** Sandbox guardrails — CPU-time + memory-ceiling rlimits (platform-specific setrlimit via SysProcAttr, build-tagged sandbox_linux.go / sandbox_darwin.go)
 - [ ] **M5.5** **Manifest-driven boot + Notebook integration** — harness calls `keepclient.GetManifest(agent_id)` on boot, composes `personality`/`language` into the effective system prompt via a templater, applies toolset ACLs / model / autonomy, opens its per-agent SQLite Notebook, auto-recalls top-K relevant entries each turn (configurable K + relevance threshold), and exposes `Remember` as a built-in tool.
 - [ ] **M5.6** **Reflection lifecycle** — auto-reflection on tool error writes a `lesson` entry with `evidence_log_ref`, `tool_version`, and `active_after = now() + 24h` (visible but not auto-injected during the cooling-off window); on tool hot-load, lessons tied to a superseded version are flagged `needs_review` and excluded from auto-injection until reviewed (never deleted).
 - [ ] **M5.7** **Provider plumbing** — Claude Code credentials flow through the secrets interface (no `ANTHROPIC_API_KEY` references in core); a dummy `FakeProvider` passes the same harness tests as the real provider, proving swap-without-touching-core.

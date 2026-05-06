@@ -70,3 +70,13 @@ var ErrSandboxKilled = errors.New("runtime: sandbox killed")
 // shutdown returns nil. Mirrors [messenger.ErrSubscriptionClosed].
 // Matchable via [errors.Is].
 var ErrSubscriptionClosed = errors.New("runtime: subscription closed")
+
+// ErrUnsupportedPlatform is returned by [SandboxRunner.Run] (M5.4.b)
+// when the caller asked for a non-zero CPU-time or memory-ceiling
+// rlimit on a platform whose `applyRlimits` shim does not implement
+// kernel enforcement. Linux returns nil from the shim; Darwin returns
+// nil and silently does not enforce; every other platform surfaces
+// this sentinel only when at least one rlimit field is non-zero. A
+// fully zeroed [SandboxConfig] never trips this error. Matchable via
+// [errors.Is].
+var ErrUnsupportedPlatform = errors.New("runtime: rlimits unsupported on this platform")

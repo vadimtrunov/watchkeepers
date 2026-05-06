@@ -1677,3 +1677,30 @@ Auto-mode under `/loop /rdd --auto resume` ran cleanly through Phase 4 iteration
 - Total wall time from /loop tick to Phase 5a writer dispatch: ~25 min
 
 ---
+
+## 2026-05-06 — M5.4.b: Sandbox guardrails — CPU-time + memory-ceiling rlimits
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 2 (iter 1: 1 blocker + 3 important; iter 2: converged)
+
+### What worked
+
+Phase 4 caught the `t.Parallel()` + `t.Setenv` panic via code review BEFORE Linux CI crashed — exactly the bounded-loop's purpose for cross-platform tests where the dev machine (Darwin) doesn't exercise the failure path. The decomposition decision in M5.4 (timer-only / rlimit syscalls) paid off: this PR's risk profile (syscalls + platform divergence) was concentrated and reviewable. Build-tagged file split kept the logic isolated and easy to verify per-platform.
+
+### What wasted effort
+
+(a) The TASK referenced `core/go.mod` and `cd core && ...` paths that don't exist in this single-module repo (go.mod at root). Caused minor confusion; documented in Progress log. Future Go-side TASKs in this repo: verify go.mod location at TASK draft time. (b) The `coder/websocket` dep flip from indirect→direct came in via `go mod tidy` and got carried in the diff as scope creep. Caught at review. Future executor briefs: explicit instruction to revert `go mod tidy` flips not directly caused by the TASK's own imports.
+
+### Suggested skill changes
+
+- TASK template: when scoping a Go-side TASK, add a verification step — "confirm go.mod location and module structure before drafting AC paths".
+- Executor brief: add anti-pattern — "after `go mod tidy`, diff `go.mod` and revert any indirect→direct flips not caused by your own new imports".
+
+### Metrics
+
+- Review iterations: 2 (1 fix + 1 verification)
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from /loop tick to Phase 5a completion: ~30 min
+
+---

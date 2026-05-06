@@ -9,13 +9,14 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 // Termination-reason constants surfaced via [RunResult.TermReason]. The
-// set is closed for M5.4.a; M5.4.b extends it with `cpu_time` and
-// `memory_cap` once rlimits land. Callers MUST match against these
-// constants instead of string literals so future renames are
+// set extends across M5.4.a (wall-clock, output-cap, context-cancel)
+// and M5.4.b (cpu-time, memory-ceiling). Callers MUST match against
+// these constants instead of string literals so future renames are
 // compiler-checked.
 const (
 	// TermReasonNatural — the process exited on its own. The exit
@@ -40,18 +41,47 @@ const (
 	// error so the call site can match either signal via
 	// [errors.Is].
 	TermReasonContextCanceled = "context_canceled"
+
+	// TermReasonCPUTime — the process exhausted [SandboxConfig.CPUTimeSeconds]
+	// of CPU time (Linux RLIMIT_CPU). Attribution uses a pure wall-time
+	// correlation heuristic: if CPUTimeSeconds > 0 AND the measured elapsed
+	// wall time is ≥ 90 % of the configured limit, the termination is
+	// attributed to cpu_time regardless of the process exit code or signal.
+	// This is necessary because Go's runtime intercepts SIGXCPU
+	// (_SigKill|_SigDefault in runtime/signal_unix.go) and may translate it
+	// into a clean or non-zero exit without surfacing SIGXCPU in the wait
+	// status. Run returns an error wrapping [ErrSandboxKilled]. M5.4.b.
+	TermReasonCPUTime = "cpu_time"
+
+	// TermReasonMemoryCeiling — the process tried to grow its virtual address
+	// space past [SandboxConfig.MemoryCeilingBytes] (Linux RLIMIT_AS).
+	// RLIMIT_AS exhaustion returns ENOMEM to the failing syscall — not a
+	// signal — so the classifier uses a non-clean-exit heuristic:
+	// MemoryCeilingBytes > 0 AND the exit was non-clean (signal-killed OR
+	// non-zero exit code). The kernel sends SIGKILL only when overcommit is
+	// disabled or under OOM-killer pressure; Go's runtime calls
+	// runtime.throw on ENOMEM, which exits non-zero without a signal (often
+	// exit code 2 or 66). A clean exit (Signaled=false AND ExitCode==0)
+	// means the workload finished naturally; don't attribute. No elapsed
+	// guard is applied — Go's mmap failure is detected at allocation time,
+	// which can be the very first instruction (10 ms is plenty).
+	// Run returns an error wrapping [ErrSandboxKilled]. M5.4.b.
+	TermReasonMemoryCeiling = "memory_ceiling"
 )
 
 // SandboxConfig is the value-typed, plain-data configuration the
 // [SandboxRunner] reads at [SandboxRunner.Run] time. Zero values are
-// valid: a zero [SandboxConfig.WallClockTimeout] arms no timer and a
-// zero [SandboxConfig.OutputByteCap] applies no cap. Callers wire
-// non-zero values from upstream policy (manifest fields, M5.5 loader).
+// valid: a zero [SandboxConfig.WallClockTimeout] arms no timer, a
+// zero [SandboxConfig.OutputByteCap] applies no cap, and a zero rlimit
+// field disables that rlimit. Callers wire non-zero values from
+// upstream policy (manifest fields, M5.5 loader).
 //
-// CPU-time and memory-ceiling fields are deferred to M5.4.b because
-// they require platform-specific `setrlimit` plumbing and carry
-// CI-flake risk that warrants a dedicated review. M5.4.a is the
-// syscall-free leaf.
+// The wall-clock and output-cap guardrails are platform-portable
+// (M5.4.a). The rlimit guardrails (M5.4.b) are Linux-only at the
+// kernel-enforcement layer: Darwin accepts the configuration but
+// silently does not enforce; other platforms reject non-zero rlimit
+// values with [ErrUnsupportedPlatform]. See [SandboxRunner.Run] for
+// the enforcement contract.
 type SandboxConfig struct {
 	// WallClockTimeout is the maximum wall-clock duration the
 	// process may run from [exec.Cmd.Start] to [exec.Cmd.Wait]
@@ -65,6 +95,27 @@ type SandboxConfig struct {
 	// [exec.Cmd.Process.Kill] call once the counter crosses the
 	// threshold; some overrun is expected because the kill is async.
 	OutputByteCap int64
+
+	// CPUTimeSeconds caps total CPU time (user+system) the process
+	// may consume before the kernel raises SIGXCPU. Zero means "no
+	// limit". Enforced on Linux via RLIMIT_CPU applied with
+	// [unix.Prlimit] after [exec.Cmd.Start] returns. On Darwin the
+	// value is accepted but silently NOT enforced (the M5.4.a
+	// wall-clock guard remains the active fence). On other
+	// platforms a non-zero value surfaces [ErrUnsupportedPlatform].
+	// M5.4.b.
+	CPUTimeSeconds uint64
+
+	// MemoryCeilingBytes caps the process's virtual address space
+	// (RLIMIT_AS). Zero means "no limit". Enforced on Linux via
+	// RLIMIT_AS applied with [unix.Prlimit] after [exec.Cmd.Start]
+	// returns; RLIMIT_AS exhaustion returns ENOMEM to the failing
+	// syscall (not a signal). The kernel sends SIGKILL only when
+	// overcommit is disabled or under OOM-killer pressure. On Darwin
+	// the value is accepted but silently NOT enforced. On other
+	// platforms a non-zero value surfaces [ErrUnsupportedPlatform].
+	// M5.4.b.
+	MemoryCeilingBytes uint64
 }
 
 // RunResult is the value [SandboxRunner.Run] returns alongside the
@@ -168,10 +219,26 @@ func (r *SandboxRunner) Run(ctx context.Context) (*RunResult, error) {
 		}, fmt.Errorf("runtime: cmd.Start: %w", err)
 	}
 
+	// Apply rlimits BEFORE we arm the wall-clock + ctx-watcher so a
+	// failed Prlimit cannot leak a child that's already running under
+	// a guardrail with no kill path. On error we kill the just-started
+	// child synchronously, drain Wait, and return the wrapped error.
+	if err := applyRlimits(cmd, true, r.cfg); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return &RunResult{
+			TermReason: TermReasonNatural,
+			ExitCode:   -1,
+			Error:      err.Error(),
+		}, fmt.Errorf("runtime: rlimit application failed: %w", err)
+	}
+
 	timer := r.armWallClockTimer(st)
 	ctxDone := r.armCtxWatcher(ctx, st)
 
+	startedAt := time.Now()
 	waitErr := cmd.Wait()
+	elapsed := time.Since(startedAt)
 
 	if timer != nil {
 		timer.Stop()
@@ -182,7 +249,7 @@ func (r *SandboxRunner) Run(ctx context.Context) (*RunResult, error) {
 		close(ctxDone)
 	}
 
-	return st.buildResult(ctx, cmd, waitErr), classifyError(ctx, st, waitErr)
+	return st.buildResult(ctx, cmd, waitErr, r.cfg, elapsed), classifyError(ctx, st, waitErr)
 }
 
 // armWallClockTimer arms the wall-clock kill if the config asked for
@@ -263,7 +330,15 @@ func (s *runState) makeWriter(byteCap int64, buf *bytes.Buffer) io.Writer {
 
 // buildResult assembles the populated RunResult. The TermReason is
 // always set so the caller can switch on it without a default branch.
-func (s *runState) buildResult(_ context.Context, cmd *exec.Cmd, waitErr error) *RunResult {
+//
+// When the runner itself fired a kill (`s.killed == true`) the
+// reason is whatever the racing path stored first. When the process
+// died without our intervention, the result MAY still be a kill —
+// the kernel can raise SIGXCPU on RLIMIT_CPU and SIGKILL on RLIMIT_AS
+// exhaustion (overcommit-disabled) — and we attribute those to the
+// matching rlimit-driven TermReason when the configured limit is
+// non-zero. Anything else is a natural exit.
+func (s *runState) buildResult(_ context.Context, cmd *exec.Cmd, waitErr error, cfg SandboxConfig, elapsed time.Duration) *RunResult {
 	res := &RunResult{
 		Stdout: s.stdout.Bytes(),
 		Stderr: s.stderr.Bytes(),
@@ -281,6 +356,16 @@ func (s *runState) buildResult(_ context.Context, cmd *exec.Cmd, waitErr error) 
 		if why == "" {
 			why = TermReasonNatural
 		}
+		res.TermReason = why
+		return res
+	}
+	if why := classifyRlimitKill(cmd, cfg, elapsed); why != "" {
+		// Promote the kernel-driven kill into the kill funnel so
+		// classifyError wraps ErrSandboxKilled. Reason CAS is safe
+		// here — no other writer is racing this path (the runner has
+		// already returned from Wait and torn down the watchers).
+		s.reason.CompareAndSwap(nil, why)
+		s.killed.Store(true)
 		res.TermReason = why
 		return res
 	}
@@ -315,3 +400,54 @@ type writerFunc func(p []byte) (int, error)
 
 // Write implements [io.Writer].
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// classifyRlimitKill maps a rlimit-driven termination back to the configured
+// TermReason. CPU and memory rlimits are tricky on Linux because:
+//   - SIGXCPU may be intercepted by the Go runtime and translated to a
+//     non-signal exit (or even a clean ExitCode == 0).
+//   - RLIMIT_AS doesn't send a signal at all — it returns ENOMEM to the
+//     failing syscall; the kernel only sends SIGKILL when the OOM-killer
+//     fires (overcommit-disabled or pressure).
+//
+// Rather than try to reverse-engineer the signal-vs-exit-code path the Go
+// runtime took, this classifier uses a correlation heuristic per rlimit:
+//
+// CPU: configured AND elapsed >= 0.9 * CPUTimeSeconds → cpu_time.
+// Memory: configured AND exit was non-clean (signal-killed OR non-zero exit
+//
+//	code) → memory_ceiling. No elapsed guard: Go's mmap failure is detected
+//	at allocation time, which can be the very first instruction. A clean exit
+//	(Signaled=false AND ExitCode==0) means the workload finished naturally
+//	before hitting the limit; don't attribute.
+//
+// CPU takes precedence over memory when both are configured and both
+// correlate (CPU rlimits fire deterministically; memory is best-effort).
+//
+// Returns "" when no rlimit can be confidently attributed; the caller
+// falls back to existing wall-clock / ctx-cancel / natural classification.
+func classifyRlimitKill(cmd *exec.Cmd, cfg SandboxConfig, elapsed time.Duration) string {
+	// CPU: time correlation alone is sufficient — don't check exit code or
+	// signal. Go's runtime intercepts SIGXCPU and may produce a clean exit.
+	if cfg.CPUTimeSeconds > 0 {
+		cpuLimit := time.Duration(cfg.CPUTimeSeconds) * time.Second
+		if elapsed >= time.Duration(float64(cpuLimit)*0.9) {
+			return TermReasonCPUTime
+		}
+	}
+	// Memory: non-clean exit only. RLIMIT_AS returns ENOMEM to the failing
+	// syscall (not a signal); Go's runtime calls runtime.throw on ENOMEM,
+	// exiting non-zero (often exit code 2 or 66). No elapsed guard — the
+	// failure can occur at the very first allocation (10 ms is sufficient).
+	if cfg.MemoryCeilingBytes > 0 {
+		if cmd.ProcessState != nil {
+			ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			if ok && ws.Signaled() {
+				return TermReasonMemoryCeiling
+			}
+			if cmd.ProcessState.ExitCode() != 0 {
+				return TermReasonMemoryCeiling
+			}
+		}
+	}
+	return ""
+}

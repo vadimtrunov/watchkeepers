@@ -11,6 +11,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/testcontainers/testcontainers-go/modules/minio v0.42.0
 	go.opentelemetry.io/otel/trace v1.41.0
+	golang.org/x/sys v0.42.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -79,6 +80,5 @@ require (
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 )
