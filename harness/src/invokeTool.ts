@@ -41,6 +41,8 @@ export const ToolErrorCode = {
   ToolMemoryExceeded: -32002,
   /** Worker rejected the call: requested I/O is outside the frozen capability declaration (ADR §0001). */
   ToolCapabilityDenied: -32003,
+  /** Worker process exited unexpectedly mid-session (ADR §0001). */
+  ToolWorkerCrashed: -32004,
 } as const;
 
 /**

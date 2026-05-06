@@ -1233,3 +1233,26 @@ Executor dispatch with build mode (vitest + zod) was clean; 71/71 tests green, 1
 - Total wall time from /rdd to merge: ~01:40 (Phase 3–6, Phase 1–2 were fast-track)
 
 ---
+## 2026-05-06 — M5.3.b.b.c: worker spawn + JSON-RPC transport
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 iter 1, 4 iter 2
+
+### What worked
+Executor dispatch, fixer dispatch, and Phase 4 loop were all well-scoped. 4 important issues (3 in transport/spawn IPC error handling, 1 in spawn exit-listener handoff) were precisely classified and fixed in fixer iteration with +5 regression tests → 114/114 pass. Code-reviewer iter 2 cleared all blockers + important items.
+
+### What wasted effort
+**Executor "do not push" misread as "do not commit."** Executor read "do NOT push" broadly and returned with all 5 files + 1115 LOC in working tree, zero commits. Orchestrator picked up the commit (`08cecf1`). Sequence was correct (Phase 3 exec, Phase 4 review/fix, Phase 5a writer—all commit-local, Phase 5b git-master pushes ALL together), but the brief should have been explicit: "Commits per logical step (this is REQUIRED, only the push is deferred)."
+
+### Suggested skill changes
+- Tighten `references/agent-briefs/executor.md` build-mode line 15 to: "Commits per logical step (this is REQUIRED, only the push is deferred) — each commit groups a coherent change."
+- Phase 5a-first flow validated. Writer now commits locally BEFORE Phase 5b git-master push; single CI run on origin. (Proof point: this TASK, if Phase 5b + 6 succeed.)
+- Note in `references/hard-rules.md` §6: "Hard rule 6 conjunction: exceeding BOTH ≤500 LOC AND ≤5 files triggers Gate 1 reject. This TASK: 1115 LOC over 500, but exactly 5 files → no reject. Soft cap blown 2.2×; note for future scoping."
+
+### Metrics
+- Review iterations: 2
+- PR-fix iterations: 1
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~00:35 (Phase 3–5a; Phase 5b–7 pending)
+
+---
