@@ -32,3 +32,9 @@ export { LLMError, LLM_ERROR_CODES, type LLMErrorCode } from "./errors.js";
 export type { LLMProvider } from "./provider.js";
 
 export { FakeProvider, type FakeProviderOptions, type ReportCostCall } from "./fake-provider.js";
+
+export {
+  ClaudeCodeProvider,
+  type ClaudeCodeProviderOptions,
+  mapAnthropicError,
+} from "./claude-code-provider.js";
