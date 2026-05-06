@@ -303,6 +303,11 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M5.3.b.a** isolated-vm pure-JS invocation path.
   - [x] **M5.3.b.b** Worker-process tool path with capability gating (substrate ADR + zod policy + transport + dispatcher landed; runtime test suite still pending under M5.3.c).
   - [ ] **M5.3.c** **Finish harness**: vitest suite covering worker-path execution and capability-gating denials; tool schemas auto-derived from Tool Manifest via `zod`; Claude Code integration via the `LLMProvider` wrapper (model, system prompt, context parameterized from Manifest).
+    - [ ] **M5.3.c.a** Vitest suite: worker-path execution happy paths + lifecycle
+    - [ ] **M5.3.c.b** Vitest suite: capability-gating denial cases + policy violations
+    - [ ] **M5.3.c.c** Auto-derive zod tool schemas from Tool Manifest at harness boot
+    - [ ] **M5.3.c.d** LLMProvider wrapper: parameterize model/system-prompt/context from Manifest
+    - [ ] **M5.3.c.e** Wire Claude Code as default LLMProvider impl into harness loop
 - [ ] **M5.4** **Sandbox guardrails** — per-tool resource limits (wall-clock, CPU time, memory ceiling, output-byte cap) enforced by Go core via process controls and isolate options.
 - [ ] **M5.5** **Manifest-driven boot + Notebook integration** — harness calls `keepclient.GetManifest(agent_id)` on boot, composes `personality`/`language` into the effective system prompt via a templater, applies toolset ACLs / model / autonomy, opens its per-agent SQLite Notebook, auto-recalls top-K relevant entries each turn (configurable K + relevance threshold), and exposes `Remember` as a built-in tool.
 - [ ] **M5.6** **Reflection lifecycle** — auto-reflection on tool error writes a `lesson` entry with `evidence_log_ref`, `tool_version`, and `active_after = now() + 24h` (visible but not auto-injected during the cooling-off window); on tool hot-load, lessons tied to a superseded version are flagged `needs_review` and excluded from auto-injection until reviewed (never deleted).
