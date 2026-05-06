@@ -1650,3 +1650,30 @@ Executor flagged an AC11 ambiguity: whether updating `registry.size` assertion i
 - Total wall time from /loop tick to Phase 5a completion: ~30 min
 
 ---
+
+## 2026-05-06 — M5.4.a: Sandbox guardrails — wall-clock timeout + output-byte cap
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 (iter 1: 1 important, 3 nits; iter 2: clean)
+
+### What worked
+
+Auto-mode under `/loop /rdd --auto resume` ran cleanly through Phase 4 iterations. Phase 4 iter 1 caught a real test-coverage gap: the zero-config test passed but lacked goroutine-delta assertion (Test plan row 9 explicit requirement). The kind of "test passes but doesn't pin the invariant" gap that signals incomplete AC mapping. Fixer cycle was tight (+8 LOC, one commit). Decomposition (M5.4.a timer-only vs M5.4.b rlimits) was the right call — the syscall-based path will benefit from dedicated review, and this PR shipped without platform-specific complexity.
+
+### What wasted effort
+
+(a) TASK projected ≤500 LOC; executor delivered 673 LOC, mostly godoc density (30% comment ratio) matching the existing package style. Go-side TASK budgets in comment-heavy codebases should plan +50% over pure-source estimate. (b) `cmd.Start()` failure path lands as `TermReasonNatural` with `ExitCode: -1` — semantically outside the AC3 closed set. Should have been caught at TASK-drafting time as an explicit carve-out or fifth constant.
+
+### Suggested skill changes
+
+- `references/agent-briefs/planner.md`: Go-side TASKs in comment-heavy codebases (>30% comment ratio): project LOC budget +50% for godoc density.
+- TASK template: when defining closed-set discrimination (e.g. `TermReason` string union), AC list should enumerate corner cases (Start-failure, partial-completion) rather than assume the closed set covers all paths.
+
+### Metrics
+
+- Review iterations: 2 (1 fix + 1 verification)
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from /loop tick to Phase 5a writer dispatch: ~25 min
+
+---

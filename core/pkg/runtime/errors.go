@@ -53,6 +53,17 @@ var ErrTerminated = errors.New("runtime: terminated")
 // [capability.Broker.Validate]. Matchable via [errors.Is].
 var ErrToolUnauthorized = errors.New("runtime: tool unauthorized")
 
+// ErrSandboxKilled is returned by [SandboxRunner.Run] when the
+// sandboxed process was terminated by one of the guardrail paths
+// (wall-clock timeout, output-byte cap, or context cancellation).
+// Natural exits — including non-zero exit codes — return a nil error;
+// callers inspect [RunResult.ExitCode] to react to those. The wrapping
+// chain preserves the underlying termination cause: context-cancel
+// kills wrap [context.Canceled] / [context.DeadlineExceeded] alongside
+// this sentinel so the call site can `errors.Is` either signal.
+// Matchable via [errors.Is].
+var ErrSandboxKilled = errors.New("runtime: sandbox killed")
+
 // ErrSubscriptionClosed is returned by [Subscription.Stop] when the
 // dispatch loop exited with a transport error before Stop was called
 // (the wrapped error rides via the [errors.Is] chain). A clean
