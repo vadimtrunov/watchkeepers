@@ -1,15 +1,18 @@
 // Package manifest implements the M5.5 loader that promotes a wire-format
 // [keepclient.ManifestVersion] into a portable [runtime.Manifest]. This
-// sub-package focuses on the personality/language slice of the loader's
-// responsibility documented at runtime.go:50-117 — templating Personality
-// and Language into SystemPrompt and forwarding AgentID verbatim. Toolset
-// jsonb decoding, AuthorityMatrix projection, Notebook open, and the
-// Remember built-in tool live in sibling milestones (M5.5.b, M5.5.c,
-// M5.5.d) and do NOT belong here.
+// sub-package covers the personality/language slice (template Personality
+// and Language into SystemPrompt; forward AgentID verbatim) and the
+// toolset slice (decode the `tools` jsonb column into the Toolset
+// []string the runtime ACL consults at InvokeTool time, M5.5.b.a). The
+// AuthorityMatrix projection, Notebook open, and the Remember built-in
+// tool live in sibling milestones (M5.5.b.c, M5.5.c, M5.5.d) and do NOT
+// belong here.
 package manifest
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -59,9 +62,12 @@ type ManifestFetcher interface {
 // callers can errors.Is the underlying sentinel (typically
 // [keepclient.ErrNotFound]).
 //
-// Toolset, AuthorityMatrix, Model, Autonomy, and Metadata are not set by
-// this loader; their wiring lands in M5.5.b alongside ACL / autonomy
-// enforcement.
+// Toolset is decoded from mv.Tools via [decodeToolset]: a JSON array of
+// `{"name": string}` entries projects to []string of names; null/empty
+// arrays produce a nil Toolset (the deny-all default per
+// runtime.go:99-103). AuthorityMatrix, Model, Autonomy, and Metadata are
+// not set by this loader; their wiring lands in M5.5.b.b/c alongside
+// authority/autonomy enforcement.
 func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (runtime.Manifest, error) {
 	if manifestID == "" {
 		return runtime.Manifest{}, runtime.ErrInvalidManifest
@@ -72,12 +78,55 @@ func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (r
 		return runtime.Manifest{}, fmt.Errorf("manifest: load: %w", err)
 	}
 
+	toolset, err := decodeToolset(mv.Tools)
+	if err != nil {
+		return runtime.Manifest{}, err
+	}
+
 	return runtime.Manifest{
 		AgentID:      mv.ManifestID,
 		SystemPrompt: composeSystemPrompt(mv.SystemPrompt, mv.Personality, mv.Language),
 		Personality:  mv.Personality,
 		Language:     mv.Language,
+		Toolset:      toolset,
 	}, nil
+}
+
+// decodeToolset projects the manifest_version `tools` jsonb column —
+// a JSON array of `{"name": string, ...}` objects — into the portable
+// [runtime.Manifest.Toolset] []string of just the names. Versioning
+// and capability metadata on each entry are intentionally ignored
+// here; their wiring lands in M5.5.b.b/c.
+//
+// Empty or null inputs (nil RawMessage, the JSON literal `null`, the
+// JSON literal `[]`) all return a nil slice — runtime.go:99-103
+// documents "An empty / nil Toolset means 'no tools'", which is the
+// deny-all default the harness ACL gate enforces (M5.5.b.a AC6).
+//
+// Decode failures (malformed JSON, non-string `name`, missing `name`)
+// are wrapped as `fmt.Errorf("manifest: toolset: %w", err)` so callers
+// can errors.Is the underlying [json.Unmarshal] failure mode.
+func decodeToolset(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	var entries []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, fmt.Errorf("manifest: toolset: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	names := make([]string, 0, len(entries))
+	for i, e := range entries {
+		if e.Name == "" {
+			return nil, fmt.Errorf("manifest: toolset: entry %d has empty name", i)
+		}
+		names = append(names, e.Name)
+	}
+	return names, nil
 }
 
 // composeSystemPrompt is the deterministic templater documented on
