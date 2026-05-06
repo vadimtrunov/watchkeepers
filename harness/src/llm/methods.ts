@@ -37,6 +37,28 @@ import {
 } from "./types.js";
 
 /**
+ * Capabilities advertised by `harness/ready` (M5.3.c.c.c.b.a) — the full
+ * surface the harness exposes when wired with a provider AND a writer.
+ * Lifted here so `index.ts` does not have to duplicate the literal.
+ *
+ * The harness "always-advertises" the same capability surface regardless
+ * of degraded mode: clients can decide whether to feature-detect via the
+ * `MethodNotFound` response or trust this list as the contractual surface.
+ *
+ * The `stream` and `stream/cancel` entries are reserved here ahead of
+ * their handler implementations landing in M5.3.c.c.c.b.b — the ready
+ * notification advertises the contractual surface clients can expect
+ * once the harness is fully wired.
+ */
+export const LLM_CAPABILITIES = [
+  "complete",
+  "countTokens",
+  "reportCost",
+  "stream",
+  "stream/cancel",
+] as const;
+
+/**
  * Wire shape of a `complete` JSON-RPC request's `params`. Mirrors
  * {@link CompleteRequest} field-for-field with the brand on `model`
  * relaxed to `string` because branded types do not survive JSON.

@@ -205,7 +205,13 @@ describe("runHarness — harness/ready notification", () => {
     expect("id" in envelope).toBe(false);
     expect(envelope.params.harness).toBe("watchkeeper");
     expect(envelope.params.version).toBe(HARNESS_VERSION);
-    expect(envelope.params.capabilities).toEqual(["complete", "countTokens", "reportCost"]);
+    expect(envelope.params.capabilities).toEqual([
+      "complete",
+      "countTokens",
+      "reportCost",
+      "stream",
+      "stream/cancel",
+    ]);
   });
 
   it("emits harness/ready BEFORE the response to a subsequent hello request", async () => {
