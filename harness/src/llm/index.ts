@@ -38,3 +38,11 @@ export {
   type ClaudeCodeProviderOptions,
   mapAnthropicError,
 } from "./claude-code-provider.js";
+
+export {
+  wireLLMMethods,
+  mapLLMErrorToMethodError,
+  type CompleteParams,
+  type CountTokensParams,
+  type ReportCostParams,
+} from "./methods.js";
