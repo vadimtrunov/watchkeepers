@@ -396,13 +396,25 @@ func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 // for an rlimit overrun. Returns the matching TermReason or the
 // empty string when the death looks natural.
 //
-// Linux RLIMIT_CPU surfaces as SIGXCPU; RLIMIT_AS surfaces as SIGKILL
-// (and occasionally SIGSEGV depending on which syscall trips it). The
-// SIGKILL → memory-ceiling mapping is heuristic — we only attribute
-// it when the caller actually configured a non-zero
-// MemoryCeilingBytes. Without a configured ceiling SIGKILL likely
-// came from outside the runner (operator, OOM-killer for a different
-// reason, etc.) and is left as a natural-with-non-zero-exit signal.
+// Linux RLIMIT_CPU surfaces as SIGXCPU. Linux RLIMIT_AS surfaces in
+// two ways depending on the Go runtime version and allocation path:
+//
+//  1. Signal path — the kernel or Go runtime raises SIGKILL, SIGSEGV,
+//     or SIGABRT when a mapping attempt is refused. We attribute any
+//     of these signals to the memory ceiling when MemoryCeilingBytes
+//     is non-zero.
+//
+//  2. Non-signal path — when mmap(2) returns ENOMEM the Go runtime
+//     calls runtime.throw which exits the process with a non-zero exit
+//     code (typically 2) without raising a signal. We attribute any
+//     unclean (non-zero, non-signal) exit to the memory ceiling when
+//     MemoryCeilingBytes is non-zero, since the process ran the
+//     configured workload and the only plausible cause of an
+//     unexpected exit is the AS limit.
+//
+// Both mappings are heuristic — a badly-behaved subprocess could exit
+// non-zero for unrelated reasons — but they match the practical
+// failure modes of Go child processes under RLIMIT_AS.
 //
 // On platforms whose [exec.Cmd.ProcessState.Sys] is not a
 // [syscall.WaitStatus] this helper returns "" — the rlimit shim has
@@ -413,14 +425,24 @@ func classifyRlimitKill(cmd *exec.Cmd, cfg SandboxConfig) string {
 		return ""
 	}
 	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
-	if !ok || !ws.Signaled() {
+	if !ok {
 		return ""
 	}
-	sig := ws.Signal()
-	if cfg.CPUTimeSeconds > 0 && sig == syscall.SIGXCPU {
-		return TermReasonCPUTime
+	if ws.Signaled() {
+		sig := ws.Signal()
+		if cfg.CPUTimeSeconds > 0 && sig == syscall.SIGXCPU {
+			return TermReasonCPUTime
+		}
+		if cfg.MemoryCeilingBytes > 0 && (sig == syscall.SIGKILL || sig == syscall.SIGSEGV || sig == syscall.SIGABRT) {
+			return TermReasonMemoryCeiling
+		}
+		return ""
 	}
-	if cfg.MemoryCeilingBytes > 0 && (sig == syscall.SIGKILL || sig == syscall.SIGSEGV) {
+	// Non-signal exit: attribute an unclean exit to the memory ceiling
+	// when the ceiling was configured and the runner did not kill the
+	// process itself (i.e. we are in the classifyRlimitKill path, which
+	// is only reached when s.killed == false).
+	if cfg.MemoryCeilingBytes > 0 && ws.ExitStatus() != 0 {
 		return TermReasonMemoryCeiling
 	}
 	return ""

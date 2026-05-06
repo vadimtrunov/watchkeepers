@@ -6,42 +6,60 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"testing"
 	"time"
 )
 
 // sandboxTestHelperEnv is the env-var the parent test process sets
-// when it self-spawns the test binary as a memory-hungry child. The
-// child branch detects the env var, allocates a buffer that exceeds
-// the runner's MemoryCeilingBytes, and exits if the kernel did not
-// kill it first.
+// when it self-spawns the test binary as a CPU-bound or memory-hungry
+// child. The child branch detects the value, runs the appropriate
+// workload to its conclusion (or to a kernel kill), and never returns
+// to the testing harness.
 const sandboxTestHelperEnv = "SANDBOX_TEST_HELPER"
 
-// TestMain is the self-spawn dispatcher for the memory-ceiling test.
-// When SANDBOX_TEST_HELPER == "memhog" we abandon the testing harness
-// entirely and run the memory-hungry workload to its conclusion (or
-// to a SIGKILL from the rlimit). Any other value falls through to
-// `m.Run()` so the standard test discovery still happens.
+// TestMain is the self-spawn dispatcher for the CPU-time and
+// memory-ceiling tests. When SANDBOX_TEST_HELPER is set to a known
+// helper name we abandon the testing harness entirely and run the
+// workload; the child process never reaches m.Run(). Any other value
+// falls through to m.Run() so the standard test discovery happens.
 func TestMain(m *testing.M) {
-	if os.Getenv(sandboxTestHelperEnv) == "memhog" {
+	switch os.Getenv(sandboxTestHelperEnv) {
+	case "memhog":
 		runMemHog()
 		os.Exit(0)
+	case "cpuhog":
+		runCPUHog()
+		os.Exit(0) // unreachable: SIGXCPU fires before the loop ends
 	}
 	os.Exit(m.Run())
 }
 
-// runMemHog allocates a 1 GiB byte buffer and touches every page so
+// runMemHog allocates a 256 MiB byte buffer and touches every page so
 // the kernel commits it (without page-touching the OS may lazily
 // over-commit and never trip RLIMIT_AS). When the runner caps the
 // process at 64 MiB this allocation reliably triggers the memory
 // ceiling and the kernel kills the process before this function
-// returns.
+// returns. Using 256 MiB gives a generous overrun above the 64 MiB
+// cap so the kill fires well before the loop completes.
 func runMemHog() {
-	const sz = 1 << 30 // 1 GiB
+	const sz = 256 << 20 // 256 MiB — generous overrun above 64 MiB cap
 	buf := make([]byte, sz)
+	// Touch every page to force physical commitment so RLIMIT_AS
+	// enforcement fires before the loop completes.
 	for i := 0; i < len(buf); i += 4096 {
-		buf[i] = 1
+		buf[i] = byte(i)
+	}
+}
+
+// runCPUHog spins in a tight integer-arithmetic loop that consumes
+// CPU time without producing any output. No I/O means no
+// OutputByteCap interference. The loop is infinite; SIGXCPU fires
+// once the configured RLIMIT_CPU seconds are exhausted.
+func runCPUHog() {
+	x := uint64(1)
+	for {
+		x = x*2654435761 + 1
+		_ = x
 	}
 }
 
@@ -60,25 +78,25 @@ func TestSandboxRun_RlimitZeroConfig(t *testing.T) {
 	}
 }
 
-// TestSandboxRun_CPUTimeKill — a CPU-bound subprocess (`yes`) with a
-// 1-second CPU budget is killed by the kernel via SIGXCPU; the
-// runner attributes the death to TermReasonCPUTime. Wall-clock cap
-// of 10 s is the safety net so a busted classifier cannot hang the
-// test.
+// TestSandboxRun_CPUTimeKill — self-spawns the test binary with
+// SANDBOX_TEST_HELPER=cpuhog (handled in TestMain). The child spins
+// in a tight integer loop that produces no output, so OutputByteCap
+// never fires. The runner caps the child at 1 CPU-second; the kernel
+// delivers SIGXCPU and the runner attributes the death to
+// TermReasonCPUTime. Wall-clock cap of 10 s is the safety net.
 func TestSandboxRun_CPUTimeKill(t *testing.T) {
-	t.Parallel()
-
-	if _, err := exec.LookPath("yes"); err != nil {
-		t.Skipf("yes binary not available: %v", err)
-	}
+	// No t.Parallel(): t.Setenv panics from a test that has already
+	// called t.Parallel() or whose ancestor has.
 
 	cfg := SandboxConfig{
 		CPUTimeSeconds:   1,
 		WallClockTimeout: 10 * time.Second,
-		OutputByteCap:    1 << 20, // 1 MiB so we don't hit the cap first
 	}
+	t.Setenv(sandboxTestHelperEnv, "cpuhog")
 	start := time.Now()
-	res, err := NewSandboxRunner([]string{"yes"}, cfg).Run(context.Background())
+	// -test.run=^$ ensures the child runs zero tests if the env-var
+	// dispatcher in TestMain somehow does not fire (defensive).
+	res, err := NewSandboxRunner([]string{os.Args[0], "-test.run=^$"}, cfg).Run(context.Background())
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -97,9 +115,10 @@ func TestSandboxRun_CPUTimeKill(t *testing.T) {
 
 // TestSandboxRun_MemoryCeilingKill — self-spawns the test binary
 // with SANDBOX_TEST_HELPER=memhog (handled in TestMain). The child
-// allocates 1 GiB while the runner caps the process at 64 MiB, so
-// the kernel kills it via SIGKILL on the OOM/RLIMIT_AS boundary;
-// the runner attributes the death to TermReasonMemoryCeiling.
+// allocates 256 MiB and touches every page while the runner caps the
+// process at 64 MiB, so the kernel kills it on the RLIMIT_AS
+// boundary; the runner attributes the death to
+// TermReasonMemoryCeiling.
 func TestSandboxRun_MemoryCeilingKill(t *testing.T) {
 	// No t.Parallel() here: t.Setenv panics when called from a test (or
 	// any of its ancestors) that has already called t.Parallel().
@@ -107,13 +126,11 @@ func TestSandboxRun_MemoryCeilingKill(t *testing.T) {
 		MemoryCeilingBytes: 64 << 20, // 64 MiB
 		WallClockTimeout:   15 * time.Second,
 	}
-	cmd := []string{os.Args[0]}
-	runner := NewSandboxRunner(cmd, cfg)
-	// Inject the helper marker via a per-runner env var. The current
-	// SandboxRunner does not expose env-var configuration, so use
-	// os.Setenv for the duration of the test (the runner inherits
-	// the parent env via exec.CommandContext).
 	t.Setenv(sandboxTestHelperEnv, "memhog")
+	// -test.run=^$ ensures the child runs zero tests if the env-var
+	// dispatcher in TestMain somehow does not fire (defensive).
+	cmd := []string{os.Args[0], "-test.run=^$"}
+	runner := NewSandboxRunner(cmd, cfg)
 
 	start := time.Now()
 	res, err := runner.Run(context.Background())
@@ -136,20 +153,20 @@ func TestSandboxRun_MemoryCeilingKill(t *testing.T) {
 // TestSandboxRun_CPUTimeBeatsWallClock — combined CPU (1 s) and wall
 // (5 s) budgets; the CPU limit is the tighter fence on a busy loop,
 // so SIGXCPU fires first and the runner reports TermReasonCPUTime,
-// not TermReasonWallClock.
+// not TermReasonWallClock. Uses the self-spawn cpuhog pattern so
+// OutputByteCap cannot interfere.
 func TestSandboxRun_CPUTimeBeatsWallClock(t *testing.T) {
-	t.Parallel()
-
-	if _, err := exec.LookPath("yes"); err != nil {
-		t.Skipf("yes binary not available: %v", err)
-	}
+	// No t.Parallel(): t.Setenv panics from a test that has already
+	// called t.Parallel() or whose ancestor has.
 
 	cfg := SandboxConfig{
 		CPUTimeSeconds:   1,
 		WallClockTimeout: 5 * time.Second,
-		OutputByteCap:    1 << 20,
 	}
-	res, err := NewSandboxRunner([]string{"yes"}, cfg).Run(context.Background())
+	t.Setenv(sandboxTestHelperEnv, "cpuhog")
+	// -test.run=^$ ensures the child runs zero tests if the env-var
+	// dispatcher in TestMain somehow does not fire (defensive).
+	res, err := NewSandboxRunner([]string{os.Args[0], "-test.run=^$"}, cfg).Run(context.Background())
 	if err == nil {
 		t.Fatalf("Run returned nil error")
 	}
