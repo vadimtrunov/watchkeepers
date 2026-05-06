@@ -820,6 +820,229 @@ func TestPutManifestVersion_InvalidLanguage(t *testing.T) {
 	}
 }
 
+// TestPutManifestVersion_WithModel_201_RoundTrip — PUT body carries
+// `model:"claude-sonnet-4"`; the handler must thread the value through
+// the INSERT (M5.5.b.b.a AC4) and a subsequent GET on the same fake
+// runner returns the captured model on the wire. Round-trip is asserted
+// at the wire shape: (1) the INSERT's bound args contain the model
+// string, and (2) the GET response JSON has `model:"claude-sonnet-4"`.
+// The handler tests do not run a real DB; the fake tx captures the
+// model arg from PUT and a fakeRow Scan closure replays it for GET.
+func TestPutManifestVersion_WithModel_201_RoundTrip(t *testing.T) {
+	const wantModel = "claude-sonnet-4"
+	var capturedModel string
+	queryRow := func(_ context.Context, _ string, args ...any) pgx.Row {
+		// PUT INSERT branch: capture the bound model arg. The handler
+		// passes `stringOrNil(body.Model)` so a non-empty model becomes
+		// a `string`; a NULL model becomes `nil`. Walk the args slice
+		// and grab the first string that matches the input value.
+		for _, a := range args {
+			if s, ok := a.(string); ok && s == wantModel {
+				capturedModel = s
+			}
+		}
+		return server.NewFakeRow(func(dest ...any) error {
+			if sp, ok := dest[0].(*string); ok {
+				*sp = fakeUUID
+			}
+			return nil
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	// Step 1: PUT with model — assert 201 and model arg threaded.
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+			"model":         wantModel,
+		}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if capturedModel != wantModel {
+		t.Fatalf("model arg not bound on INSERT; capturedModel=%q want=%q", capturedModel, wantModel)
+	}
+
+	// Step 2: GET — stage a SELECT row that replays the captured model.
+	getQueryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			// SELECT order from handleGetManifest:
+			//   id, manifest_id, version_no, system_prompt,
+			//   tools, authority_matrix, knowledge_sources,
+			//   coalesce(personality, ''), coalesce(language, ''),
+			//   coalesce(model, ''),
+			//   created_at
+			*dest[0].(*string) = fakeUUID
+			*dest[1].(*string) = putManifestID
+			*dest[2].(*int) = 1
+			*dest[3].(*string) = "ok"
+			*dest[4].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[5].(*json.RawMessage) = json.RawMessage(`{}`)
+			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[7].(*string) = ""
+			*dest[8].(*string) = ""
+			*dest[9].(*string) = capturedModel
+			*dest[10].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			return nil
+		})
+	}
+	getRunner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: getQueryRow})}
+	gh, gti := writeRouterForTest(t, mustFixedNow(), getRunner)
+	gtok := mustMintToken(t, gti, "org")
+
+	greq := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/v1/manifests/"+putManifestID, nil)
+	greq.Header.Set("Authorization", "Bearer "+gtok)
+	grec := httptest.NewRecorder()
+	gh.ServeHTTP(grec, greq)
+	if grec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body=%s", grec.Code, grec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(grec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	if got["model"] != wantModel {
+		t.Errorf("GET response model = %v, want %q; body=%s", got["model"], wantModel, grec.Body.String())
+	}
+}
+
+// TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey — when the
+// PUT body omits `model`, a subsequent GET must NOT include a `model`
+// key in the response JSON (omitempty). Mirrors the wire-omit posture
+// of `personality` / `language`.
+func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
+	// Step 1: PUT without model — assert 201 and runner sees nil model arg.
+	var modelArgWasNil bool
+	queryRow := func(_ context.Context, _ string, args ...any) pgx.Row {
+		// Search args for a typed nil — handler passes `stringOrNil("")`
+		// which returns the untyped `nil` interface.
+		for _, a := range args {
+			if a == nil {
+				modelArgWasNil = true
+			}
+		}
+		return server.NewFakeRow(func(dest ...any) error {
+			if sp, ok := dest[0].(*string); ok {
+				*sp = fakeUUID
+			}
+			return nil
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+		}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if !modelArgWasNil {
+		t.Errorf("expected nil model arg on INSERT when body omits model")
+	}
+
+	// Step 2: GET — SELECT returns coalesce(model, '') == "" so the
+	// response JSON must not carry a `model` key.
+	getQueryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			*dest[0].(*string) = fakeUUID
+			*dest[1].(*string) = putManifestID
+			*dest[2].(*int) = 1
+			*dest[3].(*string) = "ok"
+			*dest[4].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[5].(*json.RawMessage) = json.RawMessage(`{}`)
+			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[7].(*string) = ""
+			*dest[8].(*string) = ""
+			*dest[9].(*string) = "" // model NULL → coalesce → ""
+			*dest[10].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			return nil
+		})
+	}
+	getRunner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: getQueryRow})}
+	gh, gti := writeRouterForTest(t, mustFixedNow(), getRunner)
+	gtok := mustMintToken(t, gti, "org")
+
+	greq := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/v1/manifests/"+putManifestID, nil)
+	greq.Header.Set("Authorization", "Bearer "+gtok)
+	grec := httptest.NewRecorder()
+	gh.ServeHTTP(grec, greq)
+	if grec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body=%s", grec.Code, grec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(grec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	if _, present := got["model"]; present {
+		t.Errorf("GET response carries model key when body omitted it; body=%s", grec.Body.String())
+	}
+}
+
+// TestPutManifestVersion_ModelExactly100Chars_201 — boundary check: a
+// model exactly 100 unicode codepoints long must be accepted (mirror of
+// the SQL `char_length(model) <= 100` CHECK).
+func TestPutManifestVersion_ModelExactly100Chars_201(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: fakeUUID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+			"model":         strings.Repeat("a", 100),
+		}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPutManifestVersion_ModelOver100Chars_400_ModelTooLong — a model
+// longer than 100 Unicode codepoints must be rejected with 400
+// model_too_long before the row reaches Postgres. Mirrors the SQL
+// `manifest_version_model_length` CHECK from migration 014.
+func TestPutManifestVersion_ModelOver100Chars_400_ModelTooLong(t *testing.T) {
+	runner := &server.FakeScopedRunner{}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+			"model":         strings.Repeat("a", 101),
+		}, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked; expected rejection before tx")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "model_too_long" {
+		t.Errorf("error = %q, want model_too_long", env.Error)
+	}
+}
+
 // TestPutManifestVersion_PersonalityTooLong — a personality longer than
 // 1024 Unicode codepoints must be rejected with 400 personality_too_long
 // before the row reaches Postgres. Mirrors the SQL
