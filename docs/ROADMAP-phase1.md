@@ -319,6 +319,9 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [ ] **M5.5** **Manifest-driven boot + Notebook integration** — harness calls `keepclient.GetManifest(agent_id)` on boot, composes `personality`/`language` into the effective system prompt via a templater, applies toolset ACLs / model / autonomy, opens its per-agent SQLite Notebook, auto-recalls top-K relevant entries each turn (configurable K + relevance threshold), and exposes `Remember` as a built-in tool.
   - [x] **M5.5.a** Harness boot fetches Manifest via keepclient and templates personality/language into system prompt
   - [ ] **M5.5.b** Apply Manifest toolset ACLs, model selection, and autonomy bounds in harness loop
+    - [ ] **M5.5.b.a** Decode Manifest toolset jsonb and enforce ACLs at harness InvokeTool gate
+    - [ ] **M5.5.b.b** Project Manifest model field into LLMProvider config at runtime boot
+    - [ ] **M5.5.b.c** Decode authority_matrix and apply autonomy bounds at approval gates
   - [ ] **M5.5.c** Open per-agent SQLite Notebook on boot and auto-recall top-K entries with relevance threshold
   - [ ] **M5.5.d** Expose Remember as a built-in harness tool writing to per-agent Notebook
 - [ ] **M5.6** **Reflection lifecycle** — auto-reflection on tool error writes a `lesson` entry with `evidence_log_ref`, `tool_version`, and `active_after = now() + 24h` (visible but not auto-injected during the cooling-off window); on tool hot-load, lessons tied to a superseded version are flagged `needs_review` and excluded from auto-injection until reviewed (never deleted).
