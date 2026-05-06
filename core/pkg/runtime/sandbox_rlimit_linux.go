@@ -40,6 +40,7 @@ func applyRlimits(cmd *exec.Cmd, started bool, cfg SandboxConfig) error {
 	pid := cmd.Process.Pid
 
 	if cfg.CPUTimeSeconds > 0 {
+		// Hard limit pinned to soft so the child cannot escalate via setrlimit.
 		lim := &unix.Rlimit{
 			Cur: cfg.CPUTimeSeconds,
 			Max: cfg.CPUTimeSeconds,
@@ -49,6 +50,7 @@ func applyRlimits(cmd *exec.Cmd, started bool, cfg SandboxConfig) error {
 		}
 	}
 	if cfg.MemoryCeilingBytes > 0 {
+		// Hard limit pinned to soft so the child cannot escalate via setrlimit.
 		lim := &unix.Rlimit{
 			Cur: cfg.MemoryCeilingBytes,
 			Max: cfg.MemoryCeilingBytes,

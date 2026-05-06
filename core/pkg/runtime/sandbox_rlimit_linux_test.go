@@ -101,8 +101,8 @@ func TestSandboxRun_CPUTimeKill(t *testing.T) {
 // the kernel kills it via SIGKILL on the OOM/RLIMIT_AS boundary;
 // the runner attributes the death to TermReasonMemoryCeiling.
 func TestSandboxRun_MemoryCeilingKill(t *testing.T) {
-	t.Parallel()
-
+	// No t.Parallel() here: t.Setenv panics when called from a test (or
+	// any of its ancestors) that has already called t.Parallel().
 	cfg := SandboxConfig{
 		MemoryCeilingBytes: 64 << 20, // 64 MiB
 		WallClockTimeout:   15 * time.Second,
