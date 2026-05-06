@@ -292,9 +292,24 @@ interface AnthropicCountTokensResponse {
   input_tokens: number;
 }
 
-// Default token cap when the caller does not supply one. The SDK
-// requires `max_tokens` so we pick a defensive value rather than fail.
+// Default token cap when the caller does not supply one, or when the
+// caller explicitly passes 0 (the portable "provider default" sentinel
+// per CompleteRequest.maxTokens docs). The SDK requires max_tokens > 0,
+// so both undefined and 0 collapse here rather than forwarding 0 and
+// triggering a BadRequestError.
 const DEFAULT_MAX_TOKENS = 1024;
+
+/**
+ * Resolve the `max_tokens` value to forward to the SDK.
+ *
+ * `CompleteRequest.maxTokens === 0` is the portable "use provider
+ * default" sentinel (mirrors the Go contract). The SDK rejects
+ * `max_tokens: 0` with a BadRequestError, so both `undefined` and `0`
+ * collapse to {@link DEFAULT_MAX_TOKENS}.
+ */
+function resolveMaxTokens(maxTokens: number | undefined): number {
+  return maxTokens !== undefined && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS;
+}
 
 function buildCreateParams(req: CompleteRequest | StreamRequest): AnthropicCreateParams {
   // Anthropic's REST contract: only `user` and `assistant` roles ride
@@ -321,7 +336,7 @@ function buildCreateParams(req: CompleteRequest | StreamRequest): AnthropicCreat
 
   const params: AnthropicCreateParams = {
     model: req.model,
-    max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
+    max_tokens: resolveMaxTokens(req.maxTokens),
     messages,
   };
   if (systemPrompt !== undefined && systemPrompt !== "") params.system = systemPrompt;

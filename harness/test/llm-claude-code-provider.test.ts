@@ -273,6 +273,55 @@ describe("ClaudeCodeProvider — complete (happy)", () => {
     expect(got.toolCalls).toEqual([{ id: "call_1", name: "lookup", arguments: { q: "hi" } }]);
   });
 
+  it("maxTokens: 0 collapses to DEFAULT_MAX_TOKENS (portable zero-means-default sentinel)", async () => {
+    // AC2: CompleteRequest.maxTokens === 0 means "use provider default".
+    // The SDK rejects max_tokens: 0 with BadRequestError, so the adapter
+    // MUST substitute DEFAULT_MAX_TOKENS for both undefined and 0.
+    createSpy.mockResolvedValue({
+      id: "msg_zero",
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: "ok" }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+
+    const provider = new ClaudeCodeProvider({ apiKey: "k" });
+    await provider.complete({
+      model: MODEL,
+      messages: [{ role: "user", content: "ping" }],
+      maxTokens: 0,
+    });
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    // DEFAULT_MAX_TOKENS = 1024; must be > 0 so the SDK does not reject.
+    expect(createSpy).toHaveBeenCalledWith(expect.objectContaining({ max_tokens: 1024 }));
+  });
+
+  it("maxTokens: 0 collapses to DEFAULT_MAX_TOKENS on the stream path too", async () => {
+    // Same portable zero-means-default semantic must hold for stream().
+    streamSpy.mockReturnValue(
+      makeStream([
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+        { type: "message_stop" },
+      ]),
+    );
+
+    const provider = new ClaudeCodeProvider({ apiKey: "k" });
+    await provider.stream(
+      { model: MODEL, messages: [{ role: "user", content: "ping" }], maxTokens: 0 },
+      () => {
+        // ignore
+      },
+    );
+
+    expect(streamSpy).toHaveBeenCalledTimes(1);
+    // DEFAULT_MAX_TOKENS = 1024; must be > 0 so the SDK does not reject.
+    expect(streamSpy).toHaveBeenCalledWith(expect.objectContaining({ max_tokens: 1024 }));
+  });
+
   it("maps SDK stop_reason values to FinishReason", async () => {
     const cases: [string, string][] = [
       ["end_turn", "stop"],
@@ -464,12 +513,11 @@ describe("ClaudeCodeProvider — stream stop (edge)", () => {
   });
 
   it("handler error short-circuits dispatch; stop() returns LLMError(stream_closed) wrapping cause", async () => {
-    streamSpy.mockReturnValue(
-      makeStream([
-        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "first" } },
-        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "second" } },
-      ]),
-    );
+    const stream = makeStream([
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "first" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "second" } },
+    ]);
+    streamSpy.mockReturnValue(stream);
 
     const handlerErr = new Error("boom");
     const seen: string[] = [];
@@ -492,6 +540,8 @@ describe("ClaudeCodeProvider — stream stop (edge)", () => {
     expect(caught).toBeInstanceOf(LLMError);
     expect((caught as LLMError).code).toBe("stream_closed");
     expect((caught as LLMError).cause).toBe(handlerErr);
+    // AC3: first stop() must have called controller.abort exactly once.
+    expect(stream.controller.abort).toHaveBeenCalledTimes(1);
 
     let caught2: unknown;
     try {
@@ -500,6 +550,8 @@ describe("ClaudeCodeProvider — stream stop (edge)", () => {
       caught2 = e;
     }
     expect(caught2).toBe(caught);
+    // AC3 idempotence: second stop() must NOT call abort again.
+    expect(stream.controller.abort).toHaveBeenCalledTimes(1);
   });
 
   it("SDK stream errors mid-flight: handler observes error event; stop() returns stream_closed", async () => {
@@ -550,6 +602,19 @@ describe("ClaudeCodeProvider — stream stop (edge)", () => {
     expect(caught).toBeInstanceOf(LLMError);
     expect((caught as LLMError).code).toBe("stream_closed");
     expect((caught as LLMError).cause).toBe(sdkErr);
+    // AC3: first stop() must have called controller.abort exactly once.
+    expect(stream.controller.abort).toHaveBeenCalledTimes(1);
+
+    // Second stop() must rethrow the same error without calling abort again.
+    let caught2: unknown;
+    try {
+      await sub.stop();
+    } catch (e) {
+      caught2 = e;
+    }
+    expect(caught2).toBe(caught);
+    // AC3 idempotence: abort must still be 1 after the second stop().
+    expect(stream.controller.abort).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -582,6 +647,42 @@ describe("ClaudeCodeProvider — validation (pre-SDK)", () => {
       provider.stream({ model: MODEL, messages: [{ role: "user", content: "ping" }] }, handler),
     ).rejects.toMatchObject({ code: "invalid_handler" });
     expect(streamSpy).not.toHaveBeenCalled();
+  });
+
+  it("stream with empty model rejects with model_not_supported and never calls SDK", async () => {
+    const provider = new ClaudeCodeProvider({ apiKey: "k" });
+    await expect(
+      provider.stream({ model: model(""), messages: [{ role: "user", content: "ping" }] }, () => {
+        // ok handler
+      }),
+    ).rejects.toMatchObject({ code: "model_not_supported" });
+    expect(streamSpy).not.toHaveBeenCalled();
+  });
+
+  it("stream with empty messages rejects with invalid_prompt and never calls SDK", async () => {
+    const provider = new ClaudeCodeProvider({ apiKey: "k" });
+    await expect(
+      provider.stream({ model: MODEL, messages: [] }, () => {
+        // ok handler
+      }),
+    ).rejects.toMatchObject({ code: "invalid_prompt" });
+    expect(streamSpy).not.toHaveBeenCalled();
+  });
+
+  it("countTokens with empty model rejects with model_not_supported and never calls SDK", async () => {
+    const provider = new ClaudeCodeProvider({ apiKey: "k" });
+    await expect(
+      provider.countTokens({ model: model(""), messages: [{ role: "user", content: "ping" }] }),
+    ).rejects.toMatchObject({ code: "model_not_supported" });
+    expect(countTokensSpy).not.toHaveBeenCalled();
+  });
+
+  it("countTokens with empty messages rejects with invalid_prompt and never calls SDK", async () => {
+    const provider = new ClaudeCodeProvider({ apiKey: "k" });
+    await expect(provider.countTokens({ model: MODEL, messages: [] })).rejects.toMatchObject({
+      code: "invalid_prompt",
+    });
+    expect(countTokensSpy).not.toHaveBeenCalled();
   });
 
   it("complete with a tool whose inputSchema is null rejects with invalid_prompt", async () => {
