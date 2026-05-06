@@ -81,6 +81,56 @@ describe("wireLLMMethods — complete (happy)", () => {
     expect(recorded?.messages).toHaveLength(1);
   });
 
+  it("forwards errorMessage verbatim when provider returns finishReason=error", async () => {
+    const fake = new FakeProvider();
+    const canned: CompleteResponse = {
+      content: "",
+      toolCalls: [],
+      finishReason: "error",
+      errorMessage: "upstream timeout",
+      usage: ZERO_USAGE,
+    };
+    fake.completeResp = canned;
+    const { registry } = freshRegistry(fake);
+
+    const params: JsonRpcValue = {
+      model: MODEL,
+      messages: [{ role: "user", content: "hi" }],
+    };
+    const outcome = await dispatch(registry, "complete", params);
+
+    expect(outcome.kind).toBe("ok");
+    if (outcome.kind === "ok") {
+      const result = outcome.result as { finishReason: string; errorMessage: string };
+      expect(result.finishReason).toBe("error");
+      expect(result.errorMessage).toBe("upstream timeout");
+    }
+  });
+
+  it("omits errorMessage from wire response when provider response has none", async () => {
+    const fake = new FakeProvider();
+    const canned: CompleteResponse = {
+      content: "ok",
+      toolCalls: [],
+      finishReason: "stop",
+      usage: ZERO_USAGE,
+    };
+    fake.completeResp = canned;
+    const { registry } = freshRegistry(fake);
+
+    const params: JsonRpcValue = {
+      model: MODEL,
+      messages: [{ role: "user", content: "hi" }],
+    };
+    const outcome = await dispatch(registry, "complete", params);
+
+    expect(outcome.kind).toBe("ok");
+    if (outcome.kind === "ok") {
+      const result = outcome.result as { errorMessage?: string };
+      expect(result.errorMessage).toBeUndefined();
+    }
+  });
+
   it("forwards tools to the provider and surfaces tool-call responses", async () => {
     const fake = new FakeProvider();
     const canned: CompleteResponse = {

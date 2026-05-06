@@ -413,6 +413,11 @@ function completeResponseToWire(resp: CompleteResponse): JsonRpcValue {
     finishReason: resp.finishReason satisfies FinishReason,
     usage: usageToWire(resp.usage),
   };
+  // Forwarded from CompleteResponse.errorMessage per the Go counterpart
+  // (core/pkg/llm/provider.go CompleteResponse.ErrorMessage). Conditionally
+  // included because it is only set by the provider when finishReason === "error",
+  // preserving provider-reported diagnostics for the Go-core caller without
+  // forcing them to parse metadata.
   if (resp.errorMessage !== undefined) {
     out.errorMessage = resp.errorMessage;
   }
