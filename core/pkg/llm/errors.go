@@ -44,3 +44,13 @@ var ErrStreamClosed = errors.New("llm: stream closed")
 // caller MAY retry; the wrapped cause rides via the [errors.Is] chain
 // for diagnostics. Matchable via [errors.Is].
 var ErrProviderUnavailable = errors.New("llm: provider unavailable")
+
+// ErrInvalidManifest is returned synchronously by the manifest-aware
+// request builders ([BuildCompleteRequest], [BuildStreamRequest],
+// [BuildCountTokensRequest]) when the supplied [runtime.Manifest] fails
+// the per-turn projection's validation rules (empty Model or empty
+// SystemPrompt). The runtime package emits its own ErrInvalidManifest
+// sentinel for [runtime.AgentRuntime.Start]; this one is the llm-layer
+// twin so the projection can fail fast without importing runtime's
+// error catalogue. Matchable via [errors.Is].
+var ErrInvalidManifest = errors.New("llm: invalid manifest")
