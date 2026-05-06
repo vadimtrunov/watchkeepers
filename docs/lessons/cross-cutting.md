@@ -73,11 +73,14 @@ agent must NOT Read the whole file before appending; the cheap path is
 mechanic — explicit demonstration that the append is the writer's only
 action on the file.
 
-**PR size cap of ≤ 500 LOC / ≤ 5 files**: Pre-restructure PRs ranged 199–
-2417 LOC. Large PRs induced 2–4 review iterations, each consuming
-double-digit K tokens. The cap is on review surface, not novelty;
-generated code counts. Gate 1 rejects oversized TASKs back to `planner`
-for decomposition.
+**PR size cap of ≤ 1000 LOC / ≤ 20 files** (raised from 500/5 on
+2026-05-06): Pre-restructure PRs ranged 199–2417 LOC. Large PRs induced
+2–4 review iterations, each consuming double-digit K tokens. The cap is
+on review surface, not novelty; generated code counts. Gate 1 rejects
+oversized TASKs back to `planner` for decomposition. The 500/5 floor
+was tight for medium features carrying ≥3 test files (source/test
+interpretation gap, FEEDBACK 2026-05-06); 1000/20 still fences off the
+1700–2400 LOC monsters that motivated the original cap.
 
 ### Anti-pattern
 

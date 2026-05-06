@@ -136,7 +136,7 @@ exit).
 - **Auto-`yes`** when the TASK file is fully populated (Scope,
   Acceptance criteria with ≥1 item, Test plan with ≥1 item, Plan with
   ≥1 numbered step) AND Hard rule 6 (PR size cap) is not predicted to
-  fail (rough heuristic: plan touches ≤ 5 files; if unknown, do not
+  fail (rough heuristic: plan touches ≤ 20 files; if unknown, do not
   block at this gate — let the bounded review loops catch it).
 - Halt when: any of Scope / Acceptance criteria / Test plan / Plan is
   empty or placeholder text; the TASK is a toggle-only TASK that would

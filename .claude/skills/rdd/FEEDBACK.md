@@ -1438,3 +1438,78 @@ None at this time. Re-evaluate after the next 5–10 `/rdd` runs:
 - Total wall time of skill change: ~30 min (operator + assistant)
 
 ---
+
+## 2026-05-06 — skill change: raise PR size cap to 1000 LOC / 20 files
+
+**PR**: n/a (operator-driven skill update)
+**Phases with incidents**: n/a (preventative — addresses recurring Gate 1
+friction observed in M2b.7, M5.3.c.b, and queued on M5.3.c.c)
+
+### What changed
+
+Hard rule 6 (PR size cap) raised from **≤ 500 LOC / ≤ 5 files** to
+**≤ 1000 LOC / ≤ 20 files**. Reject semantics unchanged: Gate 1 reject
+only when *both* are exceeded. Three coordinated edits:
+
+- `.claude/skills/rdd/SKILL.md` §Hard rules #6 — new numbers + a
+  paragraph noting the raise date and that 1000/20 still fences off
+  the 1700–2400 LOC monsters that motivated the original cap.
+- `.claude/skills/rdd/references/gates.md` §"Gate 2 auto-decision" —
+  rough heuristic raised from `≤ 5 files` to `≤ 20 files`.
+- `docs/lessons/cross-cutting.md` §"PR size cap" — lesson body
+  updated in-place (with date stamp) so the planner reads current
+  numbers in Phase 2 instead of stale 500/5.
+
+### Why
+
+Industry small-CL guidance (Google ~400, Atlassian ~400, GitHub
+research <250 for optimal review quality) ranges around 200–500.
+Raising to 1000/20 puts this skill above that band — closer to "large
+review" territory. The trade-off was accepted because: (a) multi-file
+features in this repo routinely carry ≥3 test files (source + spec +
+fixtures), eating the file budget before the source is even drafted;
+(b) every 500/5 reject costs an entire decomposition planner run plus
+operator gate, and the M2b.7 / M5.3.c.b friction was repeated enough
+to be a tax, not a one-off; (c) the hard ceiling that the original
+cap targeted (1700–2400 LOC PRs with 2–4 review iterations) sits
+above 1000 anyway, so the new cap still catches the intended pattern.
+
+### What was considered and rejected
+
+- **Modest raise to 800/10.** Closer to industry norms, but only
+  shaves one Gate 1 reject per ~5 TASKs; the operator wanted a wider
+  margin to cover medium features without re-encountering the cap.
+- **Source/test split (≤ 300 source + ≤ 500 total).** Mentioned in
+  FEEDBACK 2026-05-06 (M5.3.c.b). Cleaner semantics but introduces a
+  second dimension the planner has to predict at Gate 1; the operator
+  preferred a single coarser cap over two precise ones. Revisit if the
+  raised cap still leaves source-side ambiguity in practice.
+- **Add a separate "concerns count" rule.** Hard rule 6 is about
+  review surface; concerns are an orthogonal Gate 1 criterion that
+  *also* triggers decomposition. Currently implicit in `planner` brief
+  ("single concern"); operator declined to formalize it as a numbered
+  hard rule in this pass. The M5.3.c.c case (Provider impl + wiring
+  loop) is exactly where a concerns rule would fire even after the
+  cap raise — flagged for a future skill update.
+
+### Suggested skill changes
+
+None at this time. Re-evaluate after the next 5 `/rdd` runs:
+
+- If Gate 1 rejects drop to ~zero (cap is now wide enough), confirm
+  by checking whether *concerns-based* rejects rise — that would
+  validate "concerns count" as the bottleneck, not LOC.
+- If a TASK lands a 900-LOC PR that produces ≥3 review iterations,
+  the cap is too wide and should drop back toward 700–800.
+- If `planner` consistently rejects the same pattern (e.g. "impl +
+  wiring") that would have fit under the cap, formalize the concerns
+  rule.
+
+### Metrics
+
+- Review iterations: n/a (no PR)
+- PR-fix iterations: n/a
+- Operator interventions outside of gates: n/a
+- Total wall time of skill change: ~10 min (3 file edits + this entry)
+
+---

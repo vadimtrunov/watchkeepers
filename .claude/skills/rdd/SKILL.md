@@ -156,13 +156,15 @@ see `references/roadmap-migration.md` §"Verification batches".
    ```
    After editing settings.json, open `/hooks` once (or restart the
    session) so the watcher picks the new entries up.
-6. **PR size cap.** A single rdd PR aims for **≤ 500 LOC added and ≤ 5
+6. **PR size cap.** A single rdd PR aims for **≤ 1000 LOC added and ≤ 20
    files changed**. Exceeding both is a Gate 1 reject — `planner` must
    return a decomposition before the TASK proceeds. Mechanical scaffolds
    (generated migrations, vendored fixtures) count toward LOC; the cap
-   is on review surface, not novelty. The cap was set after the night
-   that produced PRs of 1700–2400 LOC and induced multi-iteration review
-   loops.
+   is on review surface, not novelty. Cap raised from 500/5 on
+   2026-05-06 after the source/test interpretation gap (FEEDBACK
+   2026-05-06) made the prior cap too tight for medium features
+   carrying ≥3 test files; the original 500/5 was set after the night
+   that produced PRs of 1700–2400 LOC, which 1000/20 still fences off.
 7. **No toggle-only PRs.** Any TASK whose only change is moving ROADMAP
    checkboxes (e.g. "verification covered by existing tests") rides on
    the same PR as the next feature TASK in the same milestone, or batches
