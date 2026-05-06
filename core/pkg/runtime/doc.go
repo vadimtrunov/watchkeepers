@@ -131,18 +131,18 @@
 //
 // # Sandbox guardrail surface
 //
-// [SandboxRunner] (M5.4.a) wraps an `os/exec` subprocess with two
-// guardrails: a wall-clock timeout (via [time.AfterFunc] +
-// [exec.Cmd.Process.Kill]) and an output-byte cap (via wrapped
-// [io.Writer] adapters that count cumulative stdout+stderr bytes).
-// Termination outcomes surface as [RunResult.TermReason] using the
-// exported `TermReason*` constants — `natural`, `wall_clock`,
-// `output_cap`, `context_canceled`. Any sandbox-driven kill returns
-// an error wrapping [ErrSandboxKilled]; natural exits (including
-// non-zero exit codes) return a nil error so the caller can treat
-// "process ran" and "process was terminated by us" as distinct
-// signals. The leaf is syscall-free and cross-platform across Linux
-// and Darwin.
+// [SandboxRunner] (M5.4.a + M5.4.b) wraps an `os/exec` subprocess
+// with four guardrails: a wall-clock timeout (via [time.AfterFunc] +
+// [exec.Cmd.Process.Kill]), an output-byte cap (via wrapped
+// [io.Writer] adapters that count cumulative stdout+stderr bytes),
+// a CPU-time rlimit, and a memory-ceiling rlimit. Termination
+// outcomes surface as [RunResult.TermReason] using the exported
+// `TermReason*` constants — `natural`, `wall_clock`, `output_cap`,
+// `context_canceled`, `cpu_time`, `memory_ceiling`. Any
+// sandbox-driven kill returns an error wrapping [ErrSandboxKilled];
+// natural exits (including non-zero exit codes) return a nil error
+// so the caller can treat "process ran" and "process was terminated
+// by us" as distinct signals.
 //
 // Kill-propagation caveat: [exec.Cmd.Process.Kill] targets the direct
 // subprocess only. If that process forks descendants (e.g. a POSIX
@@ -152,15 +152,31 @@
 // pipe open, and [exec.Cmd.Wait] blocks until the child exits naturally
 // — defeating the wall-clock and context-cancel guardrails. Callers
 // must either invoke the target binary directly (no shell wrapper) or
-// wait for M5.4.b, which will add process-group kill via
+// wait for the follow-up that adds process-group kill via
 // [syscall.SysProcAttr.Setpgid] to propagate SIGKILL to the full tree.
 //
-// CPU-time and memory-ceiling rlimits are deferred to M5.4.b because
-// they require platform-specific `setrlimit` plumbing
-// (`syscall.SysProcAttr.Rlimit`) and carry CI-flake risk that
-// warrants a dedicated review. M5.4.a is the syscall-free
-// foundation; M5.4.b layers the rlimit-driven guardrails on top
-// without changing the [SandboxRunner.Run] return contract.
+// Rlimit-platform matrix (M5.4.b shipped, Linux-only enforcement):
+//
+//   - Linux: real implementation via [golang.org/x/sys/unix.Prlimit]
+//     applied to the child PID after [exec.Cmd.Start] returns.
+//     RLIMIT_CPU enforces [SandboxConfig.CPUTimeSeconds] and surfaces
+//     SIGXCPU → [TermReasonCPUTime]. RLIMIT_AS enforces
+//     [SandboxConfig.MemoryCeilingBytes] and surfaces SIGKILL/SIGSEGV
+//     → [TermReasonMemoryCeiling] when the configured limit is
+//     non-zero.
+//   - Darwin: silent no-op stub. Configuration is accepted but the
+//     kernel does NOT enforce; the wall-clock + output-cap fences
+//     remain the only Darwin-side guardrails. Operators who need
+//     true rlimit enforcement on Darwin should run under the Linux
+//     CI runner.
+//   - Other platforms: a non-zero rlimit value surfaces
+//     [ErrUnsupportedPlatform] from [SandboxRunner.Run]; a fully
+//     zeroed config is a no-op and works everywhere.
+//
+// The M5.4.b additions extend the closed [TermReason] set without
+// changing the [SandboxRunner.Run] return contract: callers who only
+// matched the M5.4.a reasons keep working; new callers can opt in
+// by configuring the rlimit fields and matching the new constants.
 //
 // # Out of scope (deferred)
 //
