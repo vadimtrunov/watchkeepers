@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import type { CapabilityDeclaration } from "../src/capabilities.js";
 import { handleLine } from "../src/dispatcher.js";
@@ -30,9 +30,35 @@ import {
   runWorkerTool,
   type WorkerTool,
 } from "../src/invokeTool.js";
+import { __resetActiveToolsetForTests, setActiveToolset } from "../src/manifest.js";
 import { createDefaultRegistry, type ShutdownSignal } from "../src/methods.js";
 import { JSON_RPC_VERSION, JsonRpcErrorCode, type JsonRpcValue } from "../src/types.js";
 import type { SpawnWorkerOptions } from "../src/worker/spawn.js";
+
+// M5.5.b.a manifest ACL gate: worker tools resolve to `tool.method`
+// when no explicit `name` is supplied. The fixture worker handles
+// `echo`, `crash`, `capDenied`, `genericError`, `sigself`, `remoteCrash`,
+// `ping`; pre-seed the active toolset so every fixture method dispatches
+// past the gate. Tests that exercise pre-spawn validation/InvalidParams
+// behaviour also pass through the gate first — the seed list keeps
+// those paths reachable without per-test setup.
+const ACL_FIXTURE_METHODS: readonly string[] = [
+  "echo",
+  "crash",
+  "capDenied",
+  "genericError",
+  "nope",
+  "sigself",
+  "remoteCrash",
+  "ping",
+];
+beforeEach(() => {
+  __resetActiveToolsetForTests();
+  setActiveToolset(ACL_FIXTURE_METHODS);
+});
+afterEach(() => {
+  __resetActiveToolsetForTests();
+});
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);

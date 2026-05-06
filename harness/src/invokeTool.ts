@@ -23,6 +23,7 @@
 import ivm from "isolated-vm";
 
 import { CapabilityDeclarationSchema, type CapabilityDeclaration } from "./capabilities.js";
+import { getActiveToolset } from "./manifest.js";
 import { MethodError } from "./methods.js";
 import { JsonRpcErrorCode, type JsonRpcErrorCodeValue, type JsonRpcValue } from "./types.js";
 import { gateToolInvocation, type ToolOperation } from "./worker/broker.js";
@@ -52,6 +53,8 @@ export const ToolErrorCode = {
   ToolCapabilityDenied: -32003,
   /** Worker process exited unexpectedly mid-session (ADR §0001). */
   ToolWorkerCrashed: -32004,
+  /** Tool name absent from the active toolset (M5.5.b.a manifest ACL gate). */
+  ToolUnauthorized: -32005,
 } as const;
 
 /**
@@ -79,9 +82,16 @@ export const DEFAULT_MEMORY_MB = 16;
 /**
  * Pure-JS sandbox tool — see {@link runIsolatedJs}. The runner compiles
  * `source` as a function body and calls it with the JSON-RPC `input`.
+ *
+ * `name` is the manifest-declared identifier the M5.5.b.a ACL gate
+ * matches against the active toolset before {@link runIsolatedJs} is
+ * reached. Optional on the wire so existing pre-M5.5.b.a callers and
+ * direct-handler tests that bypass the ACL keep working; when present
+ * it MUST be a non-empty string.
  */
 export interface IsolatedVmTool {
   readonly kind: "isolated-vm";
+  readonly name?: string;
   readonly source: string;
 }
 
@@ -95,6 +105,11 @@ export interface IsolatedVmTool {
  * deny aborts the call with {@link ToolErrorCode.ToolCapabilityDenied}
  * and never pays the fork cost.
  *
+ * `name` is the manifest-declared identifier consulted by the M5.5.b.a
+ * ACL gate. When omitted, the gate uses {@link WorkerTool.method} as
+ * the lookup key — preserves wire-shape compatibility with M5.3.b
+ * worker callers that pre-date the manifest gate.
+ *
  * **Wire-safe**: this shape is what {@link invokeToolHandler} accepts
  * over JSON-RPC. There is intentionally NO `spawnOptions` /
  * `bootstrapPath` field — letting a wire caller pick the bootstrap
@@ -104,6 +119,7 @@ export interface IsolatedVmTool {
  */
 export interface WorkerTool {
   readonly kind: "worker";
+  readonly name?: string;
   readonly method: string;
   readonly capabilities: CapabilityDeclaration;
   readonly requiredOps?: readonly ToolOperation[];
@@ -185,9 +201,17 @@ export async function runIsolatedJs(args: RunIsolatedJsArgs): Promise<JsonRpcVal
  * allocating an Isolate / spawning a worker (AC6) and dispatches to the
  * matching backend on success. Returns the canonical `{ output }`
  * envelope.
+ *
+ * The M5.5.b.a manifest ACL gate runs BEFORE dispatch: the resolved
+ * tool name (`tool.name` for isolated-vm, `tool.name ?? tool.method`
+ * for worker) is matched against the active toolset stored in
+ * `manifest.ts`. A miss surfaces as
+ * {@link ToolErrorCode.ToolUnauthorized} and never reaches
+ * {@link runIsolatedJs} / {@link runWorkerTool}.
  */
 export async function invokeToolHandler(params: JsonRpcValue | undefined): Promise<JsonRpcValue> {
   const validated = validateParams(params);
+  enforceToolsetAcl(validated.tool);
   if (validated.tool.kind === "isolated-vm") {
     const wallClockMs = validated.limits?.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
     const memoryMb = validated.limits?.memoryMb ?? DEFAULT_MEMORY_MB;
@@ -201,6 +225,48 @@ export async function invokeToolHandler(params: JsonRpcValue | undefined): Promi
   }
   const output = await runWorkerTool(validated.tool, validated.input);
   return { output } satisfies InvokeToolResult;
+}
+
+/**
+ * Resolve the lookup name a tool advertises to the manifest ACL. For
+ * isolated-vm tools the field is {@link IsolatedVmTool.name}; for
+ * worker tools the field is {@link WorkerTool.name}, falling back to
+ * {@link WorkerTool.method} when `name` is omitted (M5.3.b backward
+ * compatibility — pre-M5.5.b.a callers identified the tool only by
+ * its JSON-RPC method).
+ */
+function resolveToolName(tool: IsolatedVmTool | WorkerTool): string | undefined {
+  if (tool.kind === "isolated-vm") return tool.name;
+  return tool.name ?? tool.method;
+}
+
+/**
+ * M5.5.b.a manifest ACL gate. Throws
+ * {@link ToolErrorCode.ToolUnauthorized} when the active toolset
+ * (managed by `manifest.ts`) does not include the resolved tool name.
+ * Deny-by-default: when no `setManifest` call has yet been honoured
+ * the active toolset is `undefined`, which the gate treats as an
+ * empty allow-list (AC6).
+ */
+function enforceToolsetAcl(tool: IsolatedVmTool | WorkerTool): void {
+  const allowed = getActiveToolset();
+  const name = resolveToolName(tool);
+  if (allowed === undefined || allowed.length === 0) {
+    throw toolError(
+      ToolErrorCode.ToolUnauthorized,
+      name === undefined
+        ? "tool unauthorized: manifest toolset is empty (no setManifest)"
+        : `tool unauthorized: ${name} not in active toolset`,
+    );
+  }
+  if (name === undefined || !allowed.includes(name)) {
+    throw toolError(
+      ToolErrorCode.ToolUnauthorized,
+      name === undefined
+        ? "tool unauthorized: tool name is required when manifest is active"
+        : `tool unauthorized: ${name} not in active toolset`,
+    );
+  }
 }
 
 /**
@@ -344,15 +410,19 @@ function validateParams(params: JsonRpcValue | undefined): InvokeToolParams {
 
 function validateTool(raw: { kind?: unknown }): IsolatedVmTool | WorkerTool {
   if (raw.kind === "isolated-vm") {
-    const t = raw as { kind: "isolated-vm"; source?: unknown };
+    const t = raw as { kind: "isolated-vm"; name?: unknown; source?: unknown };
     if (typeof t.source !== "string") {
       throw invalidParams("params.tool.source must be a string");
     }
-    return { kind: "isolated-vm", source: t.source };
+    const name = validateToolName(t.name);
+    return name === undefined
+      ? { kind: "isolated-vm", source: t.source }
+      : { kind: "isolated-vm", name, source: t.source };
   }
   // raw.kind === "worker" (narrowed by caller).
   const t = raw as {
     kind: "worker";
+    name?: unknown;
     method?: unknown;
     capabilities?: unknown;
     requiredOps?: unknown;
@@ -380,9 +450,27 @@ function validateTool(raw: { kind?: unknown }): IsolatedVmTool | WorkerTool {
     }
     requiredOps = t.requiredOps.map((op, i) => validateOp(op, i));
   }
-  return requiredOps === undefined
-    ? { kind: "worker", method: t.method, capabilities: capsParsed.data }
-    : { kind: "worker", method: t.method, capabilities: capsParsed.data, requiredOps };
+  const name = validateToolName(t.name);
+  const base: WorkerTool = { kind: "worker", method: t.method, capabilities: capsParsed.data };
+  return {
+    ...base,
+    ...(name === undefined ? {} : { name }),
+    ...(requiredOps === undefined ? {} : { requiredOps }),
+  };
+}
+
+/**
+ * Validate the optional `tool.name` field. Accepts `undefined` (the
+ * caller's wire payload simply omits it) and any non-empty string.
+ * Empty strings or non-strings surface as InvalidParams so the caller
+ * sees a clear shape error rather than a silent ACL deny.
+ */
+function validateToolName(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw invalidParams("params.tool.name must be a non-empty string when present");
+  }
+  return raw;
 }
 
 function validateOp(raw: unknown, index: number): ToolOperation {
