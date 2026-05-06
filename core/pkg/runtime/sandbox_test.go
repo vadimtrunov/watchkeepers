@@ -97,12 +97,19 @@ func TestSandboxRun_StdoutCapturedUnderCap(t *testing.T) {
 // budget produces TermReason "wall_clock" and errors.Is(err, ErrSandboxKilled).
 // The 4× safety factor guards against slow CI: 100ms budget should
 // resolve in well under 500ms.
+//
+// Note: we invoke the sleep binary directly rather than via `/bin/sh -c
+// "sleep 5"`. On Ubuntu CI, /bin/sh is dash, which forks to exec sleep
+// — creating a two-process tree. cmd.Process.Kill() only reaches the
+// shell parent; the sleep child inherits the stdout pipe and keeps it
+// open until it exits naturally (5 s later), blocking cmd.Wait(). Direct
+// invocation makes kill propagation deterministic across all POSIX shells.
 func TestSandboxRun_WallClockKill(t *testing.T) {
 	skipIfWindows(t)
 	t.Parallel()
 
 	start := time.Now()
-	res, err := newShRunner("sleep 5", SandboxConfig{WallClockTimeout: 100 * time.Millisecond}).Run(context.Background())
+	res, err := NewSandboxRunner([]string{"sleep", "5"}, SandboxConfig{WallClockTimeout: 100 * time.Millisecond}).Run(context.Background())
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatalf("Run returned nil error on wall-clock kill")
@@ -193,6 +200,13 @@ func TestSandboxRun_OutputCapKillStderr(t *testing.T) {
 // TestSandboxRun_ContextCanceled — a parent-cancelled context kills
 // the sandboxed process; TermReason is "context_canceled" and
 // errors.Is(err, context.Canceled) holds at the call site.
+//
+// Note: we invoke the sleep binary directly rather than via `/bin/sh -c
+// "sleep 5"`. On Ubuntu CI, /bin/sh is dash, which forks to exec sleep
+// — creating a two-process tree. cmd.Process.Kill() only reaches the
+// shell parent; the sleep child inherits the stdout pipe and keeps it
+// open until it exits naturally (5 s later), blocking cmd.Wait(). Direct
+// invocation makes kill propagation deterministic across all POSIX shells.
 func TestSandboxRun_ContextCanceled(t *testing.T) {
 	skipIfWindows(t)
 	t.Parallel()
@@ -204,7 +218,7 @@ func TestSandboxRun_ContextCanceled(t *testing.T) {
 	}()
 
 	start := time.Now()
-	res, err := newShRunner("sleep 5", SandboxConfig{}).Run(ctx)
+	res, err := NewSandboxRunner([]string{"sleep", "5"}, SandboxConfig{}).Run(ctx)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatalf("Run returned nil error on context cancel")

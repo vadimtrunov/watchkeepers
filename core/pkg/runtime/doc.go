@@ -144,6 +144,17 @@
 // signals. The leaf is syscall-free and cross-platform across Linux
 // and Darwin.
 //
+// Kill-propagation caveat: [exec.Cmd.Process.Kill] targets the direct
+// subprocess only. If that process forks descendants (e.g. a POSIX
+// shell running an external binary via `/bin/sh -c "sleep N"`), those
+// descendants may inherit the stdout/stderr pipes that [SandboxRunner]
+// attaches. After the shell is killed its child survives, holds the
+// pipe open, and [exec.Cmd.Wait] blocks until the child exits naturally
+// — defeating the wall-clock and context-cancel guardrails. Callers
+// must either invoke the target binary directly (no shell wrapper) or
+// wait for M5.4.b, which will add process-group kill via
+// [syscall.SysProcAttr.Setpgid] to propagate SIGKILL to the full tree.
+//
 // CPU-time and memory-ceiling rlimits are deferred to M5.4.b because
 // they require platform-specific `setrlimit` plumbing
 // (`syscall.SysProcAttr.Rlimit`) and carry CI-flake risk that
