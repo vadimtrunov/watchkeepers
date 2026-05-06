@@ -43,25 +43,26 @@ const (
 	TermReasonContextCanceled = "context_canceled"
 
 	// TermReasonCPUTime — the process exhausted [SandboxConfig.CPUTimeSeconds]
-	// of CPU time (Linux RLIMIT_CPU). The classifier first checks the wait
-	// status for SIGXCPU; when Go's runtime intercepts SIGXCPU and converts
-	// it into a non-zero exit (without leaving a signal in the wait status),
-	// the classifier falls back to an elapsed-wall-time heuristic: if the
-	// measured wall time is ≥ 90 % of CPUTimeSeconds, the death is attributed
-	// to the CPU limit. Run returns an error wrapping [ErrSandboxKilled].
-	// M5.4.b.
+	// of CPU time (Linux RLIMIT_CPU). Attribution uses a pure wall-time
+	// correlation heuristic: if CPUTimeSeconds > 0 AND the measured elapsed
+	// wall time is ≥ 90 % of the configured limit, the termination is
+	// attributed to cpu_time regardless of the process exit code or signal.
+	// This is necessary because Go's runtime intercepts SIGXCPU
+	// (_SigKill|_SigDefault in runtime/signal_unix.go) and may translate it
+	// into a clean or non-zero exit without surfacing SIGXCPU in the wait
+	// status. Run returns an error wrapping [ErrSandboxKilled]. M5.4.b.
 	TermReasonCPUTime = "cpu_time"
 
 	// TermReasonMemoryCeiling — the process tried to grow its virtual address
 	// space past [SandboxConfig.MemoryCeilingBytes] (Linux RLIMIT_AS).
 	// RLIMIT_AS exhaustion returns ENOMEM to the failing syscall — not a
-	// signal. The kernel sends SIGKILL only when overcommit is disabled or
-	// under OOM-killer pressure. The classifier maps SIGKILL (when
-	// MemoryCeilingBytes > 0) to memory_ceiling via the signal path, and
-	// maps a non-signal non-zero exit to memory_ceiling via the non-signal
-	// fallback path (Go's runtime calls runtime.throw on ENOMEM, exiting
-	// with a non-zero code without raising a signal). Run returns an error
-	// wrapping [ErrSandboxKilled]. M5.4.b.
+	// signal — so the classifier uses a time-correlation heuristic:
+	// MemoryCeilingBytes > 0 AND elapsed > 50 ms AND the exit was non-clean
+	// (signal-killed OR non-zero exit code). The kernel sends SIGKILL only
+	// when overcommit is disabled or under OOM-killer pressure; Go's runtime
+	// calls runtime.throw on ENOMEM, which exits non-zero without a signal.
+	// A clean exit means the workload finished naturally; don't attribute.
+	// Run returns an error wrapping [ErrSandboxKilled]. M5.4.b.
 	TermReasonMemoryCeiling = "memory_ceiling"
 )
 
@@ -397,85 +398,53 @@ type writerFunc func(p []byte) (int, error)
 // Write implements [io.Writer].
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
-// classifyRlimitKill inspects the wait-status of a process whose
-// runner did NOT fire any of the in-process kill paths (wall-clock,
-// output-cap, ctx-cancel) and decides whether the kernel killed it
-// for an rlimit overrun. Returns the matching TermReason or the
-// empty string when the death looks natural.
+// classifyRlimitKill maps a rlimit-driven termination back to the configured
+// TermReason. CPU and memory rlimits are tricky on Linux because:
+//   - SIGXCPU may be intercepted by the Go runtime and translated to a
+//     non-signal exit (or even a clean ExitCode == 0).
+//   - RLIMIT_AS doesn't send a signal at all — it returns ENOMEM to the
+//     failing syscall; the kernel only sends SIGKILL when the OOM-killer
+//     fires (overcommit-disabled or pressure).
 //
-// Linux RLIMIT_CPU surfaces as SIGXCPU in the wait status. However,
-// Go's runtime intercepts SIGXCPU (_SigKill|_SigDefault in
-// runtime/signal_unix.go) and may convert it into a non-zero exit
-// without leaving SIGXCPU in the wait status. The classifier handles
-// both paths:
+// Rather than try to reverse-engineer the signal-vs-exit-code path the Go
+// runtime took, this classifier uses a pure correlation heuristic: if a
+// rlimit was configured AND the process ran long enough to plausibly have
+// hit it, attribute the termination to that rlimit.
 //
-//  1. Signal path — ws.Signaled() && Signal() == SIGXCPU → cpu_time.
+// CPU: configured AND elapsed >= 0.9 * CPUTimeSeconds → cpu_time.
+// Memory: configured AND elapsed > 50ms (ran long enough to allocate) AND
 //
-//  2. Elapsed-time fallback — non-signal, non-zero exit AND
-//     CPUTimeSeconds > 0 AND elapsed wall time ≥ 90 % of the CPU
-//     limit. The 0.9 slack prevents misattributing brief genuine
-//     non-zero exits unrelated to CPU exhaustion.
+//	exit was non-clean (signal-killed OR non-zero exit code) → memory_ceiling.
+//	Pure-clean exit means the workload finished naturally before
+//	hitting the limit; don't attribute.
 //
-// Linux RLIMIT_AS exhaustion returns ENOMEM to the failing syscall —
-// not a signal. The kernel sends SIGKILL only when overcommit is
-// disabled or under OOM-killer pressure. SIGSEGV and SIGABRT are NOT
-// mapped here: SIGSEGV belongs to RLIMIT_STACK / programmer bugs;
-// SIGABRT is emitted by Go's runtime for many fatal conditions
-// unrelated to memory exhaustion. The classifier handles two paths:
+// CPU takes precedence over memory when both are configured and both
+// correlate (CPU rlimits fire deterministically; memory is best-effort).
 //
-//  1. Signal path — ws.Signaled() && Signal() == SIGKILL AND
-//     MemoryCeilingBytes > 0 → memory_ceiling.
-//
-//  2. Non-signal path — non-signal, non-zero exit AND
-//     MemoryCeilingBytes > 0. When mmap(2) returns ENOMEM the Go
-//     runtime calls runtime.throw, exiting with a non-zero code
-//     without raising a signal.
-//
-// Both mappings are heuristic — a badly-behaved subprocess could exit
-// non-zero for unrelated reasons — but they match the practical
-// failure modes of Go child processes under these rlimits.
-//
-// On platforms whose [exec.Cmd.ProcessState.Sys] is not a
-// [syscall.WaitStatus] this helper returns "" — the rlimit shim has
-// already either no-op'd (Darwin) or refused to apply (unsupported),
-// so a kernel-driven rlimit kill cannot reach this branch.
+// Returns "" when no rlimit can be confidently attributed; the caller
+// falls back to existing wall-clock / ctx-cancel / natural classification.
 func classifyRlimitKill(cmd *exec.Cmd, cfg SandboxConfig, elapsed time.Duration) string {
-	if cmd.ProcessState == nil {
-		return ""
-	}
-	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
-	if !ok {
-		return ""
-	}
-	if ws.Signaled() {
-		sig := ws.Signal()
-		if cfg.CPUTimeSeconds > 0 && sig == syscall.SIGXCPU {
-			return TermReasonCPUTime
-		}
-		if cfg.MemoryCeilingBytes > 0 && sig == syscall.SIGKILL {
-			return TermReasonMemoryCeiling
-		}
-		return ""
-	}
-	// Non-signal exit with non-zero code: check rlimit fallbacks.
-	if ws.ExitStatus() == 0 {
-		return ""
-	}
-	// CPU elapsed-time fallback: Go's runtime intercepts SIGXCPU and
-	// converts it into a non-zero exit. If the measured wall time is
-	// ≥ 90 % of the configured CPU limit, attribute to cpu_time. The
-	// slack factor guards against misattributing fast genuine failures.
+	// CPU: time correlation alone is sufficient — don't check exit code or
+	// signal. Go's runtime intercepts SIGXCPU and may produce a clean exit.
 	if cfg.CPUTimeSeconds > 0 {
-		threshold := time.Duration(float64(cfg.CPUTimeSeconds)*0.9) * time.Second
-		if elapsed >= threshold {
+		cpuLimit := time.Duration(cfg.CPUTimeSeconds) * time.Second
+		if elapsed >= time.Duration(float64(cpuLimit)*0.9) {
 			return TermReasonCPUTime
 		}
 	}
-	// Memory non-signal fallback: mmap ENOMEM causes runtime.throw →
-	// non-zero exit without a signal. Attribute to memory_ceiling when
-	// the ceiling was configured (and CPU fallback did not match).
-	if cfg.MemoryCeilingBytes > 0 {
-		return TermReasonMemoryCeiling
+	// Memory: time correlation + non-clean exit. RLIMIT_AS returns ENOMEM to
+	// the failing syscall (not a signal); a signal-kill or non-zero exit after
+	// a non-trivial runtime indicates the limit was hit.
+	if cfg.MemoryCeilingBytes > 0 && elapsed > 50*time.Millisecond {
+		if cmd.ProcessState != nil {
+			ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			if ok && ws.Signaled() {
+				return TermReasonMemoryCeiling
+			}
+			if cmd.ProcessState.ExitCode() != 0 {
+				return TermReasonMemoryCeiling
+			}
+		}
 	}
 	return ""
 }
