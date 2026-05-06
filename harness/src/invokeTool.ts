@@ -39,6 +39,8 @@ export const ToolErrorCode = {
   ToolTimeout: -32001,
   /** Isolate breached the configured memory ceiling. */
   ToolMemoryExceeded: -32002,
+  /** Worker rejected the call: requested I/O is outside the frozen capability declaration (ADR §0001). */
+  ToolCapabilityDenied: -32003,
 } as const;
 
 /**
