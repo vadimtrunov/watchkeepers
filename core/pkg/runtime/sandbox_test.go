@@ -225,10 +225,12 @@ func TestSandboxRun_ContextCanceled(t *testing.T) {
 
 // TestSandboxRun_ZeroConfigNoEnforcement — a zero SandboxConfig arms
 // no timer and applies no cap; long output completes naturally.
+// Test plan row 9: verify via runtime.NumGoroutine delta == 0.
 func TestSandboxRun_ZeroConfigNoEnforcement(t *testing.T) {
 	skipIfWindows(t)
-	t.Parallel()
+	// Not parallel — goroutine snapshots are racy with parallel tests.
 
+	before := goruntime.NumGoroutine()
 	res, err := newShRunner("echo ok", SandboxConfig{}).Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -238,6 +240,11 @@ func TestSandboxRun_ZeroConfigNoEnforcement(t *testing.T) {
 	}
 	if string(res.Stdout) != "ok\n" {
 		t.Fatalf("Stdout = %q, want %q", string(res.Stdout), "ok\n")
+	}
+	time.Sleep(50 * time.Millisecond) // drain any stragglers
+	after := goruntime.NumGoroutine()
+	if delta := after - before; delta > 1 {
+		t.Fatalf("goroutine delta = %d, want ≤ 1: zero-config must not arm any goroutines", delta)
 	}
 }
 
