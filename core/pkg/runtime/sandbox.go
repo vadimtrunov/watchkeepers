@@ -56,12 +56,15 @@ const (
 	// TermReasonMemoryCeiling — the process tried to grow its virtual address
 	// space past [SandboxConfig.MemoryCeilingBytes] (Linux RLIMIT_AS).
 	// RLIMIT_AS exhaustion returns ENOMEM to the failing syscall — not a
-	// signal — so the classifier uses a time-correlation heuristic:
-	// MemoryCeilingBytes > 0 AND elapsed > 50 ms AND the exit was non-clean
-	// (signal-killed OR non-zero exit code). The kernel sends SIGKILL only
-	// when overcommit is disabled or under OOM-killer pressure; Go's runtime
-	// calls runtime.throw on ENOMEM, which exits non-zero without a signal.
-	// A clean exit means the workload finished naturally; don't attribute.
+	// signal — so the classifier uses a non-clean-exit heuristic:
+	// MemoryCeilingBytes > 0 AND the exit was non-clean (signal-killed OR
+	// non-zero exit code). The kernel sends SIGKILL only when overcommit is
+	// disabled or under OOM-killer pressure; Go's runtime calls
+	// runtime.throw on ENOMEM, which exits non-zero without a signal (often
+	// exit code 2 or 66). A clean exit (Signaled=false AND ExitCode==0)
+	// means the workload finished naturally; don't attribute. No elapsed
+	// guard is applied — Go's mmap failure is detected at allocation time,
+	// which can be the very first instruction (10 ms is plenty).
 	// Run returns an error wrapping [ErrSandboxKilled]. M5.4.b.
 	TermReasonMemoryCeiling = "memory_ceiling"
 )
@@ -407,16 +410,15 @@ func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 //     fires (overcommit-disabled or pressure).
 //
 // Rather than try to reverse-engineer the signal-vs-exit-code path the Go
-// runtime took, this classifier uses a pure correlation heuristic: if a
-// rlimit was configured AND the process ran long enough to plausibly have
-// hit it, attribute the termination to that rlimit.
+// runtime took, this classifier uses a correlation heuristic per rlimit:
 //
 // CPU: configured AND elapsed >= 0.9 * CPUTimeSeconds → cpu_time.
-// Memory: configured AND elapsed > 50ms (ran long enough to allocate) AND
+// Memory: configured AND exit was non-clean (signal-killed OR non-zero exit
 //
-//	exit was non-clean (signal-killed OR non-zero exit code) → memory_ceiling.
-//	Pure-clean exit means the workload finished naturally before
-//	hitting the limit; don't attribute.
+//	code) → memory_ceiling. No elapsed guard: Go's mmap failure is detected
+//	at allocation time, which can be the very first instruction. A clean exit
+//	(Signaled=false AND ExitCode==0) means the workload finished naturally
+//	before hitting the limit; don't attribute.
 //
 // CPU takes precedence over memory when both are configured and both
 // correlate (CPU rlimits fire deterministically; memory is best-effort).
@@ -432,10 +434,11 @@ func classifyRlimitKill(cmd *exec.Cmd, cfg SandboxConfig, elapsed time.Duration)
 			return TermReasonCPUTime
 		}
 	}
-	// Memory: time correlation + non-clean exit. RLIMIT_AS returns ENOMEM to
-	// the failing syscall (not a signal); a signal-kill or non-zero exit after
-	// a non-trivial runtime indicates the limit was hit.
-	if cfg.MemoryCeilingBytes > 0 && elapsed > 50*time.Millisecond {
+	// Memory: non-clean exit only. RLIMIT_AS returns ENOMEM to the failing
+	// syscall (not a signal); Go's runtime calls runtime.throw on ENOMEM,
+	// exiting non-zero (often exit code 2 or 66). No elapsed guard — the
+	// failure can occur at the very first allocation (10 ms is sufficient).
+	if cfg.MemoryCeilingBytes > 0 {
 		if cmd.ProcessState != nil {
 			ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
 			if ok && ws.Signaled() {
