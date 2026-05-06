@@ -24,9 +24,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { CapabilityDeclaration } from "../src/capabilities.js";
 import { handleLine } from "../src/dispatcher.js";
-import { ToolErrorCode, invokeToolHandler } from "../src/invokeTool.js";
+import {
+  ToolErrorCode,
+  invokeToolHandler,
+  runWorkerTool,
+  type WorkerTool,
+} from "../src/invokeTool.js";
 import { createDefaultRegistry, type ShutdownSignal } from "../src/methods.js";
 import { JSON_RPC_VERSION, JsonRpcErrorCode, type JsonRpcValue } from "../src/types.js";
+import type { SpawnWorkerOptions } from "../src/worker/spawn.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -109,11 +115,6 @@ afterAll(() => {
   // Best-effort: the OS cleans /tmp eventually; avoid noisy rm failures.
 });
 
-interface JsonRpcSuccessLine {
-  jsonrpc: string;
-  id: string | number | null;
-  result: { output: JsonRpcValue };
-}
 interface JsonRpcErrorLine {
   jsonrpc: string;
   id: string | number | null;
@@ -126,32 +127,65 @@ function decodeLine(line: string | undefined): unknown {
   return JSON.parse(line.slice(0, -1));
 }
 
+/**
+ * Wire-shape params builder — what a JSON-RPC client sends. NEVER carries
+ * `spawnOptions`; that field is rejected by validateTool (B1 fix). Use
+ * {@link callWorker} instead when the test needs a fixture worker.
+ */
 function workerParams(
   method: string,
   input: JsonRpcValue,
   caps: CapabilityDeclaration = EMPTY_CAPS,
   requiredOps?: readonly JsonRpcValue[],
-  spawnOptions: Record<string, unknown> = { bootstrapPath: FIXTURE_PATH },
 ): JsonRpcValue {
   const tool: Record<string, JsonRpcValue> = {
     kind: "worker",
     method,
     capabilities: caps,
-    spawnOptions: spawnOptions as unknown as JsonRpcValue,
   };
   if (requiredOps !== undefined) tool.requiredOps = requiredOps;
   return { tool, input };
 }
 
+/**
+ * Internal-API helper for tests that DO need a fixture worker (happy path,
+ * crash, remote-error translation, signal-only crash). Goes through
+ * {@link runWorkerTool} so it can pass `bootstrapPath` via the typed
+ * internal seam — exactly the path wire callers cannot reach.
+ */
+function callWorker(
+  method: string,
+  input: JsonRpcValue,
+  caps: CapabilityDeclaration = EMPTY_CAPS,
+  requiredOps?: readonly ToolOperationInput[],
+  spawnOptions: SpawnWorkerOptions = { bootstrapPath: FIXTURE_PATH },
+): Promise<JsonRpcValue> {
+  const tool: WorkerTool =
+    requiredOps === undefined
+      ? { kind: "worker", method, capabilities: caps }
+      : { kind: "worker", method, capabilities: caps, requiredOps };
+  return runWorkerTool(tool, input, spawnOptions);
+}
+
+// Loose alias for ToolOperation literals used in the test fixtures —
+// keeps the call sites in this file readable without re-importing the
+// production union type.
+type ToolOperationInput =
+  | { kind: "fs.read"; path: string }
+  | { kind: "fs.write"; path: string }
+  | { kind: "net.connect"; host: string; port?: number }
+  | { kind: "env.get"; name: string }
+  | { kind: "proc.spawn" };
+
 describe("invokeTool — worker happy path", () => {
   it("round-trips echo via a real forked fixture worker", async () => {
-    const out = await invokeToolHandler(workerParams("echo", { x: 1, nested: [2, 3] }));
-    expect(out).toEqual({ output: { x: 1, nested: [2, 3] } });
+    const out = await callWorker("echo", { x: 1, nested: [2, 3] });
+    expect(out).toEqual({ x: 1, nested: [2, 3] });
   });
 
   it("preserves primitive inputs through the worker round-trip", async () => {
-    const out = await invokeToolHandler(workerParams("echo", "hello"));
-    expect(out).toEqual({ output: "hello" });
+    const out = await callWorker("echo", "hello");
+    expect(out).toEqual("hello");
   });
 
   it("does not leak a child process after the call settles", async () => {
@@ -163,7 +197,7 @@ describe("invokeTool — worker happy path", () => {
       .toString()
       .trim()
       .split("\n").length;
-    await invokeToolHandler(workerParams("echo", { ok: true }));
+    await callWorker("echo", { ok: true });
     // Give the fork's exit a tick to be reaped.
     await new Promise<void>((res) => setTimeout(res, 100));
     const after = execSync(`pgrep -P ${String(pid)} || true`)
@@ -177,17 +211,15 @@ describe("invokeTool — worker happy path", () => {
 describe("invokeTool — worker sync deny (AC3)", () => {
   it("rejects fs.write outside the declared allowlist BEFORE spawning", async () => {
     // proc.spawn=false + requiredOps=[fs.write '/tmp/secret']: the gate
-    // denies, the dispatcher MUST short-circuit before fork() runs.
-    // An invalid bootstrap path proves the worker was never spawned —
-    // a real spawn would error with ENOENT instead of the deny code.
-    const params = workerParams(
-      "echo",
-      null,
-      EMPTY_CAPS,
-      [{ kind: "fs.write", path: "/tmp/secret" }],
-      { bootstrapPath: "/this/path/does/not/exist.mjs" },
-    );
-    await expect(invokeToolHandler(params)).rejects.toMatchObject({
+    // denies; runWorkerTool MUST short-circuit before fork() runs. With
+    // bootstrapPath pointed at a non-existent file, a real spawn would
+    // surface as ENOENT (ToolExecutionError) — getting -32003 back proves
+    // the deny landed before spawnWorker was invoked.
+    await expect(
+      callWorker("echo", null, EMPTY_CAPS, [{ kind: "fs.write", path: "/tmp/secret" }], {
+        bootstrapPath: "/this/path/does/not/exist.mjs",
+      }),
+    ).rejects.toMatchObject({
       name: "MethodError",
       code: ToolErrorCode.ToolCapabilityDenied,
       message: expect.stringContaining("/tmp/secret") as unknown,
@@ -195,32 +227,31 @@ describe("invokeTool — worker sync deny (AC3)", () => {
   });
 
   it("denies proc.spawn synchronously when declaration disallows children", async () => {
-    const params = workerParams("echo", null, EMPTY_CAPS, [{ kind: "proc.spawn" }], {
-      bootstrapPath: "/this/path/does/not/exist.mjs",
-    });
-    await expect(invokeToolHandler(params)).rejects.toMatchObject({
+    await expect(
+      callWorker("echo", null, EMPTY_CAPS, [{ kind: "proc.spawn" }], {
+        bootstrapPath: "/this/path/does/not/exist.mjs",
+      }),
+    ).rejects.toMatchObject({
       code: ToolErrorCode.ToolCapabilityDenied,
       message: expect.stringContaining("proc.spawn") as unknown,
     });
   });
 
   it("allows fs.read inside the declared allowlist (gate passes through)", async () => {
-    const params = workerParams("echo", { tag: "ok" }, ALLOW_FS_READ_TMP_CAPS, [
+    const out = await callWorker("echo", { tag: "ok" }, ALLOW_FS_READ_TMP_CAPS, [
       { kind: "fs.read", path: "/tmp/allowed.txt" },
     ]);
-    const out = await invokeToolHandler(params);
-    expect(out).toEqual({ output: { tag: "ok" } });
+    expect(out).toEqual({ tag: "ok" });
   });
 
   it("denies fs.read outside the declared allowlist with a useful reason", async () => {
-    const params = workerParams(
+    const err = await callWorker(
       "echo",
       null,
       ALLOW_FS_READ_TMP_CAPS,
       [{ kind: "fs.read", path: "/tmp/other.txt" }],
       { bootstrapPath: "/nope.mjs" },
-    );
-    const err = await invokeToolHandler(params).catch((e: unknown) => e);
+    ).catch((e: unknown) => e);
     expect(err).toMatchObject({
       code: ToolErrorCode.ToolCapabilityDenied,
       data: { reason: expect.stringContaining("/tmp/other.txt") as unknown },
@@ -230,8 +261,7 @@ describe("invokeTool — worker sync deny (AC3)", () => {
 
 describe("invokeTool — worker crash translation (AC4)", () => {
   it("surfaces process.exit(1) mid-invocation as ToolWorkerCrashed (-32004)", async () => {
-    const params = workerParams("crash", null);
-    await expect(invokeToolHandler(params)).rejects.toMatchObject({
+    await expect(callWorker("crash", null)).rejects.toMatchObject({
       name: "MethodError",
       code: ToolErrorCode.ToolWorkerCrashed,
     });
@@ -240,8 +270,7 @@ describe("invokeTool — worker crash translation (AC4)", () => {
 
 describe("invokeTool — worker remote-error translation", () => {
   it("preserves remote -32003 envelopes as ToolCapabilityDenied with data", async () => {
-    const params = workerParams("capDenied", null);
-    const err = await invokeToolHandler(params).catch((e: unknown) => e);
+    const err = await callWorker("capDenied", null).catch((e: unknown) => e);
     expect(err).toMatchObject({
       code: ToolErrorCode.ToolCapabilityDenied,
       data: { axis: "fs.read" },
@@ -249,23 +278,27 @@ describe("invokeTool — worker remote-error translation", () => {
   });
 
   it("translates a generic remote error to ToolExecutionError", async () => {
-    const params = workerParams("genericError", null);
-    await expect(invokeToolHandler(params)).rejects.toMatchObject({
+    await expect(callWorker("genericError", null)).rejects.toMatchObject({
       code: ToolErrorCode.ToolExecutionError,
       message: expect.stringContaining("remote boom") as unknown,
     });
   });
 
   it("translates a remote MethodNotFound through as ToolExecutionError", async () => {
-    const params = workerParams("nope", null);
-    await expect(invokeToolHandler(params)).rejects.toMatchObject({
+    await expect(callWorker("nope", null)).rejects.toMatchObject({
       code: ToolErrorCode.ToolExecutionError,
     });
   });
 });
 
 describe("invokeTool — dispatcher routing of tool.kind === 'worker' (AC1, AC6a)", () => {
-  it("routes a worker-tool JSON-RPC request through handleLine end-to-end", async () => {
+  it("routes a worker-tool JSON-RPC request through handleLine into the worker branch", async () => {
+    // Post-B1 the wire boundary cannot pick a bootstrap module, so a wire
+    // happy-path round-trip via fixture is structurally impossible — that
+    // IS the security feature. Prove the worker branch is reached by
+    // surfacing a sync-deny envelope (only the worker branch produces
+    // -32003 / ToolCapabilityDenied), with a `requiredOps` payload that
+    // exercises validateTool's worker leg end-to-end.
     const signal: ShutdownSignal = { shouldExit: false };
     const registry = createDefaultRegistry(signal);
 
@@ -273,13 +306,16 @@ describe("invokeTool — dispatcher routing of tool.kind === 'worker' (AC1, AC6a
       jsonrpc: JSON_RPC_VERSION,
       id: 100,
       method: "invokeTool",
-      params: workerParams("echo", { hello: "world" }),
+      params: workerParams("echo", { hello: "world" }, EMPTY_CAPS, [
+        { kind: "fs.read", path: "/etc/shadow" },
+      ]),
     });
 
     const line = await handleLine(registry, request);
-    const decoded = decodeLine(line) as JsonRpcSuccessLine;
+    const decoded = decodeLine(line) as JsonRpcErrorLine;
     expect(decoded.id).toBe(100);
-    expect(decoded.result).toEqual({ output: { hello: "world" } });
+    expect(decoded.error.code).toBe(ToolErrorCode.ToolCapabilityDenied);
+    expect(decoded.error.message).toContain("/etc/shadow");
   });
 
   it("surfaces sync-deny through the dispatcher error envelope (-32003)", async () => {
@@ -290,9 +326,7 @@ describe("invokeTool — dispatcher routing of tool.kind === 'worker' (AC1, AC6a
       jsonrpc: JSON_RPC_VERSION,
       id: 101,
       method: "invokeTool",
-      params: workerParams("echo", null, EMPTY_CAPS, [{ kind: "fs.write", path: "/etc/passwd" }], {
-        bootstrapPath: "/nope.mjs",
-      }),
+      params: workerParams("echo", null, EMPTY_CAPS, [{ kind: "fs.write", path: "/etc/passwd" }]),
     });
 
     const line = await handleLine(registry, request);
@@ -301,32 +335,88 @@ describe("invokeTool — dispatcher routing of tool.kind === 'worker' (AC1, AC6a
     expect(decoded.error.code).toBe(ToolErrorCode.ToolCapabilityDenied);
     expect(decoded.error.message).toContain("/etc/passwd");
   });
+});
 
-  it("surfaces a worker crash through the dispatcher error envelope (-32004)", async () => {
+describe("invokeTool — wire boundary rejects spawnOptions (B1 regression)", () => {
+  // CRITICAL: the dispatcher MUST NOT let a JSON-RPC payload pick the
+  // worker bootstrap module. Wire-reachable bootstrapPath = arbitrary
+  // code execution from the JSON-RPC boundary; see Phase 4 review B1.
+  // These tests pin the structural defence: validateTool rejects ANY
+  // wire payload carrying tool.spawnOptions with InvalidParams BEFORE
+  // any spawn / runWorkerTool dispatch happens.
+  it("rejects tool.spawnOptions on the typed in-process API with InvalidParams", async () => {
+    const params: JsonRpcValue = {
+      tool: {
+        kind: "worker",
+        method: "echo",
+        capabilities: EMPTY_CAPS as unknown as JsonRpcValue,
+        // The wire schema no longer carries this field — but a malicious
+        // or buggy caller might send it anyway. Must fail closed.
+        spawnOptions: {
+          bootstrapPath: "/tmp/evil-bootstrap.mjs",
+        } as unknown as JsonRpcValue,
+      },
+      input: null,
+    };
+    await expect(invokeToolHandler(params)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      message: expect.stringContaining("spawnOptions") as unknown,
+    });
+  });
+
+  it("rejects tool.spawnOptions through the JSON-RPC dispatcher (handleLine)", async () => {
     const signal: ShutdownSignal = { shouldExit: false };
     const registry = createDefaultRegistry(signal);
 
     const request = JSON.stringify({
       jsonrpc: JSON_RPC_VERSION,
-      id: 102,
+      id: 200,
       method: "invokeTool",
-      params: workerParams("crash", null),
+      params: {
+        tool: {
+          kind: "worker",
+          method: "echo",
+          capabilities: EMPTY_CAPS,
+          spawnOptions: { bootstrapPath: "/tmp/evil-bootstrap.mjs" },
+        },
+        input: null,
+      },
     });
 
     const line = await handleLine(registry, request);
     const decoded = decodeLine(line) as JsonRpcErrorLine;
-    expect(decoded.id).toBe(102);
-    expect(decoded.error.code).toBe(ToolErrorCode.ToolWorkerCrashed);
+    expect(decoded.id).toBe(200);
+    expect(decoded.error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(decoded.error.message).toContain("spawnOptions");
+  });
+
+  it("rejects tool.spawnOptions even when the field is set to null", async () => {
+    // Defence-in-depth: the `in` check fires on presence, not truthiness.
+    // A `spawnOptions: null` payload still indicates the caller is
+    // attempting to use a field the wire boundary forbids.
+    const params: JsonRpcValue = {
+      tool: {
+        kind: "worker",
+        method: "echo",
+        capabilities: EMPTY_CAPS as unknown as JsonRpcValue,
+        spawnOptions: null,
+      },
+      input: null,
+    };
+    await expect(invokeToolHandler(params)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+    });
   });
 });
 
 describe("invokeTool — worker spawn failure / message branches", () => {
   it("translates a spawnWorker failure to ToolExecutionError", async () => {
-    const params = workerParams("echo", null, EMPTY_CAPS, undefined, {
-      bootstrapPath: "/no/such/path/missing.mjs",
-      readyTimeoutMs: 200,
-    });
-    await expect(invokeToolHandler(params)).rejects.toMatchObject({
+    await expect(
+      callWorker("echo", null, EMPTY_CAPS, undefined, {
+        bootstrapPath: "/no/such/path/missing.mjs",
+        readyTimeoutMs: 200,
+      }),
+    ).rejects.toMatchObject({
       code: ToolErrorCode.ToolExecutionError,
     });
   });
@@ -349,10 +439,9 @@ describe("invokeTool — worker spawn failure / message branches", () => {
         "});",
       ].join("\n"),
     );
-    const params = workerParams("sigself", null, EMPTY_CAPS, undefined, {
+    const err = await callWorker("sigself", null, EMPTY_CAPS, undefined, {
       bootstrapPath: sigPath,
-    });
-    const err = await invokeToolHandler(params).catch((e: unknown) => e);
+    }).catch((e: unknown) => e);
     expect(err).toMatchObject({
       code: ToolErrorCode.ToolWorkerCrashed,
       message: expect.stringContaining("signal=SIGTERM") as unknown,
@@ -382,10 +471,11 @@ describe("invokeTool — worker remote-error -32004 translation", () => {
         "});",
       ].join("\n"),
     );
-    const params = workerParams("remoteCrash", null, EMPTY_CAPS, undefined, {
-      bootstrapPath: remoteCrashPath,
-    });
-    await expect(invokeToolHandler(params)).rejects.toMatchObject({
+    await expect(
+      callWorker("remoteCrash", null, EMPTY_CAPS, undefined, {
+        bootstrapPath: remoteCrashPath,
+      }),
+    ).rejects.toMatchObject({
       code: ToolErrorCode.ToolWorkerCrashed,
       message: expect.stringContaining("simulated crash report") as unknown,
     });
@@ -400,10 +490,10 @@ describe("invokeTool — worker requiredOps validation (extra branches)", () => 
       env: { allow: [] },
       proc: { spawn: false },
     };
-    const params = workerParams("echo", { ok: 1 }, caps, [
+    const out = await callWorker("echo", { ok: 1 }, caps, [
       { kind: "net.connect", host: "example.com", port: 443 },
     ]);
-    await expect(invokeToolHandler(params)).resolves.toEqual({ output: { ok: 1 } });
+    expect(out).toEqual({ ok: 1 });
   });
 
   it("accepts a port-less net.connect requiredOp", async () => {
@@ -413,15 +503,16 @@ describe("invokeTool — worker requiredOps validation (extra branches)", () => 
       env: { allow: [] },
       proc: { spawn: false },
     };
-    const params = workerParams("echo", { ok: 1 }, caps, [
+    const out = await callWorker("echo", { ok: 1 }, caps, [
       { kind: "net.connect", host: "raw.example.com" },
     ]);
-    await expect(invokeToolHandler(params)).resolves.toEqual({ output: { ok: 1 } });
+    expect(out).toEqual({ ok: 1 });
   });
 
-  it("syncs-denies even when spawnOptions field is omitted entirely", async () => {
-    // Exercises the `spawnOptions === undefined` branch in validateTool.
-    // The deny short-circuits before any default-bootstrap-path fork.
+  it("sync-denies a wire payload with no spawnOptions (proves wire path goes through worker branch)", async () => {
+    // Wire shape never carries spawnOptions (B1). The deny short-circuits
+    // before any spawn call would happen. This pins the `requiredOps`
+    // worker branch via the JSON-RPC handler entry point.
     const params: JsonRpcValue = {
       tool: {
         kind: "worker",
@@ -436,11 +527,12 @@ describe("invokeTool — worker requiredOps validation (extra branches)", () => 
     });
   });
 
-  it("accepts a worker tool with no requiredOps and no spawnOptions (validates the both-undefined branch)", async () => {
-    // Uses the default bootstrap which has no `echo` handler → expect a
-    // remote MethodNotFound translated to ToolExecutionError. The point
-    // here is to drive the validateTool branch where requiredOps is
-    // undefined AND spawnOptions is undefined.
+  it("accepts a worker tool with no requiredOps (validates the requiredOps-undefined branch)", async () => {
+    // Drives the validateTool branch where requiredOps is undefined.
+    // The default bootstrap path under vitest resolves to a non-existent
+    // dist/worker/bootstrap.js variant in some test setups; spawnWorker
+    // rejects → ToolExecutionError. The wire callable accepts the
+    // payload (no InvalidParams) — that's what the assertion proves.
     const params: JsonRpcValue = {
       tool: {
         kind: "worker",
@@ -449,8 +541,6 @@ describe("invokeTool — worker requiredOps validation (extra branches)", () => 
       },
       input: null,
     };
-    // The default bootstrap path under vitest resolves to src/worker/...
-    // which does not exist; spawnWorker rejects → ToolExecutionError.
     await expect(invokeToolHandler(params)).rejects.toMatchObject({
       code: ToolErrorCode.ToolExecutionError,
     });
@@ -463,8 +553,8 @@ describe("invokeTool — worker requiredOps validation (extra branches)", () => 
       env: { allow: ["HOME"] },
       proc: { spawn: false },
     };
-    const params = workerParams("echo", { ok: 1 }, caps, [{ kind: "env.get", name: "HOME" }]);
-    await expect(invokeToolHandler(params)).resolves.toEqual({ output: { ok: 1 } });
+    const out = await callWorker("echo", { ok: 1 }, caps, [{ kind: "env.get", name: "HOME" }]);
+    expect(out).toEqual({ ok: 1 });
   });
 
   it("rejects a net.connect requiredOp with non-string host", async () => {

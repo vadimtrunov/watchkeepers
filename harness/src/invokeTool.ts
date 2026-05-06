@@ -94,14 +94,19 @@ export interface IsolatedVmTool {
  * MUST gate via {@link gateToolInvocation} BEFORE spawning. A single
  * deny aborts the call with {@link ToolErrorCode.ToolCapabilityDenied}
  * and never pays the fork cost.
+ *
+ * **Wire-safe**: this shape is what {@link invokeToolHandler} accepts
+ * over JSON-RPC. There is intentionally NO `spawnOptions` /
+ * `bootstrapPath` field — letting a wire caller pick the bootstrap
+ * module would be arbitrary code execution from the JSON-RPC boundary.
+ * The test-only seam lives on {@link runWorkerTool}'s second parameter
+ * and is unreachable from {@link invokeToolHandler}.
  */
 export interface WorkerTool {
   readonly kind: "worker";
   readonly method: string;
   readonly capabilities: CapabilityDeclaration;
   readonly requiredOps?: readonly ToolOperation[];
-  /** Test-only escape hatch forwarded to {@link spawnWorker}. */
-  readonly spawnOptions?: SpawnWorkerOptions;
 }
 
 /**
@@ -199,20 +204,22 @@ export async function invokeToolHandler(params: JsonRpcValue | undefined): Promi
 }
 
 /**
- * Worker-process tool path (ADR §0001). Per-invocation spawn (no pool
- * yet): pre-gates `requiredOps`, forks the worker with the frozen
- * capabilities, sends the JSON-RPC request, and always terminates the
- * worker — including on sync deny, crash, and remote-error paths
- * (AC5).
+ * In-process internal entry point for the worker dispatcher path.
+ * Identical behaviour to {@link invokeToolHandler}'s worker branch but
+ * accepts a typed `WorkerTool` directly AND an `internalSpawnOptions`
+ * escape hatch (e.g. `bootstrapPath` for fixture workers in tests).
  *
- * Error translation:
- *   - sync deny           → MethodError(ToolCapabilityDenied, reason)
- *   - worker crash        → MethodError(ToolWorkerCrashed)
- *   - remote -32003       → MethodError(ToolCapabilityDenied) (preserve data)
- *   - remote -32004       → MethodError(ToolWorkerCrashed)
- *   - other remote err    → MethodError(ToolExecutionError, message)
+ * **NEVER call from JSON-RPC code**. The wire boundary uses the
+ * (unexported) inner runner via {@link invokeToolHandler}, which never
+ * threads `spawnOptions` through — that field was deliberately removed
+ * from {@link WorkerTool} so a wire caller cannot pick the bootstrap
+ * module and trigger arbitrary code execution.
  */
-async function runWorkerTool(tool: WorkerTool, input: JsonRpcValue): Promise<JsonRpcValue> {
+export async function runWorkerTool(
+  tool: WorkerTool,
+  input: JsonRpcValue,
+  internalSpawnOptions?: SpawnWorkerOptions,
+): Promise<JsonRpcValue> {
   // 1. Pre-gate every requested op against the frozen declaration.
   //    Pure / synchronous — never pays the fork cost on a deny (AC3).
   for (const op of tool.requiredOps ?? []) {
@@ -230,7 +237,7 @@ async function runWorkerTool(tool: WorkerTool, input: JsonRpcValue): Promise<Jso
   //    the worker never came up, so there is nothing to terminate.
   let worker: WorkerHandle;
   try {
-    worker = await spawnWorker(tool.capabilities, tool.spawnOptions);
+    worker = await spawnWorker(tool.capabilities, internalSpawnOptions);
   } catch (err) {
     throw toolError(
       ToolErrorCode.ToolExecutionError,
@@ -349,8 +356,16 @@ function validateTool(raw: { kind?: unknown }): IsolatedVmTool | WorkerTool {
     method?: unknown;
     capabilities?: unknown;
     requiredOps?: unknown;
-    spawnOptions?: unknown;
   };
+  // SECURITY: reject any wire payload carrying `spawnOptions`. The
+  // bootstrap-path override is a test-only seam exposed via
+  // `runWorkerTool`'s internal parameter — letting a JSON-RPC caller
+  // pick the bootstrap module would be arbitrary code execution from
+  // the wire boundary. Detect it via a property probe (the field is no
+  // longer in the type) and fail closed with InvalidParams.
+  if ("spawnOptions" in (raw as object)) {
+    throw invalidParams("params.tool.spawnOptions is not permitted on the wire (test-only seam)");
+  }
   if (typeof t.method !== "string" || t.method.length === 0) {
     throw invalidParams("params.tool.method must be a non-empty string");
   }
@@ -365,29 +380,9 @@ function validateTool(raw: { kind?: unknown }): IsolatedVmTool | WorkerTool {
     }
     requiredOps = t.requiredOps.map((op, i) => validateOp(op, i));
   }
-  // `spawnOptions` is a test-only escape hatch; we only allow it through
-  // the in-process API so it is preserved verbatim from `raw` rather than
-  // re-validated. Wire callers cannot reach this branch because the JSON
-  // values that survive structured-clone don't carry through the
-  // typed-API surface.
   return requiredOps === undefined
-    ? {
-        kind: "worker",
-        method: t.method,
-        capabilities: capsParsed.data,
-        ...(t.spawnOptions === undefined
-          ? {}
-          : { spawnOptions: t.spawnOptions as SpawnWorkerOptions }),
-      }
-    : {
-        kind: "worker",
-        method: t.method,
-        capabilities: capsParsed.data,
-        requiredOps,
-        ...(t.spawnOptions === undefined
-          ? {}
-          : { spawnOptions: t.spawnOptions as SpawnWorkerOptions }),
-      };
+    ? { kind: "worker", method: t.method, capabilities: capsParsed.data }
+    : { kind: "worker", method: t.method, capabilities: capsParsed.data, requiredOps };
 }
 
 function validateOp(raw: unknown, index: number): ToolOperation {
