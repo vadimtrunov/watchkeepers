@@ -275,7 +275,7 @@ describe("runHarness — harness/ready notification", () => {
     expect(parseErr.error.code).toBe(-32700);
 
     const shutdownOk = JSON.parse(shutdownLine) as { id: number; result: { accepted: boolean } };
-    expect(shutdownOk.id).toBe(2);
+    expect(shutdownOk.id).toBe(1);
     expect(shutdownOk.result.accepted).toBe(true);
   });
 });

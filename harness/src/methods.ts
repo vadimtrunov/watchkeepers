@@ -17,6 +17,7 @@
 
 import { invokeToolHandler } from "./invokeTool.js";
 import { wireLLMMethods } from "./llm/methods.js";
+import type { NotificationWriter } from "./llm/notification-writer.js";
 import type { LLMProvider } from "./llm/provider.js";
 import {
   JsonRpcErrorCode,
@@ -87,10 +88,17 @@ export interface ShutdownSignal {
  * `reportCost`) via {@link wireLLMMethods}. When omitted, the harness
  * runs in degraded mode and clients calling those methods receive
  * `MethodNotFound` from the dispatcher.
+ *
+ * The optional `writer` parameter (M5.3.c.c.c.b.a) is forwarded to
+ * {@link wireLLMMethods} so the streaming `stream` / `stream/cancel`
+ * handlers landing in M5.3.c.c.c.b.b can capture it. When `provider`
+ * is omitted the writer is ignored — the LLM surface is absent in
+ * degraded mode and there is nothing to receive the closure.
  */
 export function createDefaultRegistry(
   signal: ShutdownSignal,
   provider?: LLMProvider,
+  writer?: NotificationWriter,
 ): MethodRegistry {
   const registry = new Map<string, MethodHandler>();
 
@@ -106,7 +114,7 @@ export function createDefaultRegistry(
   registry.set("invokeTool", invokeToolHandler);
 
   if (provider !== undefined) {
-    wireLLMMethods(registry, provider);
+    wireLLMMethods(registry, provider, writer);
   }
 
   return registry;
