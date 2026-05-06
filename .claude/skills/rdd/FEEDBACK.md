@@ -1513,3 +1513,43 @@ None at this time. Re-evaluate after the next 5 `/rdd` runs:
 - Total wall time of skill change: ~10 min (3 file edits + this entry)
 
 ---
+## 2026-05-06 — M5.3.c.c.a: Add TS LLMProvider interface + FakeProvider mirroring Go contract
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: Phase 3
+
+### What worked
+
+Gate 1 auto-passed the decomposition (no operator intervention). Phase 2 file budget
+projection (≤8 files / ≤900 LOC) was tight but not missed — Phase 3 delivered 6 files
+with 1165 raw LOC, but hard rule 6's "BOTH cap dimensions" framing correctly allowed it
+because file count (6) and non-comment LOC (651) both stayed well under the 20-file,
+1000-LOC hard ceiling. This prevented a false Gate 1 reject that would have re-run the
+planner. Review convergence at iteration 1 was clean: 0 blocker, 0 important, 4 nits
+deferred to Follow-up. Comment density not flagged — TS-specific value (branded types,
+Promise<…>, verbatimModuleSyntax, narrowing) vs. Go-mirror redundancy judged net-positive.
+
+### What wasted effort
+
+Phase 3 push hit a credential mismatch: `gh` active account (`vadym-trunov_wbt`) lacked
+write permission to the repo; admin account (`vadimtrunov`) had it. Recovery was `gh auth
+switch` + `gh auth setup-git` before re-attempting the push. Root cause: OS keychain
+credential used by `git` routed through a different GitHub user than `gh auth status`
+reported as active. Preflight Check 3 already verifies `gh` permissions but doesn't catch
+the case where the keychain credential doesn't match. Fix idea: preflight Check 3 could
+add a no-op `git ls-remote --heads origin` to verify the keychain credential matches the
+reported `gh` active account.
+
+### Suggested skill changes
+
+- Augment `references/preflight.md` Check 3: after verifying `gh` permissions, add a
+  `git ls-remote --heads origin` test to detect keychain/gh account mismatches early.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0 (Phase 6 not yet run)
+- Operator interventions outside of gates: 1 (gh auth switch + setup-git)
+- Total wall time so far: ~15 min (this writer entry is the last action before Phase 5b)
+
+---
