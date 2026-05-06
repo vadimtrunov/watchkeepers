@@ -1283,3 +1283,24 @@ Executor dispatch, fixer dispatch, and Phase 4 loop were all well-scoped. 4 impo
 - Total wall time from /rdd to Phase 5a: ~40m (heavy Phase 4 fix loop + 44m writer timeout)
 
 ---
+## 2026-05-06 — M5.3.c.a: Auto-derive zod tool schemas from Tool Manifest at harness boot
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 (Phase 1 decomposition, Phase 4 fix iteration)
+
+### What worked
+Phase 2's fast-check (ls + grep over test files) correctly identified that the vitest suite portion was already covered by tests landed in prior PRs. This prevented a toggle-only TASK and saved an iteration. The actual schema-derivation work stayed focused: 188 tests written once and converged in Phase 4 after one reviewer catch (`.strict()` missing, wrong-type assertion missing).
+
+### What wasted effort
+Phase 1 planner decomposed M5.3.c into 5 sub-items based on the literal ROADMAP text without checking whether the worker-path vitest tests were already live. This resulted in an initial decomposition commit (514945a) followed by a refine commit (66b66a6) after discovering the tests in `worker-spawn.test.ts`, `invokeTool-worker.test.ts`, and `worker-broker.test.ts`. One extra `main` commit cost, but the alternative (creating a toggle-only TASK) would have burned an iteration or required halt+manual-resolution.
+
+### Suggested skill changes
+- Add a Phase 2 preflight checklist item: before creating the TASK file, run `ls harness/test/` + grep for `describe()` blocks to confirm candidate sub-items are genuinely outstanding. This is a 2–3 bash invocation "verify the planner's premise" pass that costs negligible time and prevents the toggle-only landmine. Could live as a new entry in `references/preflight.md` §"Phase 2 fast-checks".
+
+### Metrics
+- Review iterations: 2 (Phase 4 iter 1 caught `.strict()` missing; Phase 4 iter 2 converged)
+- PR-fix iterations: 1 (executor fixer applied `.strict()` + 2 test assertions in commit 04155b4)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending (Phase 5–7)
+
+---
