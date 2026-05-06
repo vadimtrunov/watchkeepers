@@ -121,7 +121,7 @@ export function wireLLMMethods(
     // by streamID and so terminal events can self-clean. Memory leaks
     // are impossible because every entry is cleared on terminal-event,
     // explicit cancel, or dispatch-loop exception.
-    const streams = new Map<string, StreamSubscription>();
+    const streams = new Map<string, ActiveStream>();
     registry.set("stream", makeStreamHandler(provider, writer, streams));
     registry.set("stream/cancel", makeStreamCancelHandler(streams));
   }
@@ -165,10 +165,21 @@ function makeReportCostHandler(provider: LLMProvider): MethodHandler {
   };
 }
 
+/**
+ * Per-stream registry entry. The `state` object is shared between the
+ * event-handler closure and the cancel handler so that a `stream/cancel`
+ * mutation (`cancelled = true`) is immediately visible to any in-flight
+ * provider dispatch that arrives after `stop()` is called (TOCTOU fix).
+ */
+interface ActiveStream {
+  subscription: StreamSubscription;
+  state: { terminated: boolean; cancelled: boolean };
+}
+
 function makeStreamHandler(
   provider: LLMProvider,
   writer: NotificationWriter,
-  streams: Map<string, StreamSubscription>,
+  streams: Map<string, ActiveStream>,
 ): MethodHandler {
   return async (params: JsonRpcValue | undefined): Promise<JsonRpcValue> => {
     const req = parseStreamParams(params);
@@ -178,9 +189,18 @@ function makeStreamHandler(
     // once even if the provider double-emits or the SDK errors after
     // message_stop. Wrapped in an object so the eslint/TS narrowing rule
     // sees the field as genuinely mutable across the closure boundary.
-    const state = { terminated: false };
+    // `cancelled` is set by the cancel handler before calling stop() so
+    // that any in-flight late event is silently dropped instead of being
+    // forwarded to the client after it received `accepted: true`.
+    const state = { terminated: false, cancelled: false };
 
     const handler = (event: StreamEvent): void => {
+      // Drop events that arrive after stream/cancel has fired. The cancel
+      // handler sets `state.cancelled = true` before calling stop(), so
+      // this check closes the TOCTOU window where the provider's dispatch
+      // loop delivers one last event after the client received accepted:true.
+      if (state.cancelled) return;
+
       // Translate + dispatch FIRST so the client always observes the
       // terminal event before the registry entry disappears. Order
       // matters for the cancel-after-message_stop race documented on
@@ -223,24 +243,28 @@ function makeStreamHandler(
       // here. Only register the subscription if it is still live —
       // otherwise the terminal event already cleaned up and we would
       // re-introduce the entry we just removed.
-      streams.set(streamID, subscription);
+      streams.set(streamID, { subscription, state });
     }
     return { streamID };
   };
 }
 
-function makeStreamCancelHandler(streams: Map<string, StreamSubscription>): MethodHandler {
+function makeStreamCancelHandler(streams: Map<string, ActiveStream>): MethodHandler {
   return async (params: JsonRpcValue | undefined): Promise<JsonRpcValue> => {
     const streamID = parseStreamCancelParams(params);
-    const subscription = streams.get(streamID);
-    if (subscription === undefined) {
+    const entry = streams.get(streamID);
+    if (entry === undefined) {
       // Unknown / already-completed streamID is a no-op per AC4. Not an
       // error: handles the race between the client receiving the
       // terminal `message_stop` and sending its `stream/cancel`.
       return { accepted: false };
     }
+    // Set cancelled BEFORE calling stop() so that any in-flight event
+    // dispatched by the provider after stop() returns is silently dropped
+    // by the handler closure rather than forwarded to the client.
+    entry.state.cancelled = true;
     streams.delete(streamID);
-    await subscription.stop();
+    await entry.subscription.stop();
     return { accepted: true };
   };
 }

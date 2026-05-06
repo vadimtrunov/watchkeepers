@@ -15,6 +15,7 @@ import {
   LLMError,
   model,
   type StreamEvent,
+  type StreamHandler,
   type StreamSubscription,
   type Usage,
 } from "../src/llm/index.js";
@@ -365,6 +366,53 @@ describe("wireLLMMethods — stream/cancel paths", () => {
 
     const cancelResult = await cancelHandler({ streamID: sid });
     expect(cancelResult).toEqual({ accepted: false });
+  });
+
+  it("late-event-after-cancel: event dispatched after stream/cancel is silently dropped", async () => {
+    // Capture the handler callback passed to provider.stream so we can
+    // invoke it manually after cancel, simulating a provider in-flight
+    // delivery that races the stop() call.
+    const fake = new FakeProvider();
+    // StreamHandler allows void | Promise<void> return; match that type so
+    // no-misused-promises does not fire when we assign `h` into this variable.
+    let capturedHandler: StreamHandler | undefined;
+    const originalStream = fake.stream.bind(fake);
+    fake.stream = (req, h) => {
+      capturedHandler = h;
+      // Use empty events so no terminal event fires synchronously —
+      // the registry entry persists until we cancel manually.
+      return originalStream(req, h);
+    };
+    fake.streamEvents = [];
+
+    const { registry, buffer } = wired(fake);
+    const streamHandler = registry.get("stream");
+    const cancelHandler = registry.get("stream/cancel");
+    if (streamHandler === undefined || cancelHandler === undefined) {
+      throw new Error("missing handlers");
+    }
+
+    const result = await streamHandler({
+      model: MODEL,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const sid = streamIDOf(result);
+    if (capturedHandler === undefined) throw new Error("handler not captured");
+
+    // Cancel the stream — sets state.cancelled = true, returns accepted:true.
+    const cancelResult = await cancelHandler({ streamID: sid });
+    expect(cancelResult).toEqual({ accepted: true });
+
+    // Snapshot notification count after cancel.
+    const notifCountAfterCancel = buffer.notifications.length;
+
+    // Simulate a late in-flight event delivered by the provider after stop().
+    // `void` suppresses no-floating-promises: the handler is synchronous in
+    // practice; StreamHandler's Promise<void> return is a type-level allowance.
+    void capturedHandler({ kind: "text_delta", textDelta: "late!" });
+
+    // No new stream/event notification must have been written.
+    expect(buffer.notifications.length).toBe(notifCountAfterCancel);
   });
 });
 
