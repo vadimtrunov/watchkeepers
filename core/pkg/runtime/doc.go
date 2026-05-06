@@ -129,6 +129,28 @@
 // `host`, `pod`, …). Runtime metadata is for runtime-internal context,
 // not for shipping operational telemetry.
 //
+// # Sandbox guardrail surface
+//
+// [SandboxRunner] (M5.4.a) wraps an `os/exec` subprocess with two
+// guardrails: a wall-clock timeout (via [time.AfterFunc] +
+// [exec.Cmd.Process.Kill]) and an output-byte cap (via wrapped
+// [io.Writer] adapters that count cumulative stdout+stderr bytes).
+// Termination outcomes surface as [RunResult.TermReason] using the
+// exported `TermReason*` constants — `natural`, `wall_clock`,
+// `output_cap`, `context_canceled`. Any sandbox-driven kill returns
+// an error wrapping [ErrSandboxKilled]; natural exits (including
+// non-zero exit codes) return a nil error so the caller can treat
+// "process ran" and "process was terminated by us" as distinct
+// signals. The leaf is syscall-free and cross-platform across Linux
+// and Darwin.
+//
+// CPU-time and memory-ceiling rlimits are deferred to M5.4.b because
+// they require platform-specific `setrlimit` plumbing
+// (`syscall.SysProcAttr.Rlimit`) and carry CI-flake risk that
+// warrants a dedicated review. M5.4.a is the syscall-free
+// foundation; M5.4.b layers the rlimit-driven guardrails on top
+// without changing the [SandboxRunner.Run] return contract.
+//
 // # Out of scope (deferred)
 //
 //   - Concrete runtime implementations — the Claude-Code-via-TS-harness
