@@ -1729,3 +1729,29 @@ None. Phase 3 executor delivered clean code matching all ACs; Phase 4 reviewer f
 - Total wall time from Phase 1 to Phase 5a dispatch: ~22 min
 
 ---
+
+## 2026-05-07 — M5.5.b.a: Decode Manifest toolset jsonb and enforce ACLs at harness InvokeTool gate
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 (iter 1 + iter 2)
+
+### What worked
+
+Phase 4 autonomous /loop mode (iter 1 + fixer dispatch) converged cleanly in ~6 minutes: fixer dispatch in tick N, reviewer dispatch in tick N+1, both at 60s cadence. The code-reviewer severity rule (nit vs important) held under autonomous run — one "Critical" CodeRabbit suggestion classified as nit and held; still tracked in Follow-up.
+
+### What wasted effort
+
+Phase 4 iter 1 ESM spyOn trap: `vi.spyOn(invokeToolModule, "runIsolatedJs")` does not intercept in-module lexical calls, so the test's `.not.toHaveBeenCalled()` was trivially satisfied. Required iter 2 dispatch to replace with structural proof (BROKEN_SOURCE + error-code divergence). Add a "structural vs behavioral witness" example to `references/agent-briefs/code-reviewer.md` so the next TS mocking round flags this faster.
+
+### Suggested skill changes
+
+- Add ESM spyOn caveat + structural-witness pattern to `references/agent-briefs/code-reviewer.md` §Test review so future code-reviewer instances catch lexical-call mock misses.
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 0 (fixer dispatch in Phase 4, not Phase 6)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to Phase 4 convergence: 00:33
+
+---

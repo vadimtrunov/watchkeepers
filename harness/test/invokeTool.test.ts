@@ -8,12 +8,27 @@
  * runs in C++ — `vi.useFakeTimers()` cannot interrupt a C++ tight loop.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { handleLine } from "../src/dispatcher.js";
 import { ToolErrorCode, invokeToolHandler } from "../src/invokeTool.js";
+import { __resetActiveToolsetForTests, setActiveToolset } from "../src/manifest.js";
 import { createDefaultRegistry, type ShutdownSignal } from "../src/methods.js";
 import { JSON_RPC_VERSION, JsonRpcErrorCode, type JsonRpcValue } from "../src/types.js";
+
+// M5.5.b.a manifest ACL gate: every isolated-vm tool call now requires
+// a manifest-declared `name` and an active toolset. The suite uses
+// `test-tool` as the canonical fixture name; individual tests opt out
+// by clearing or replacing the toolset in their own setup. Reset on
+// each side so a single test's mutation cannot leak across files.
+const FIXTURE_TOOL_NAME = "test-tool";
+beforeEach(() => {
+  __resetActiveToolsetForTests();
+  setActiveToolset([FIXTURE_TOOL_NAME]);
+});
+afterEach(() => {
+  __resetActiveToolsetForTests();
+});
 
 interface JsonRpcSuccessLine {
   jsonrpc: string;
@@ -38,10 +53,14 @@ function makeParams(
   input: JsonRpcValue,
   limits?: { wallClockMs?: number; memoryMb?: number },
 ): JsonRpcValue {
+  // The fixture toolset (set in beforeEach) only allows FIXTURE_TOOL_NAME;
+  // every helper-built params payload carries that name so the ACL gate
+  // lets the call reach runIsolatedJs.
+  const tool = { kind: "isolated-vm", name: FIXTURE_TOOL_NAME, source } as const;
   return limits === undefined
-    ? { tool: { kind: "isolated-vm", source }, input }
+    ? { tool, input }
     : {
-        tool: { kind: "isolated-vm", source },
+        tool,
         input,
         limits: {
           ...(limits.wallClockMs === undefined ? {} : { wallClockMs: limits.wallClockMs }),
@@ -213,7 +232,11 @@ describe("invokeTool — dispatcher integration", () => {
       id: 11,
       method: "invokeTool",
       params: {
-        tool: { kind: "isolated-vm", source: "return input.a + input.b;" },
+        tool: {
+          kind: "isolated-vm",
+          name: FIXTURE_TOOL_NAME,
+          source: "return input.a + input.b;",
+        },
         input: { a: 2, b: 3 },
       },
     });
@@ -235,7 +258,11 @@ describe("invokeTool — dispatcher integration", () => {
       id: "err-1",
       method: "invokeTool",
       params: {
-        tool: { kind: "isolated-vm", source: 'throw new Error("nope");' },
+        tool: {
+          kind: "isolated-vm",
+          name: FIXTURE_TOOL_NAME,
+          source: 'throw new Error("nope");',
+        },
         input: null,
       },
     });

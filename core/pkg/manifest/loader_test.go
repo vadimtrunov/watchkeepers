@@ -2,8 +2,11 @@ package manifest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/keepclient"
@@ -169,5 +172,91 @@ func TestLoadManifest_FetcherErrorPropagated(t *testing.T) {
 	}
 	if !errors.Is(err, keepclient.ErrNotFound) {
 		t.Errorf("err = %v, want errors.Is keepclient.ErrNotFound", err)
+	}
+}
+
+// TestLoadManifest_DecodesToolsetNames asserts the M5.5.b.a happy path
+// (AC1): the loader decodes mv.Tools from `[{"name":"echo"},{"name":"sum"}]`
+// into Toolset = ["echo", "sum"].
+func TestLoadManifest_DecodesToolsetNames(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`[{"name":"echo"},{"name":"sum"}]`),
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	want := []string{"echo", "sum"}
+	if !reflect.DeepEqual(got.Toolset, want) {
+		t.Errorf("Toolset = %v, want %v", got.Toolset, want)
+	}
+}
+
+// TestLoadManifest_EmptyToolsArrayMeansNilToolset asserts AC1's empty-array
+// branch: a `[]` jsonb yields a nil/empty Toolset on the runtime.Manifest
+// (see runtime.go:99-103: "An empty / nil Toolset means 'no tools'").
+func TestLoadManifest_EmptyToolsArrayMeansNilToolset(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`[]`),
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(got.Toolset) != 0 {
+		t.Errorf("Toolset = %v, want nil/empty", got.Toolset)
+	}
+}
+
+// TestLoadManifest_NullToolsTreatedAsNilToolset asserts AC1's null branch:
+// a JSON `null` jsonb (or an entirely absent column surfaced as
+// json.RawMessage("null") / nil) yields a nil/empty Toolset.
+func TestLoadManifest_NullToolsTreatedAsNilToolset(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`null`),
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(got.Toolset) != 0 {
+		t.Errorf("Toolset = %v, want nil/empty", got.Toolset)
+	}
+}
+
+// TestLoadManifest_MalformedToolsRejected asserts AC2: a malformed Tools
+// jsonb (here `[{"name":42}]`) returns an error wrapped with the
+// `manifest: toolset:` prefix so callers can match the underlying
+// json.Unmarshal failure mode.
+func TestLoadManifest_MalformedToolsRejected(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`[{"name":42}]`),
+	}}
+
+	_, err := LoadManifest(context.Background(), f, "m")
+	if err == nil {
+		t.Fatalf("LoadManifest: nil error, want wrapped toolset failure")
+	}
+	if !strings.Contains(err.Error(), "manifest: toolset:") {
+		t.Errorf("err = %v, want substring %q", err, "manifest: toolset:")
 	}
 }

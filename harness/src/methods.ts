@@ -15,10 +15,13 @@
  * `stream` method is deferred to M5.3.c.c.c.b.
  */
 
+import { z } from "zod";
+
 import { invokeToolHandler } from "./invokeTool.js";
 import { wireLLMMethods } from "./llm/methods.js";
 import type { NotificationWriter } from "./llm/notification-writer.js";
 import type { LLMProvider } from "./llm/provider.js";
+import { setActiveToolset } from "./manifest.js";
 import {
   JsonRpcErrorCode,
   type JsonRpcErrorCodeValue,
@@ -26,6 +29,21 @@ import {
   type HelloResult,
   type ShutdownResult,
 } from "./types.js";
+
+/**
+ * zod schema for `setManifest` params (M5.5.b.a). The Go core projects
+ * `manifest_version.tools` jsonb into a `[]string` of tool names and
+ * delivers the list once at session boot via this method. The harness
+ * stores it via {@link setActiveToolset} for the `invokeTool` ACL gate.
+ *
+ * `.strict()` rejects future-protocol fields explicitly so a version
+ * skew surfaces as a wire error rather than silent acceptance.
+ */
+const SetManifestParamsSchema = z
+  .object({
+    toolset: z.array(z.string()),
+  })
+  .strict();
 
 /**
  * Harness implementation version. Bumped when wire-protocol semantics
@@ -112,6 +130,18 @@ export function createDefaultRegistry(
   });
 
   registry.set("invokeTool", invokeToolHandler);
+
+  registry.set("setManifest", (params) => {
+    const parsed = SetManifestParamsSchema.safeParse(params);
+    if (!parsed.success) {
+      throw new MethodError(
+        JsonRpcErrorCode.InvalidParams,
+        `setManifest: invalid params: ${parsed.error.message}`,
+      );
+    }
+    setActiveToolset(parsed.data.toolset);
+    return { ok: true };
+  });
 
   if (provider !== undefined) {
     wireLLMMethods(registry, provider, writer);
