@@ -17,9 +17,11 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { handleLine } from "./dispatcher.js";
+import { notification, serialize } from "./jsonrpc.js";
 import { ClaudeCodeProvider } from "./llm/claude-code-provider.js";
+import type { NotificationWriter } from "./llm/notification-writer.js";
 import type { LLMProvider } from "./llm/provider.js";
-import { createDefaultRegistry, type ShutdownSignal } from "./methods.js";
+import { HARNESS_VERSION, createDefaultRegistry, type ShutdownSignal } from "./methods.js";
 
 /**
  * Wire stdin → dispatcher → stdout, then resolve when the input stream
@@ -41,7 +43,36 @@ export async function runHarness(
   signal: ShutdownSignal = { shouldExit: false },
   provider?: LLMProvider,
 ): Promise<void> {
-  const registry = createDefaultRegistry(signal, provider);
+  // Default writer: serialize each notification envelope to NDJSON and
+  // push the bytes to stdout. Constructed only when a provider is wired
+  // — degraded mode (no provider) does not advertise readiness, mirrors
+  // the LLM-method registration gate in `createDefaultRegistry`. Tests
+  // drive the same path by passing a buffer-collecting `stdout`.
+  let writer: NotificationWriter | undefined;
+  if (provider !== undefined) {
+    writer = (n) => {
+      stdout.write(serialize(n));
+    };
+  }
+
+  const registry = createDefaultRegistry(signal, provider, writer);
+
+  // Boot-time readiness signal (M5.3.c.c.c.b.a): one `harness/ready`
+  // notification announces the harness identity, version, and the
+  // registered LLM capabilities to the Go-core supervisor BEFORE the
+  // readline loop starts consuming requests. The capabilities array
+  // mirrors the methods registered by `wireLLMMethods` — it MUST be
+  // updated in lockstep when M5.3.c.c.c.b.b adds `stream` /
+  // `stream/cancel` to the registry.
+  if (writer !== undefined) {
+    writer(
+      notification("harness/ready", {
+        harness: "watchkeeper",
+        version: HARNESS_VERSION,
+        capabilities: ["complete", "countTokens", "reportCost"],
+      }),
+    );
+  }
 
   const rl = readline.createInterface({ input: stdin, crlfDelay: Infinity });
 

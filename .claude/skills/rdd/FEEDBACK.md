@@ -1601,3 +1601,25 @@ TASK-drafting AC2 enumerated the wire shape as a closed list but omitted `errorM
 - Total wall time from /loop tick to Phase 5a: ~30 min
 
 ---
+## 2026-05-06 — M5.3.c.c.c.b.a: Add JSON-RPC notification builder + inject shared stdout writer into LLM method wiring
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+Auto-mode under `/loop /rdd --auto resume` ran cleanly through Phases 1–4. Phase 4 converged on iteration 1. The executor brief's "do NOT use the writer in any of the existing three handlers" was clear enough that scope creep didn't appear. The `harness/ready` boot notification gave the TASK feature-shape and avoided the toggle-only-PR gray zone for an infrastructure leaf.
+
+### What wasted effort
+(a) The planner's first sub-item title "Add JSON-RPC notification builder + inject shared stdout writer" assumed the notification builder didn't exist. Reading `jsonrpc.ts` at TASK-drafting time discovered it already existed from M5.3.a. Cost: minor scope re-framing during brainstorm. Worth a planner-brief tweak: "When assessing 'Add X' sub-items, grep the codebase for X before proposing it as work." (b) The Phase 5a writer dispatch was TRUNCATED after the lesson append — only 1 of 4 actions completed. The orchestrator detected the partial state via `git status` (showed `M docs/lessons/M5.md` unstaged + no commit) and re-dispatched a continuation. No data loss — the lesson append rides along in the second dispatch's commit. Worth a `references/agent-briefs/writer.md` note: "if the agent is dispatched as a CONTINUATION (lesson already appended), do NOT touch `docs/lessons/<milestone>.md`; just complete the FEEDBACK + ROADMAP + commit." Adds a few lines to the brief, eliminates a class of double-append bugs.
+
+### Suggested skill changes
+- Add planner-brief grep step: "When assessing 'Add X' sub-items, grep the codebase for X before proposing it as work."
+- Add writer-brief continuation handling: "If dispatched as a CONTINUATION (lesson already appended), do NOT touch `docs/lessons/<milestone>.md`; just complete the FEEDBACK + ROADMAP + commit."
+
+### Metrics
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: ~15 min (including truncation recovery)
+
+---

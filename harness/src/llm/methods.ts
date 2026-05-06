@@ -19,6 +19,7 @@ import { MethodError, type MethodHandler } from "../methods.js";
 import { JsonRpcErrorCode, type JsonRpcValue } from "../types.js";
 
 import { LLMError, type LLMErrorCode } from "./errors.js";
+import type { NotificationWriter } from "./notification-writer.js";
 import type { LLMProvider } from "./provider.js";
 import {
   ROLES,
@@ -75,8 +76,26 @@ export interface ReportCostParams {
  * `provider`. Idempotent in spirit but a re-registration overwrites the
  * prior handler (Map semantics). Stream is intentionally absent —
  * deferred to M5.3.c.c.c.b.
+ *
+ * The optional `writer` parameter (M5.3.c.c.c.b.a) is captured in the
+ * closure so the streaming `stream` / `stream/cancel` handlers landing
+ * in M5.3.c.c.c.b.b have a place to push server-to-client
+ * notifications. The current three sync handlers (`complete`,
+ * `countTokens`, `reportCost`) DO NOT call the writer — they are
+ * request/response shaped — so the parameter is intentionally
+ * unreferenced beyond the no-op statement that pins the closure
+ * binding for tooling.
  */
-export function wireLLMMethods(registry: Map<string, MethodHandler>, provider: LLMProvider): void {
+export function wireLLMMethods(
+  registry: Map<string, MethodHandler>,
+  provider: LLMProvider,
+  writer?: NotificationWriter,
+): void {
+  // Closure capture for the M5.3.c.c.c.b.b stream handlers. Reading the
+  // local marks the binding as live for `noUnusedLocals` and lets future
+  // edits in this file inline the writer without re-threading the param.
+  void writer;
+
   registry.set("complete", makeCompleteHandler(provider));
   registry.set("countTokens", makeCountTokensHandler(provider));
   registry.set("reportCost", makeReportCostHandler(provider));
