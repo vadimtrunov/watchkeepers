@@ -99,12 +99,20 @@ export class IpcJsonRpcTransport {
       params === undefined
         ? { jsonrpc: JSON_RPC_VERSION, method }
         : { jsonrpc: JSON_RPC_VERSION, method, params };
-    this.channel.send(envelope);
+    try {
+      this.channel.send(envelope);
+    } catch {
+      /* notification is fire-and-forget; swallow send failures */
+    }
   }
 
   public sendResponse(id: JsonRpcId, result: JsonRpcValue): void {
     if (this.disposed) return;
-    this.channel.send({ jsonrpc: JSON_RPC_VERSION, id, result });
+    try {
+      this.channel.send({ jsonrpc: JSON_RPC_VERSION, id, result });
+    } catch {
+      /* best-effort response; swallow send failures */
+    }
   }
 
   public sendError(id: JsonRpcId, code: number, message: string, data?: JsonRpcValue): void {
@@ -113,7 +121,11 @@ export class IpcJsonRpcTransport {
       data === undefined
         ? { jsonrpc: JSON_RPC_VERSION, id, error: { code, message } }
         : { jsonrpc: JSON_RPC_VERSION, id, error: { code, message, data } };
-    this.channel.send(envelope);
+    try {
+      this.channel.send(envelope);
+    } catch {
+      /* best-effort error response; swallow send failures */
+    }
   }
 
   public onRequest(handler: (req: IncomingRequest) => void): void {
@@ -152,6 +164,17 @@ export class IpcJsonRpcTransport {
       error?: unknown;
     };
     if (env.jsonrpc !== JSON_RPC_VERSION) {
+      // If the envelope looks like a response for a known pending request, reject
+      // that pending entry so the awaiter doesn't hang until dispose().
+      if (("result" in env || "error" in env) && typeof env.id === "number") {
+        const pending = this.pending.get(env.id);
+        if (pending !== undefined) {
+          this.pending.delete(env.id);
+          pending.reject(
+            new Error(`malformed response: jsonrpc field must be "${JSON_RPC_VERSION}"`),
+          );
+        }
+      }
       this.reportParseError(`jsonrpc field must be "${JSON_RPC_VERSION}"`, message);
       return;
     }

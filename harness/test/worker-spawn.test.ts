@@ -176,12 +176,67 @@ describe("IpcJsonRpcTransport — malformed inbound", () => {
     p.dispose();
   });
 
+  it("rejects a pending request when the response arrives with a malformed jsonrpc field", async () => {
+    // Comment 1 regression: a bad jsonrpc version on a response-shaped envelope
+    // must reject the awaiter rather than leaving it hanging.
+    const { parent, child } = makeChannelPair();
+    const p = new IpcJsonRpcTransport(parent);
+    const c = new IpcJsonRpcTransport(child);
+    // Intercept the outgoing request to learn its id, then reply with a bad jsonrpc version.
+    c.onRequest((req) => {
+      // Send a response with jsonrpc "1.0" instead of "2.0".
+      child.send({ jsonrpc: "1.0", id: req.id, result: "bad" });
+    });
+    await expect(p.request("ping")).rejects.toThrow(/malformed response/);
+    p.dispose();
+    c.dispose();
+  });
+
   it("JsonRpcRemoteError carries class identity and code/data", () => {
     const err = new JsonRpcRemoteError(-32000, "boom", { detail: 1 });
     expect(err).toBeInstanceOf(Error);
     expect(err).toBeInstanceOf(JsonRpcRemoteError);
     expect(err.code).toBe(-32000);
     expect(err.data).toEqual({ detail: 1 });
+  });
+});
+
+describe("IpcJsonRpcTransport — send-failure resilience", () => {
+  it("notify does not throw when channel.send throws synchronously (Comment 4)", () => {
+    // Simulate ERR_IPC_CHANNEL_CLOSED on a closed channel.
+    const tx = new IpcJsonRpcTransport({
+      send: () => {
+        throw new Error("ERR_IPC_CHANNEL_CLOSED");
+      },
+      onMessage: () => undefined,
+      offMessage: () => undefined,
+    });
+    expect(() => { tx.notify("log", { msg: "x" }); }).not.toThrow();
+    tx.dispose();
+  });
+
+  it("sendResponse does not throw when channel.send throws synchronously (Comment 4)", () => {
+    const tx = new IpcJsonRpcTransport({
+      send: () => {
+        throw new Error("ERR_IPC_CHANNEL_CLOSED");
+      },
+      onMessage: () => undefined,
+      offMessage: () => undefined,
+    });
+    expect(() => { tx.sendResponse(1, "ok"); }).not.toThrow();
+    tx.dispose();
+  });
+
+  it("sendError does not throw when channel.send throws synchronously (Comment 4)", () => {
+    const tx = new IpcJsonRpcTransport({
+      send: () => {
+        throw new Error("ERR_IPC_CHANNEL_CLOSED");
+      },
+      onMessage: () => undefined,
+      offMessage: () => undefined,
+    });
+    expect(() => { tx.sendError(1, -32000, "boom"); }).not.toThrow();
+    tx.dispose();
   });
 });
 
@@ -397,6 +452,35 @@ describe("spawnWorker — additional coverage", () => {
     expect(elapsed).toBeGreaterThanOrEqual(900);
     expect(elapsed).toBeLessThan(2500);
   }, 10000);
+});
+
+describe("spawnWorker — exit-handler handoff race (Comment 3)", () => {
+  it("emits crash even when child exits immediately after ready ack", async () => {
+    // The worker sends ready then exits in the same tick. The stateful
+    // single-listener approach must observe the exit without a gap.
+    const tmpDir = mkdtempSync(`${tmpdir()}/worker-spawn-test-`);
+    const stubPath = resolve(tmpDir, "instant-exit-after-ready.mjs");
+    writeFileSync(
+      stubPath,
+      [
+        "process.on('message', m => {",
+        "  if (m && m.kind === 'init') {",
+        "    process.send({kind:'ready'});",
+        "    process.exit(42);",
+        "  }",
+        "});",
+      ].join("\n"),
+    );
+    const worker = await spawnWorker(EMPTY_CAPS, {
+      bootstrapPath: stubPath,
+      readyTimeoutMs: 2000,
+    });
+    const events: WorkerCrashEvent[] = [];
+    worker.on("crash", (e) => events.push(e));
+    await new Promise<void>((res) => setTimeout(res, 300));
+    expect(events).toHaveLength(1);
+    expect(events[0]?.exitCode).toBe(42);
+  });
 });
 
 describe("buildCrashEvent", () => {

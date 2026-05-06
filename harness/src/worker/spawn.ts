@@ -73,13 +73,41 @@ function waitForReady(
 ): Promise<WorkerHandle> {
   return new Promise<WorkerHandle>((resolve, reject) => {
     let settled = false;
+
+    // Single stateful exit handler shared between the pre-ready and post-ready
+    // phases. Keeping one listener avoids the one-tick gap where a child exit
+    // between settle() removing onEarlyExit and buildHandle attaching its own
+    // listener would go unobserved (Comment 3 fix).
+    let postReadyExitHandler:
+      | ((code: number | null, signal: NodeJS.Signals | null) => void)
+      | undefined;
+
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (settled) {
+        // Post-ready phase: delegate to the handler installed by buildHandle.
+        postReadyExitHandler?.(code, signal);
+      } else {
+        // Pre-ready phase: treat as early exit.
+        settle(() => {
+          const detail =
+            code !== null
+              ? `exitCode=${String(code)}`
+              : signal !== null
+                ? `signal=${signal}`
+                : "unknown cause";
+          reject(new Error(`worker exited before ready: ${detail}`));
+        });
+      }
+    };
+
     const settle = (fn: () => void): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       child.off("message", onInitMessage);
-      child.off("exit", onEarlyExit);
       child.off("error", onEarlyError);
+      // Note: onExit is intentionally NOT removed here — it stays attached
+      // so exits in the post-ready phase are observed via postReadyExitHandler.
       fn();
     };
 
@@ -99,7 +127,11 @@ function waitForReady(
       const env = message as { kind?: unknown; message?: unknown };
       if (env.kind === "ready") {
         settle(() => {
-          resolve(buildHandle(child, capabilities));
+          resolve(
+            buildHandle(child, capabilities, (handler) => {
+              postReadyExitHandler = handler;
+            }),
+          );
         });
         return;
       }
@@ -111,18 +143,6 @@ function waitForReady(
       }
     };
 
-    const onEarlyExit = (code: number | null, signal: NodeJS.Signals | null): void => {
-      settle(() => {
-        const detail =
-          code !== null
-            ? `exitCode=${String(code)}`
-            : signal !== null
-              ? `signal=${signal}`
-              : "unknown cause";
-        reject(new Error(`worker exited before ready: ${detail}`));
-      });
-    };
-
     const onEarlyError = (err: Error): void => {
       settle(() => {
         reject(err);
@@ -130,23 +150,35 @@ function waitForReady(
     };
 
     child.on("message", onInitMessage);
-    child.on("exit", onEarlyExit);
+    child.on("exit", onExit);
     child.on("error", onEarlyError);
 
     const initPayload: WorkerInitMessage = crashOnInit
       ? { kind: "init", capabilities, crashOnInit: true }
       : { kind: "init", capabilities };
-    child.send(initPayload, (err) => {
-      if (err) {
-        settle(() => {
-          reject(err);
-        });
-      }
-    });
+    try {
+      child.send(initPayload, (err) => {
+        if (err) {
+          settle(() => {
+            reject(err);
+          });
+        }
+      });
+    } catch (err) {
+      settle(() => {
+        reject(err instanceof Error ? err : new Error(String(err)));
+      });
+    }
   });
 }
 
-function buildHandle(child: ChildProcess, _capabilities: CapabilityDeclaration): WorkerHandle {
+function buildHandle(
+  child: ChildProcess,
+  _capabilities: CapabilityDeclaration,
+  registerExitHandler: (
+    handler: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ) => void,
+): WorkerHandle {
   // `_capabilities` held for the M5.3.b.b.d gating wire-up.
   void _capabilities;
 
@@ -160,7 +192,10 @@ function buildHandle(child: ChildProcess, _capabilities: CapabilityDeclaration):
     exitResolve = res;
   });
 
-  child.on("exit", (code, signal) => {
+  // Register the post-ready exit handler via the callback provided by
+  // waitForReady. This wires up BEFORE waitForReady's settle() removes the
+  // pre-ready listener, eliminating the one-tick gap (Comment 3 fix).
+  registerExitHandler((code, signal) => {
     exited = true;
     transport.dispose();
     exitResolve?.();
