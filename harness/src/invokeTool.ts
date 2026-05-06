@@ -270,7 +270,14 @@ async function runWorkerTool(tool: WorkerTool, input: JsonRpcValue): Promise<Jso
     // arriving during terminate() does not retrigger the handler after
     // the surrounding promise has already settled.
     worker.off("crash", crashHandler);
-    await worker.terminate();
+    // Swallow terminate() failures: if a future spawn.ts change makes
+    // terminate reject, we MUST NOT let that rejection mask the original
+    // crash / deny / remote error already in flight (Phase 4 I3).
+    try {
+      await worker.terminate();
+    } catch {
+      /* terminate failures are non-fatal; the original error wins. */
+    }
   }
 }
 
