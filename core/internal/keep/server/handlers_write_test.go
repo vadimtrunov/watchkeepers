@@ -831,7 +831,9 @@ func TestPutManifestVersion_InvalidLanguage(t *testing.T) {
 func TestPutManifestVersion_WithModel_201_RoundTrip(t *testing.T) {
 	const wantModel = "claude-sonnet-4"
 	var capturedModel string
-	queryRow := func(_ context.Context, _ string, args ...any) pgx.Row {
+	var gotSQL string
+	queryRow := func(_ context.Context, sql string, args ...any) pgx.Row {
+		gotSQL = sql
 		// PUT INSERT branch: capture the bound model arg. The handler
 		// passes `stringOrNil(body.Model)` so a non-empty model becomes
 		// a `string`; a NULL model becomes `nil`. Walk the args slice
@@ -865,6 +867,9 @@ func TestPutManifestVersion_WithModel_201_RoundTrip(t *testing.T) {
 	}
 	if capturedModel != wantModel {
 		t.Fatalf("model arg not bound on INSERT; capturedModel=%q want=%q", capturedModel, wantModel)
+	}
+	if !strings.Contains(gotSQL, "model") {
+		t.Errorf("INSERT SQL missing model column; got SQL: %s", gotSQL)
 	}
 
 	// Step 2: GET — stage a SELECT row that replays the captured model.
@@ -916,14 +921,17 @@ func TestPutManifestVersion_WithModel_201_RoundTrip(t *testing.T) {
 // key in the response JSON (omitempty). Mirrors the wire-omit posture
 // of `personality` / `language`.
 func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
-	// Step 1: PUT without model — assert 201 and runner sees nil model arg.
-	var modelArgWasNil bool
+	// Step 1: PUT without model — assert 201 and runner sees exactly six
+	// nil args (tools, authority_matrix, knowledge_sources, personality,
+	// language, model). Counting all six means a regression that removes
+	// only the model binding surfaces as count=5, not a silent pass.
+	var nilArgCount int
 	queryRow := func(_ context.Context, _ string, args ...any) pgx.Row {
-		// Search args for a typed nil — handler passes `stringOrNil("")`
-		// which returns the untyped `nil` interface.
+		// Handler passes stringOrNil("") / jsonbOrNil(nil) which both
+		// return the untyped nil interface for omitted fields.
 		for _, a := range args {
 			if a == nil {
-				modelArgWasNil = true
+				nilArgCount++
 			}
 		}
 		return server.NewFakeRow(func(dest ...any) error {
@@ -946,8 +954,12 @@ func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	if !modelArgWasNil {
-		t.Errorf("expected nil model arg on INSERT when body omits model")
+	// Expect exactly 6 nil args: tools, authority_matrix, knowledge_sources,
+	// personality, language, model. If model wiring is absent the count drops
+	// to 5 and this assertion catches the regression.
+	const wantNilArgs = 6
+	if nilArgCount != wantNilArgs {
+		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model)", nilArgCount, wantNilArgs)
 	}
 
 	// Step 2: GET — SELECT returns coalesce(model, '') == "" so the
