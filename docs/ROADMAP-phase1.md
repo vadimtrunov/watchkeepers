@@ -298,24 +298,15 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 - [x] **M5.1** `AgentRuntime` Go interface: `Start`, `SendMessage`, `InvokeTool`, `Terminate`, plus streaming event hook.
 - [x] **M5.2** `LLMProvider` interface (separate from `AgentRuntime`): `Complete`, `Stream`, `CountTokens`, `ReportCost`. Default implementation wraps Claude Code (via Claude Agent SDK if embedding, or as a subprocess if shelling out). _Interface ships in `core/pkg/llm/` (M5.2.a); the Claude Code default impl is deferred to a follow-up M5.2.b._
-- [ ] **M5.3** TS harness process:
-  - [x] **M5.3.a** Process scaffold + JSON-RPC stdio framing + hello/shutdown methods (`harness/` package; pnpm-workspace integrated; 39 vitest tests; framing per JSON-RPC 2.0 §4 incl. correct notification handling).
-  - [x] **M5.3.b.a** Add isolated-vm pure-JS tool invocation path with invokeTool RPC method.
-  - [ ] **M5.3.b.b** Add worker-process tool path with declared I/O capability gating.
-    - [x] **M5.3.b.b.a** Decide worker substrate (worker_threads vs child_process) and record ADR.
-    - [x] **M5.3.b.b.b** Define capability declaration schema and gating policy types with zod.
-    - [x] **M5.3.b.b.c** Implement worker spawn + JSON-RPC transport over chosen substrate.
-    - [x] **M5.3.b.b.d** Wire worker-process tool.kind into invokeTool with capability-gated dispatcher.
-    - [ ] **M5.3.b.b.e** Add vitest suite covering worker path execution and capability gating denials.
-  - [ ] **M5.3.c** Tool schemas defined with `zod`, auto-derived from Tool Manifest.
-  - [ ] **M5.3.d** Claude Code integration via the `LLMProvider` wrapper — model, system prompt, context parameterized from Manifest.
-- [ ] **M5.4** Per-tool resource limits: wall-clock, CPU time, memory ceiling, output-byte cap; enforced by Go core via process controls and isolate options.
-- [ ] **M5.5** Manifest loader: harness calls `keepclient.GetManifest(agent_id)` on boot; Manifest fields include `system_prompt`, `personality`, `language`, toolset ACLs, model, autonomy. `personality` and `language` are composed into the effective system prompt via a templater.
-- [ ] **M5.6** **Notebook linked into harness**: harness opens its per-agent SQLite file on boot; auto-recall top-K relevant entries each turn and injects them into the prompt (configurable K, relevance threshold). `Remember` is available as a built-in tool the agent can call explicitly.
-- [ ] **M5.7** **Auto-reflection on tool error**: harness triggers a reflection step on tool error and writes the result as a `lesson` entry with `evidence_log_ref` and `tool_version`. New lessons get `active_after = now() + 24h` — visible but not auto-injected until the cooling-off window passes.
-- [ ] **M5.8** **Tool-version awareness**: on tool hot-load, lessons tied to the superseded version are marked `needs_review` and excluded from auto-injection until reviewed. Not deleted.
-- [ ] **M5.9** Provider credentials: Claude Code credentials via the secrets interface; no `ANTHROPIC_API_KEY` references in core code.
-- [ ] **M5.10** Provider-swap conformance test: a dummy `FakeProvider` passes the same harness tests as the Claude Code provider.
+- [ ] **M5.3** **TS harness process** — JSON-RPC stdio scaffold, isolated-vm + worker-process tool paths, zod-derived schemas, Claude Code wired via the `LLMProvider` wrapper.
+  - [x] **M5.3.a** Scaffold + JSON-RPC framing + hello/shutdown.
+  - [x] **M5.3.b.a** isolated-vm pure-JS invocation path.
+  - [x] **M5.3.b.b** Worker-process tool path with capability gating (substrate ADR + zod policy + transport + dispatcher landed; runtime test suite still pending under M5.3.c).
+  - [ ] **M5.3.c** **Finish harness**: vitest suite covering worker-path execution and capability-gating denials; tool schemas auto-derived from Tool Manifest via `zod`; Claude Code integration via the `LLMProvider` wrapper (model, system prompt, context parameterized from Manifest).
+- [ ] **M5.4** **Sandbox guardrails** — per-tool resource limits (wall-clock, CPU time, memory ceiling, output-byte cap) enforced by Go core via process controls and isolate options.
+- [ ] **M5.5** **Manifest-driven boot + Notebook integration** — harness calls `keepclient.GetManifest(agent_id)` on boot, composes `personality`/`language` into the effective system prompt via a templater, applies toolset ACLs / model / autonomy, opens its per-agent SQLite Notebook, auto-recalls top-K relevant entries each turn (configurable K + relevance threshold), and exposes `Remember` as a built-in tool.
+- [ ] **M5.6** **Reflection lifecycle** — auto-reflection on tool error writes a `lesson` entry with `evidence_log_ref`, `tool_version`, and `active_after = now() + 24h` (visible but not auto-injected during the cooling-off window); on tool hot-load, lessons tied to a superseded version are flagged `needs_review` and excluded from auto-injection until reviewed (never deleted).
+- [ ] **M5.7** **Provider plumbing** — Claude Code credentials flow through the secrets interface (no `ANTHROPIC_API_KEY` references in core); a dummy `FakeProvider` passes the same harness tests as the real provider, proving swap-without-touching-core.
 
 **Artifacts**: Go `runtime/` and `llm/` packages, TS `harness/` package, JSON-RPC contract doc, provider conformance test harness.
 
@@ -340,11 +331,9 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Scope**
 
-- [ ] **M6.1** Watchmaster Manifest (system prompt, authority matrix).
-- [ ] **M6.2** Toolset: `list_watchkeepers`, `propose_spawn` (drafts Manifest, including `personality` and `language` fields), `retire_watchkeeper`, `report_cost`, `report_health`, `adjust_personality(watchkeeper, new_personality)`, `adjust_language(watchkeeper, new_language)` (both draft a new Manifest version going through lead approval), `promote_to_keep(agent_id, notebook_entry_id)` (routes a Notebook entry for approval by lead; on approval writes it into Keep as org-scoped knowledge and emits `notebook_promoted_to_keep`).
-- [ ] **M6.3** Cost tracker: prompt + completion tokens per Watchkeeper, rolled up to day / week, persisted in Keep.
-- [ ] **M6.4** Slack conversational surface: Watchmaster responds to DMs from designated admins, renders Manifest drafts as Slack blocks with Approve / Reject actions.
-- [ ] **M6.5** Privilege boundary: Watchmaster does **not** execute Slack App creation itself — it calls into a core-owned privileged RPC for that.
+- [ ] **M6.1** **Watchmaster manifest + privilege boundary** — system prompt, authority matrix, and the rule that the Watchmaster never executes Slack App creation directly (calls a core-owned privileged RPC instead).
+- [ ] **M6.2** **Toolset** — `list_watchkeepers`, `propose_spawn` (drafts Manifest with `personality`/`language`), `retire_watchkeeper`, `report_cost`, `report_health`, `adjust_personality` / `adjust_language` (both draft a new Manifest version through lead approval), `promote_to_keep(agent_id, notebook_entry_id)` (lead-approved write into Keep as org-scoped knowledge, emits `notebook_promoted_to_keep`).
+- [ ] **M6.3** **Operator surface** — Slack DM conversation with designated admins (Manifest drafts rendered as Slack blocks with Approve/Reject actions) and per-Watchkeeper cost tracker (prompt + completion tokens, daily/weekly rollups persisted in Keep).
 
 **Artifacts**: Watchmaster manifest file, toolset TS implementations, Slack interaction flow.
 
@@ -366,12 +355,9 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Scope**
 
-- [ ] **M7.1** Orchestration saga in Go core chaining: Manifest approval → Slack App create → OAuth install → bot profile set → **provision per-agent Notebook file** → runtime launch (with personality/language applied) → intro message.
-- [ ] **M7.2** Retire flow: harness `Archive` is called; tarball goes to `ArchiveStore` (LocalFS or S3-compatible); `notebook_archived` event with archive URI in Keeper's Log; Watchkeeper row in Keep marked retired with archive reference.
-- [ ] **M7.3** Saga compensations: on install failure, rollback Slack App creation, remove the freshly-provisioned Notebook file, mark Manifest as rejected; on runtime boot failure, tear down the app, archive (not delete) any Notebook data that was written, flag for review.
-- [ ] **M7.4** Idempotency keys so retried approvals never double-create apps.
-- [ ] **M7.5** Watchmaster invokes the saga via core RPC when a human approves a draft.
-- [ ] **M7.6** Approval UX: draft Manifest posted in Slack with Approve / Reject blocks; button callback writes an approval event to Keeper's Log and triggers the saga.
+- [ ] **M7.1** **Spawn saga (forward path)** — Watchmaster posts the draft Manifest in Slack (Approve/Reject blocks); approval writes an event to Keeper's Log and triggers a core RPC saga that chains: Manifest approval → Slack App create → OAuth install → bot profile set → provision per-agent Notebook file → runtime launch (personality/language applied) → intro message.
+- [ ] **M7.2** **Retire saga** — harness `Archive` runs; tarball lands in `ArchiveStore` (LocalFS or S3-compatible); `notebook_archived` event with archive URI logged; Watchkeeper row in Keep marked retired with archive reference.
+- [ ] **M7.3** **Robustness** — saga compensations (install failure rolls back Slack App creation, removes the freshly-provisioned Notebook file, marks Manifest rejected; runtime boot failure tears down the app and **archives** — never deletes — any Notebook data written, flagged for review) plus idempotency keys so retried approvals never double-create apps.
 
 **Artifacts**: `spawn/` saga package, Slack interaction handler for approval actions, saga-state DAO.
 
@@ -393,14 +379,9 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Scope**
 
-- [ ] **M8.1** Jira adapter (REST via `go-jira` or direct HTTP): JQL search, read, comment, update a whitelisted set of fields.
-- [ ] **M8.2** Coordinator Manifest: system prompt, authority matrix (comment + field-update allowed; no reassignment without lead approval).
-- [ ] **M8.3** Toolset:
-  - `fetch_watch_orders` — reads Slack DMs from lead.
-  - `find_stale_prs`, `find_overdue_tickets`, `nudge_reviewer`, `post_daily_briefing`, `update_ticket_field`.
-- [ ] **M8.4** Cron subscriptions: daily briefing at configurable time; morning overdue sweep.
-- [ ] **M8.5** **Pending-lesson digest**: Coordinator's daily briefing includes a section listing lessons learned in the past 24h still in the cooling-off window. Lead can reply `forget <id>` to kill a lesson before it activates; otherwise they auto-activate on schedule.
-- [ ] **M8.6** Watch Order parser: lead's natural-language priorities distilled into a persistent task list in the Keep; round-trip with the lead to confirm parsing.
+- [ ] **M8.1** **Jira adapter** — REST via `go-jira` or direct HTTP: JQL search, read, comment, and update of a whitelisted set of fields.
+- [ ] **M8.2** **Coordinator manifest + toolset** — system prompt and authority matrix (comment + field-update allowed; no reassignment without lead approval); tools `fetch_watch_orders` (reads Slack DMs from lead), `find_stale_prs`, `find_overdue_tickets`, `nudge_reviewer`, `post_daily_briefing`, `update_ticket_field`.
+- [ ] **M8.3** **Watch Orders + scheduled work** — natural-language Watch Order parser distills lead priorities into a persistent task list in Keep with round-trip confirmation; cron-driven daily briefing at configurable time and morning overdue sweep; daily briefing includes a pending-lesson digest section listing lessons in the 24h cooling-off window (lead replies `forget <id>` to kill before activation; auto-activate otherwise).
 
 **Artifacts**: `jira/` adapter package, Coordinator manifest, tool implementations, parser tests.
 
@@ -434,39 +415,14 @@ Both private modes are read by the same overlay resolver — the runtime sees no
 
 **Scope**
 
-- [ ] **M9.1** **Tool Source config** (`config.yaml`): list of sources in priority order, per-source auth, branch/tag, pull policy (`on-boot` | `cron <schedule>` | `on-demand`).
-- [ ] **M9.2** **ToolSyncScheduler** in Go core: clones/pulls each source into `$DATA_DIR/tools/<source-name>/`; verifies signatures (if enabled); re-computes effective toolset on change. Sync results as Keeper's Log events (`source_synced`, `source_failed`).
-- [ ] **M9.3** **Resolver**: merges sources by priority into an effective toolset per Watchkeeper Manifest. Same-name conflicts resolved by priority; lower-priority tool marked `tool_shadowed` in Keeper's Log with a Slack warning to the lead.
-- [ ] **M9.4** **Hot-reload**: when the effective toolset changes, running runtimes receive an update signal; in-flight tool calls complete on the old version; new invocations use the new version. Grace period configurable.
-- [ ] **M9.5** **Tool manifest** (per tool): `manifest.json` with `name`, `version`, `capabilities`, `schema` (zod-compatible), `source` (auto-filled on load), `signature` (optional in Phase 1, mandatory in Phase 2 for non-local sources).
-- [ ] **M9.6** **Signing (optional, gated by flag)**: `cosign` or `minisign` over tool tarball + manifest; public keys per source pinned in `config.yaml`. Unsigned load refused when signing is enabled.
-- [ ] **M9.7** **Authoring tool granted to Watchkeepers**:
-  - `propose_tool(name, purpose, plain_language_description, code_draft, capabilities, target_source)` — `target_source ∈ {platform, private}` (local never offered to the agent). `plain_language_description` is mandatory — it is what non-engineer leads read.
-  - In `git` mode: opens a PR on the Watchkeeper's behalf in the chosen repo.
-  - In `hosted` mode: creates a draft record (status `proposed`) and triggers the Slack-native approval flow.
-  - Lead can override `target_source` at approval time.
-- [ ] **M9.8** **Approval paths** (selected per deployment via `approval_mode ∈ {git-pr, slack-native, both}`):
-  - **`git-pr` path**: shared CI workflow runs on the tool repo — typecheck, lint with undeclared-fs/net rule, vitest with coverage, capability-declaration linter, optional signing step on merge. Human lead reviews PR. Merge fires a webhook → core re-syncs source → hot-loads.
-  - **`slack-native` path** (mandatory for `hosted` source): Watchmaster-as-AI-reviewer runs the same gate set in-process; posts approval card to the lead in Slack with plain-language description, human-readable capability translations, AI reviewer pass/fail per gate, heuristic risk level, buttons `[Approve] [Reject] [Test in my DM] [Ask questions]`.
-- [ ] **M9.9** **Dry-run infrastructure**:
-  - Tool manifest declares `dry_run_mode ∈ {ghost, scoped, none}`.
-  - `ghost` — capability broker stubs writes and records intents; approval card shows "would have done: X, Y, Z".
-  - `scoped` — real execution with filters injected by the broker (Slack sends forced to lead's DM; Jira writes to sandbox project).
-  - `none` — tool cannot dry-run; agent explains why in manifest; lead sees an explicit warning before approving.
-- [ ] **M9.10** **Capability dictionary**: `dict/capabilities.yaml` mapping every capability id to a plain-language description; versioned, translation-ready. Missing entry is a CI failure.
-- [ ] **M9.11** **Repo CI (`git` mode)**: shared workflow template published by the platform; consumed by `watchkeeper-tools` and private repos. Same gate set as the Slack-native AI reviewer.
-- [ ] **M9.12** **Local patches**: `make tools-local-install <folder>` with mandatory `--reason` field; event `local_patch_applied` with operator identity, diff hash, reason.
-- [ ] **M9.13** **Keeper's Log entries**: `source_synced`, `source_failed`, `tool_proposed`, `tool_ai_review_passed`, `tool_ai_review_failed`, `tool_dry_run_executed`, `tool_approved`, `tool_rejected`, `tool_loaded`, `tool_shadowed`, `tool_retired`, `local_patch_applied`, `signature_verification_failed`, `hosted_tool_stored`, `hosted_tool_exported`, `tool_share_proposed`, `tool_share_pr_opened`, `tool_share_pr_merged`, `tool_share_pr_rejected`.
-- [ ] **M9.14** **Rollback**: `wk tool rollback <name> --to <version> [--source <source>]`; operation logged.
-- [ ] **M9.15** **Migration path (`hosted` → `git`)**: `wk tool hosted export <name>` produces a self-contained bundle (manifest + source + tests) that can be committed to a git repo.
-- [ ] **M9.16** **`promote_share_tool` flow (private → shared git source)**:
-  - Operation: read folder from `$DATA_DIR/tools/private/<tool>/`, create branch in the target repo, commit, open PR, notify lead in Slack.
-  - Target repo: platform `watchkeeper-tools` (broadly-useful tools) or customer-owned git repo (customer-IP tools).
-  - Auth via baked credentials: **PAT** (simpler, default for Phase 1 quickstart) or **GitHub App** (scoped, revocable, production-recommended).
-  - Capability `tool:share` **off by default**; lead explicitly grants it per Watchkeeper.
-- [ ] **M9.17** **Shadow warning**: when a platform tool is shadowed by a private tool on sync, Slack DM to lead: "Platform now ships `count_open_prs` v1.2.0; your private repo's `count_open_prs` v0.4.1 takes precedence. Review?".
-- [ ] **M9.18** **Update safety test**: platform release integration test simulates a platform `main` containing a tool with the same name as a private one; asserts the private one still wins, the platform one is shadowed, and the warning event fires.
-- [ ] **M9.19** **Out of scope for Phase 1**: prompt self-tuning (tool authoring only); multi-Watchkeeper tool sharing via Keeper-to-Keeper (Phase 2).
+- [ ] **M9.1** **Source config + sync + manifest + hot-reload** — `config.yaml` lists sources in priority order with per-source auth / branch / pull policy (`on-boot` | `cron <schedule>` | `on-demand`); ToolSyncScheduler clones/pulls each into `$DATA_DIR/tools/<source-name>/`, verifies signatures when enabled, recomputes the effective toolset on change, and emits `source_synced` / `source_failed`; per-tool `manifest.json` carries `name`, `version`, `capabilities`, zod-compatible `schema`, auto-filled `source`, and optional `signature`; on toolset change running runtimes receive an update signal — in-flight calls complete on the old version, new invocations use the new, grace period configurable.
+- [ ] **M9.2** **Resolver + shadow safety** — overlay merge by priority into the effective per-Watchkeeper toolset; same-name conflict resolved by priority with the lower-priority tool marked `tool_shadowed` and a Slack DM to the lead ("Platform now ships `count_open_prs` v1.2.0; your private repo's `count_open_prs` v0.4.1 takes precedence. Review?"); platform-release integration test simulates a platform `main` carrying a same-named tool to assert the private one still wins, the platform one is shadowed, and the warning event fires.
+- [ ] **M9.3** **Signing + capability dictionary** — `cosign` or `minisign` over tool tarball + manifest with per-source public keys pinned in `config.yaml` (optional in Phase 1, mandatory in Phase 2 for non-local sources; unsigned load refused when enabled); `dict/capabilities.yaml` maps every capability id to a plain-language description (versioned, translation-ready, missing entry is a CI failure).
+- [ ] **M9.4** **Authoring + approval + dry-run + repo CI** — `propose_tool(name, purpose, plain_language_description, code_draft, capabilities, target_source ∈ {platform, private})` with mandatory `plain_language_description` (local source never offered to the agent; lead can override `target_source` at approval time); per-deployment `approval_mode ∈ {git-pr, slack-native, both}`; `git-pr` runs the shared CI workflow on the tool repo (typecheck, undeclared-fs/net lint, vitest with coverage, capability-declaration linter, optional signing step on merge), human lead reviews the PR, merge fires a webhook → core re-syncs → hot-loads; `slack-native` (mandatory for `hosted` source) is Watchmaster-as-AI-reviewer running the same gate set in-process and posting an approval card with plain-language description, human-readable capability translations, per-gate pass/fail, heuristic risk level, and `[Approve] [Reject] [Test in my DM] [Ask questions]` buttons; tool manifest declares `dry_run_mode ∈ {ghost, scoped, none}` (ghost stubs writes and records "would have done: X, Y, Z"; scoped runs with broker-injected filters — Slack sends forced to lead's DM, Jira writes to sandbox project; none surfaces an explicit pre-approval warning); shared CI workflow template is published by the platform and consumed by `watchkeeper-tools` and customer-private repos.
+- [ ] **M9.5** **Local patches + rollback** — `make tools-local-install <folder>` requires a `--reason` field and emits `local_patch_applied` with operator identity, diff hash, and reason; `wk tool rollback <name> --to <version> [--source <source>]` is operator-driven and logged.
+- [ ] **M9.6** **Hosted ↔ git migration + tool sharing** — `wk tool hosted export <name>` produces a self-contained bundle (manifest + source + tests) that imports cleanly into a fresh git repo; `promote_share_tool` reads `$DATA_DIR/tools/private/<tool>/`, branches and commits in the target (platform `watchkeeper-tools` for broadly-useful tools, customer-owned git repo for customer-IP), opens a PR, and notifies the lead in Slack; auth via baked credentials — PAT (simpler, Phase 1 quickstart default) or GitHub App (scoped, revocable, production-recommended); capability `tool:share` off by default and granted per-Watchkeeper by the lead.
+- [ ] **M9.7** **Keeper's Log audit surface** — emits `source_synced`, `source_failed`, `tool_proposed`, `tool_ai_review_passed`, `tool_ai_review_failed`, `tool_dry_run_executed`, `tool_approved`, `tool_rejected`, `tool_loaded`, `tool_shadowed`, `tool_retired`, `local_patch_applied`, `signature_verification_failed`, `hosted_tool_stored`, `hosted_tool_exported`, `tool_share_proposed`, `tool_share_pr_opened`, `tool_share_pr_merged`, `tool_share_pr_rejected`.
+- [ ] **M9.8** **Out of scope for Phase 1** — prompt self-tuning (tool authoring only); multi-Watchkeeper tool sharing via Keeper-to-Keeper (Phase 2).
 
 **Artifacts**: `toolregistry/` Go package (config, sync scheduler, resolver, signer-verifier, hosted-mode storage), `approval/` package (Slack-native flow + AI reviewer runner + dry-run executor), `dict/capabilities.yaml`, shared repo CI workflow template, local-patch Make target, authoring tool in TS, scaffold `watchkeeper-tools` platform repo, scaffold `watchkeeper-tools-private-example` customer-repo template.
 
@@ -495,12 +451,10 @@ Both private modes are read by the same overlay resolver — the runtime sees no
 
 **Scope**
 
-- [ ] **M10.1** Prometheus metrics: per-Watchkeeper token spend, latency histograms, tool-invocation counts, event-bus queue depth, Slack / Jira rate-limit headroom.
-- [ ] **M10.2** Structured JSON logs with correlation IDs; configurable log levels per subsystem.
-- [ ] **M10.3** `wk` CLI: `spawn`, `retire`, `list`, `logs <wk>`, `inspect <wk>`, `tail-keepers-log`, `tool list | rollback`, `tool hosted list | show | export`, `tool share <name> --target <repo>`, `tools sources list | status | sync`, `notebook show <wk> | forget <wk> <id> | export <wk> | import <wk> <archive> | archive <wk> | list-archives <wk>`, `personality show <wk> | set <wk>`, `language show <wk> | set <wk>`, `budget show | set`, `approvals pending | inspect <id>`. All CLI commands mirrored behind `make wk CMD="..."` targets.
-- [ ] **M10.4** docker-compose finalization: core, keep, postgres, watchmaster, sample coordinator, dev Slack socket bridge, Grafana with starter dashboard.
-- [ ] **M10.5** Operator runbook: workspace bootstrap, credential rotation, backup / restore of Keep, backup / restore of Notebook archives via `ArchiveStore`, incident response (runaway agent), upgrade procedure, disaster scenarios.
-- [ ] **M10.6** Smoke test script: `make smoke` reproduces the success scenarios from M7, M8, and M9 against an isolated dev environment.
+- [ ] **M10.1** **Observability** — Prometheus metrics (per-Watchkeeper token spend, latency histograms, tool-invocation counts, event-bus queue depth, Slack/Jira rate-limit headroom) plus structured JSON logs with correlation IDs and configurable per-subsystem log levels.
+- [ ] **M10.2** **`wk` CLI + Make targets** — `spawn`, `retire`, `list`, `logs <wk>`, `inspect <wk>`, `tail-keepers-log`, `tool list | rollback`, `tool hosted list | show | export`, `tool share <name> --target <repo>`, `tools sources list | status | sync`, `notebook show <wk> | forget <wk> <id> | export <wk> | import <wk> <archive> | archive <wk> | list-archives <wk>`, `personality show <wk> | set <wk>`, `language show <wk> | set <wk>`, `budget show | set`, `approvals pending | inspect <id>` — every command mirrored behind a `make wk CMD="..."` shortcut.
+- [ ] **M10.3** **docker-compose + Grafana** — finalize compose stack (core, keep, postgres, watchmaster, sample coordinator, dev Slack socket bridge) and ship a Grafana starter dashboard.
+- [ ] **M10.4** **Operator runbook + smoke** — runbook covers workspace bootstrap, credential rotation, Keep backup/restore, Notebook archive backup/restore via `ArchiveStore`, runaway-agent incident response, upgrade procedure, and disaster scenarios; `make smoke` reproduces the M7 + M8 + M9 success scenarios against an isolated dev environment.
 
 **Artifacts**: metrics package, CLI binary, runbook markdown, smoke script, Grafana dashboard JSON.
 
