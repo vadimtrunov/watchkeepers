@@ -1341,3 +1341,100 @@ the friction was entirely at interpretation-time.
 - Total wall time from /rdd to Phase 5a: ~01:30 (Phase 3 exec + Phase 4 + Phase 5a)
 
 ---
+
+## 2026-05-06 — skill change: mechanical reinforcement for Hard rule 5 (silent-exit hooks)
+
+**PR**: n/a (operator-driven skill update; not a TASK)
+**Phases with incidents**: n/a (preventative — addresses the failure mode catalogued
+in this file at 2026-04-22 and 2026-05-05)
+
+### What changed
+
+Two project-scoped Claude Code hooks were added to mechanically reinforce
+Hard rule 5 ("after every Agent return, the orchestrator's reply must
+contain a user-facing text block — never let the Agent tool result be the
+last visible thing"). Until now the rule was enforced only by the
+orchestrator's own discipline plus the Companion-todo workflow; both
+mechanisms failed silently in the 2026-04-22 and 2026-05-05 incidents.
+
+- `.claude/skills/rdd/hooks/rdd-post-agent.sh` (PostToolUse:Agent) — appends a
+  `<system-reminder>` to every Agent tool_result that restates the rule
+  ("the very next text segment in this reply must be the verdict, before
+  any further tool call"). Reminder is glued to the tool_result the
+  orchestrator will read on the next decode, so the rule is hard to miss.
+- `.claude/skills/rdd/hooks/rdd-stop-check.sh` (Stop) — parses the transcript JSONL
+  and, if the most recent `tool_use{name=Agent}` is not followed by any
+  text content block, returns `{"decision":"block","reason":...}`. The
+  Claude Code runtime then refuses to close the turn and re-prompts the
+  orchestrator with the rule, so silent-exit is recovered inline rather
+  than waiting for the next `/loop` tick.
+
+Both hooks are gated on **any** of: `.omc/state/rdd-active` marker, an
+in-progress `TASK-*.md`, or a current branch matching `rdd/*`. The marker
+file is a new artifact created in Phase 0 preflight (after Checks 1–5
+pass) and removed in Phase 7b cleanup. It exists specifically to cover
+Phase 1 on `main`, before any branch or TASK file exists — the exact
+window where the 2026-05-05 incident lived.
+
+Companion changes:
+- `.claude/skills/rdd/SKILL.md` Hard rule 5 — appended a paragraph
+  pointing to the hooks and their gating model.
+- `.claude/skills/rdd/SKILL.md` Phase 7b cleanup — added marker removal
+  (`rm -f .omc/state/rdd-active`) alongside `TASK-*.md` deletion.
+- `.claude/skills/rdd/references/preflight.md` — new "Mark rdd active"
+  section after Check 5 instructing the orchestrator to `mkdir -p
+  .omc/state && touch .omc/state/rdd-active` before dispatching Phase 1.
+- `.claude/settings.json` — registered both hooks (PostToolUse:Agent
+  with timeout 5s; Stop with timeout 10s).
+
+### Why this layering
+
+The PostToolUse hook is **prevention** — it costs ~80 tokens per Agent
+return but mechanically eliminates the "I forgot to type the verdict"
+failure path. The Stop hook is **safety net** — even if the orchestrator
+ignores the reminder and tries to close the turn silently, the runtime
+won't let it. Together they convert a discipline-based rule into a
+runtime-enforced one. Cost in non-rdd sessions is zero because both
+hooks gate on rdd-active markers and exit early.
+
+### What was considered and rejected
+
+- Always-on (no gating). Rejected — would inject reminders into every
+  Agent dispatch in this repo regardless of context. Cost is small but
+  semantically noisy outside rdd.
+- Markdown-only tightening of the rule (the original 2026-05-05
+  recommendation: "first text segment after Agent return is the
+  verdict"). Kept the rule wording but did not rely on it alone, because
+  the same incident showed that wording-level tightening doesn't survive
+  prompt drift. Hooks are the load-bearing layer; wording is now
+  redundant reinforcement.
+- Single Stop hook without the PostToolUse one. Rejected — Stop runs
+  only at turn-end, so a misbehaving turn would still emit a series of
+  silent tool calls before being blocked. The PostToolUse reminder
+  intercepts BEFORE the next tool call and lets the orchestrator
+  self-correct without the runtime stepping in.
+
+### Suggested skill changes
+
+None at this time. Re-evaluate after the next 5–10 `/rdd` runs:
+
+- If the Stop hook never fires (zero blocked turns), the PostToolUse
+  reminder alone is sufficient and the Stop layer can be downgraded to
+  a no-op or removed.
+- If the Stop hook fires repeatedly on the same orchestrator pattern,
+  that pattern is a candidate for a more targeted reminder upstream
+  (e.g. SKILL.md §Dispatching agents) rather than relying on the Stop
+  re-prompt to teach.
+- If `.omc/state/rdd-active` ever leaks (Phase 7b cleanup missed, run
+  aborted mid-flight), hooks will fire outside rdd until manually
+  cleaned. Operator-side mitigation: `rm -f .omc/state/rdd-active`
+  whenever you see unexpected post-Agent reminders or blocked Stops.
+
+### Metrics
+
+- Review iterations: n/a (no PR)
+- PR-fix iterations: n/a
+- Operator interventions outside of gates: n/a
+- Total wall time of skill change: ~30 min (operator + assistant)
+
+---

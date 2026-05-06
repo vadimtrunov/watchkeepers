@@ -66,6 +66,24 @@ Pass:
 Fail otherwise. Stop with:
 > `rdd` preflight failed: current branch `<branch>` is neither `main` nor a resumable `rdd/*` branch. Checkout `main` (or run `/rdd resume` from the correct `rdd/*` branch).
 
+## Mark rdd active
+
+After Checks 1–5 all pass and before dispatching the Phase 1 planner, set
+the active marker:
+
+```bash
+mkdir -p .omc/state
+touch .omc/state/rdd-active
+```
+
+The marker is the canonical signal that an rdd run is in progress. It is
+read by the Hard rule 5 reinforcement hooks
+(`.claude/skills/rdd/hooks/rdd-{post-agent,stop-check}.sh`) so they only fire during
+rdd work — including Phase 1 before any branch or TASK file exists, which
+is the exact failure window for the silent-exit incident catalogued in
+`FEEDBACK.md` 2026-05-05. The marker is removed in Phase 7b cleanup
+(see `SKILL.md` §"Phase map" step 7b) and is gitignored under `.omc/`.
+
 ## Stop format
 
 When stopping on any failure, print exactly one message using the format

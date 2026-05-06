@@ -91,7 +91,10 @@ as the executor's code (see Phase map step 5).
    - **7a. Merge** — dispatch `git-master` in `merge` mode. Squash-merges
      the PR (the writer's commit is folded in). No follow-up commit on
      `main`.
-   - **7b. Cleanup** — orchestrator deletes the `TASK-*.md` file.
+   - **7b. Cleanup** — orchestrator deletes the `TASK-*.md` file and
+     removes the `.omc/state/rdd-active` marker (`rm -f
+     .omc/state/rdd-active`). The marker is created in Phase 0
+     preflight and gates the Hard rule 5 reinforcement hooks.
 
 The Phase 5/7 reordering (writer moved from Phase 7a to Phase 5a, before
 PR open) removes a wasted second CI run on the writer's text-only commit.
@@ -124,6 +127,35 @@ see `references/roadmap-migration.md` §"Verification batches".
    Silent-exit is the #1 failure mode recorded in `FEEDBACK.md`
    2026-04-22; `## Dispatching agents` §Companion-todo gives the
    workflow-level reinforcement.
+
+   Mechanically reinforced via two hooks (project-scoped, gated on
+   `.omc/state/rdd-active`, the in-progress TASK file, or an `rdd/*`
+   branch — see `references/preflight.md` §"Mark rdd active"):
+   - `.claude/skills/rdd/hooks/rdd-post-agent.sh` (PostToolUse:Agent) — appends a
+     `<system-reminder>` to every Agent tool_result restating the rule.
+   - `.claude/skills/rdd/hooks/rdd-stop-check.sh` (Stop) — scans the transcript and
+     blocks turn-end with `decision: block` if no text block was emitted
+     after the most recent Agent return. The blocked turn is re-prompted
+     with the rule, recovering silent-exits inline rather than waiting
+     for the next `/loop` tick.
+
+   **Operator activation.** Both scripts are tracked under
+   `.claude/skills/rdd/hooks/`, but `.claude/settings.json` is gitignored
+   in this repo, so each operator must register the hooks in their own
+   `.claude/settings.json` once. Snippet to merge into the file:
+   ```json
+   "hooks": {
+     "PostToolUse": [{
+       "matcher": "Agent",
+       "hooks": [{ "type": "command", "command": "bash .claude/skills/rdd/hooks/rdd-post-agent.sh", "timeout": 5 }]
+     }],
+     "Stop": [{
+       "hooks": [{ "type": "command", "command": "bash .claude/skills/rdd/hooks/rdd-stop-check.sh", "timeout": 10 }]
+     }]
+   }
+   ```
+   After editing settings.json, open `/hooks` once (or restart the
+   session) so the watcher picks the new entries up.
 6. **PR size cap.** A single rdd PR aims for **≤ 500 LOC added and ≤ 5
    files changed**. Exceeding both is a Gate 1 reject — `planner` must
    return a decomposition before the TASK proceeds. Mechanical scaffolds
