@@ -211,7 +211,9 @@ describe("IpcJsonRpcTransport — send-failure resilience", () => {
       onMessage: () => undefined,
       offMessage: () => undefined,
     });
-    expect(() => { tx.notify("log", { msg: "x" }); }).not.toThrow();
+    expect(() => {
+      tx.notify("log", { msg: "x" });
+    }).not.toThrow();
     tx.dispose();
   });
 
@@ -223,7 +225,9 @@ describe("IpcJsonRpcTransport — send-failure resilience", () => {
       onMessage: () => undefined,
       offMessage: () => undefined,
     });
-    expect(() => { tx.sendResponse(1, "ok"); }).not.toThrow();
+    expect(() => {
+      tx.sendResponse(1, "ok");
+    }).not.toThrow();
     tx.dispose();
   });
 
@@ -235,7 +239,9 @@ describe("IpcJsonRpcTransport — send-failure resilience", () => {
       onMessage: () => undefined,
       offMessage: () => undefined,
     });
-    expect(() => { tx.sendError(1, -32000, "boom"); }).not.toThrow();
+    expect(() => {
+      tx.sendError(1, -32000, "boom");
+    }).not.toThrow();
     tx.dispose();
   });
 });
