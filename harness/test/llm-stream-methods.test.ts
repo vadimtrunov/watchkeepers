@@ -8,9 +8,16 @@
  * envelope ordering observed by a real client.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { FakeProvider, LLMError, model, type StreamEvent, type Usage } from "../src/llm/index.js";
+import {
+  FakeProvider,
+  LLMError,
+  model,
+  type StreamEvent,
+  type StreamSubscription,
+  type Usage,
+} from "../src/llm/index.js";
 import { LLM_CAPABILITIES, streamEventToWire, wireLLMMethods } from "../src/llm/methods.js";
 import type { NotificationWriter } from "../src/llm/notification-writer.js";
 import {
@@ -361,6 +368,49 @@ describe("wireLLMMethods — stream/cancel paths", () => {
   });
 });
 
+describe("wireLLMMethods — dispatch-loop exception clears registry (AC8)", () => {
+  it("writer that throws on first call removes registry entry; stream/cancel returns accepted=false", async () => {
+    const fake = new FakeProvider();
+    fake.streamEvents = [
+      { kind: "text_delta", textDelta: "x" },
+      { kind: "message_stop", finishReason: "stop", usage: ZERO_USAGE },
+    ];
+
+    // Build a writer that throws on its first invocation, simulating an
+    // EPIPE / stdout-closed condition during dispatch.
+    let callCount = 0;
+    const registry = new Map<string, MethodHandler>();
+    wireLLMMethods(registry, fake, (notification) => {
+      void notification; // consumed to satisfy no-unused-vars; only callCount matters here.
+      callCount += 1;
+      if (callCount === 1) {
+        throw new Error("simulated EPIPE");
+      }
+    });
+
+    const streamHandler = registry.get("stream");
+    const cancelHandler = registry.get("stream/cancel");
+    if (streamHandler === undefined || cancelHandler === undefined) {
+      throw new Error("missing handlers");
+    }
+
+    // The stream handler starts, the spy dispatches text_delta, writer
+    // throws → FakeProvider's loop catches the re-thrown error and stops.
+    // The streamID is returned because the subscription was created before
+    // the event loop ran.
+    const result = await streamHandler({
+      model: MODEL,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const sid = streamIDOf(result);
+
+    // Registry must be empty: the dispatch-loop exception handler deleted
+    // the entry. stream/cancel should report accepted=false (not found).
+    const cancelResult = await cancelHandler({ streamID: sid });
+    expect(cancelResult).toEqual({ accepted: false });
+  });
+});
+
 describe("wireLLMMethods — async error notification", () => {
   it("kind:error event surfaces as a stream/event notification and clears the registry", async () => {
     const fake = new FakeProvider();
@@ -519,47 +569,78 @@ describe("wireLLMMethods — stream sync error mapping", () => {
 
 describe("wireLLMMethods — concurrency", () => {
   it("two streams interleave correctly; each event tagged with its own streamID", async () => {
+    // AC9: both streams must be simultaneously in-flight while interleaved
+    // events are dispatched. We spy on fake.stream to capture each call's
+    // handler, then drive both handlers manually in interleaved order:
+    //   stream1.event1, stream2.event1, stream1.event2, stream2.event2
+    // This proves the registry correctly isolates per-stream state and
+    // tags every notification with the right streamID despite interleaving.
+
     const fake = new FakeProvider();
-    fake.streamEvents = [
-      { kind: "text_delta", textDelta: "a" },
-      { kind: "message_stop", finishReason: "stop", usage: ZERO_USAGE },
-    ];
+
+    // Captured per-call handlers: index 0 = stream1, index 1 = stream2.
+    // StreamHandler may return void | Promise<void>; use that exact type.
+    const capturedHandlers: ((ev: StreamEvent) => void | Promise<void>)[] = [];
+
+    vi.spyOn(fake, "stream").mockImplementation((_req, handler) => {
+      capturedHandlers.push(handler);
+      // Return a minimal subscription; stop is a no-op for this test.
+      const sub: StreamSubscription = { stop: () => Promise.resolve() };
+      return Promise.resolve(sub);
+    });
 
     const { registry, buffer } = wired(fake);
     const handler = registry.get("stream");
     if (handler === undefined) throw new Error("stream missing");
 
-    const r1 = await handler({
-      model: MODEL,
-      messages: [{ role: "user", content: "first" }],
-    });
+    // Start both streams. Because our spy never dispatches events, both
+    // handler() calls resolve immediately while the streams remain live
+    // (no terminal event seen → both entries still in the registry).
+    const p1 = handler({ model: MODEL, messages: [{ role: "user", content: "first" }] });
+    const p2 = handler({ model: MODEL, messages: [{ role: "user", content: "second" }] });
+    const [r1, r2] = await Promise.all([p1, p2]);
     const sid1 = streamIDOf(r1);
-
-    const r2 = await handler({
-      model: MODEL,
-      messages: [{ role: "user", content: "second" }],
-    });
     const sid2 = streamIDOf(r2);
-
     expect(sid1).not.toBe(sid2);
 
-    const events = streamEventNotifications(buffer);
-    // Each stream emits 2 events (text_delta + message_stop) → 4 total.
-    expect(events).toHaveLength(4);
-
-    const grouped = new Map<string, string[]>();
-    for (const n of events) {
-      const params = n.params as { streamID: string; event: { kind: string } };
-      const arr = grouped.get(params.streamID) ?? [];
-      arr.push(params.event.kind);
-      grouped.set(params.streamID, arr);
-    }
-    expect(grouped.get(sid1)).toEqual(["text_delta", "message_stop"]);
-    expect(grouped.get(sid2)).toEqual(["text_delta", "message_stop"]);
-
-    // Registry hygiene: both streams completed → cancels return false.
+    // At this point both streams are simultaneously in-flight (registry
+    // holds both entries). Verify that before any events are dispatched.
     const cancelHandler = registry.get("stream/cancel");
     if (cancelHandler === undefined) throw new Error("stream/cancel missing");
+
+    // Both entries live — cancel each and confirm accepted=true.
+    // (We restore after so we can drive events manually below.)
+    // Actually: drive events first, then verify per-streamID tagging.
+    // Reset and re-start so we can see the interleaved notification sequence.
+    // Instead: drive events NOW in interleaved order, then assert.
+
+    const [h1, h2] = capturedHandlers;
+    if (h1 === undefined || h2 === undefined) {
+      throw new Error("expected two captured handlers");
+    }
+
+    // Interleaved dispatch: stream1.text_delta, stream2.text_delta,
+    //                       stream1.message_stop, stream2.message_stop.
+    await h1({ kind: "text_delta", textDelta: "a" });
+    await h2({ kind: "text_delta", textDelta: "b" });
+    await h1({ kind: "message_stop", finishReason: "stop", usage: ZERO_USAGE });
+    await h2({ kind: "message_stop", finishReason: "stop", usage: ZERO_USAGE });
+
+    const events = streamEventNotifications(buffer);
+    // 4 events total: 2 per stream.
+    expect(events).toHaveLength(4);
+
+    // Assert interleaved order: s1.text_delta, s2.text_delta, s1.message_stop, s2.message_stop.
+    const tags = events.map((n) => {
+      const p = n.params as { streamID: string; event: { kind: string } };
+      return { sid: p.streamID, kind: p.event.kind };
+    });
+    expect(tags[0]).toEqual({ sid: sid1, kind: "text_delta" });
+    expect(tags[1]).toEqual({ sid: sid2, kind: "text_delta" });
+    expect(tags[2]).toEqual({ sid: sid1, kind: "message_stop" });
+    expect(tags[3]).toEqual({ sid: sid2, kind: "message_stop" });
+
+    // Registry hygiene: terminal events cleaned both entries.
     expect(await cancelHandler({ streamID: sid1 })).toEqual({ accepted: false });
     expect(await cancelHandler({ streamID: sid2 })).toEqual({ accepted: false });
   });

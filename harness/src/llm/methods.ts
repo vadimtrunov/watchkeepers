@@ -185,15 +185,26 @@ function makeStreamHandler(
       // terminal event before the registry entry disappears. Order
       // matters for the cancel-after-message_stop race documented on
       // AC4.
-      writer(
-        notification("stream/event", {
-          streamID,
-          event: streamEventToWire(event),
-        }),
-      );
-      if (!state.terminated && (event.kind === "message_stop" || event.kind === "error")) {
-        state.terminated = true;
-        streams.delete(streamID);
+      try {
+        writer(
+          notification("stream/event", {
+            streamID,
+            event: streamEventToWire(event),
+          }),
+        );
+        if (!state.terminated && (event.kind === "message_stop" || event.kind === "error")) {
+          state.terminated = true;
+          streams.delete(streamID);
+        }
+      } catch (e: unknown) {
+        // AC8: dispatch-loop exception — clean up registry so subsequent
+        // stream/cancel returns {accepted:false} rather than leaking the
+        // entry. Re-throw so FakeProvider's loop stops naturally.
+        if (!state.terminated) {
+          state.terminated = true;
+          streams.delete(streamID);
+        }
+        throw e;
       }
     };
 
