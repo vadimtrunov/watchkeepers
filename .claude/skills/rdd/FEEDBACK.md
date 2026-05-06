@@ -1704,3 +1704,28 @@ Phase 4 caught the `t.Parallel()` + `t.Setenv` panic via code review BEFORE Linu
 - Total wall time from /loop tick to Phase 5a completion: ~30 min
 
 ---
+## 2026-05-06 — M5.5.a: Harness boot fetches Manifest via keepclient and templates personality/language into system prompt
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+
+Decomposition of M5.5 into atomic leaves (M5.5.a/b/c/d) paid off immediately — M5.5.a landed as ~282 LOC (109 + 173), single concern, zero nits at Phase 4 iter 1. The 60s `/loop` dynamic-mode tick cadence (short enough to catch context-switch costs, long enough to complete each phase end-to-end without thrashing) worked smoothly: Phase 1→4 completed in 5–7 ticks with no escalation or operator intervention outside gates.
+
+### What wasted effort
+
+None. Phase 3 executor delivered clean code matching all ACs; Phase 4 reviewer found zero issues (blocker=0, important=0, nit=0). Minimal coordination overhead.
+
+### Suggested skill changes
+
+- None for this TASK. Continuing to monitor tick-cadence effectiveness in Phase 5 (next TASKs in M5 family will refine further if needed).
+
+### Metrics
+
+- Review iterations: 1 (converged immediately)
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from Phase 1 to Phase 5a dispatch: ~22 min
+
+---

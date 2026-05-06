@@ -317,7 +317,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M5.4.a** Sandbox guardrails — wall-clock timeout + output-byte cap (Go-side timer + wrapped stdout/stderr readers, no syscalls)
   - [x] **M5.4.b** Sandbox guardrails — CPU-time + memory-ceiling rlimits (platform-specific setrlimit via SysProcAttr, build-tagged sandbox_linux.go / sandbox_darwin.go)
 - [ ] **M5.5** **Manifest-driven boot + Notebook integration** — harness calls `keepclient.GetManifest(agent_id)` on boot, composes `personality`/`language` into the effective system prompt via a templater, applies toolset ACLs / model / autonomy, opens its per-agent SQLite Notebook, auto-recalls top-K relevant entries each turn (configurable K + relevance threshold), and exposes `Remember` as a built-in tool.
-  - [ ] **M5.5.a** Harness boot fetches Manifest via keepclient and templates personality/language into system prompt
+  - [x] **M5.5.a** Harness boot fetches Manifest via keepclient and templates personality/language into system prompt
   - [ ] **M5.5.b** Apply Manifest toolset ACLs, model selection, and autonomy bounds in harness loop
   - [ ] **M5.5.c** Open per-agent SQLite Notebook on boot and auto-recall top-K entries with relevance threshold
   - [ ] **M5.5.d** Expose Remember as a built-in harness tool writing to per-agent Notebook
