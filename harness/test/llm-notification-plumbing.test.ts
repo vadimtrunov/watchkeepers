@@ -89,7 +89,10 @@ describe("wireLLMMethods — writer parameter", () => {
     expect(registry.has("complete")).toBe(true);
     expect(registry.has("countTokens")).toBe(true);
     expect(registry.has("reportCost")).toBe(true);
-    expect(registry.size).toBe(3);
+    // M5.3.c.c.c.b.b: writer-bearing wireLLMMethods now also registers
+    // `stream` and `stream/cancel` (the deferred handlers consume the
+    // writer captured here). Total surface = 5.
+    expect(registry.size).toBe(5);
   });
 
   it("does NOT call the writer from any of the three sync handlers", async () => {
@@ -205,7 +208,13 @@ describe("runHarness — harness/ready notification", () => {
     expect("id" in envelope).toBe(false);
     expect(envelope.params.harness).toBe("watchkeeper");
     expect(envelope.params.version).toBe(HARNESS_VERSION);
-    expect(envelope.params.capabilities).toEqual(["complete", "countTokens", "reportCost"]);
+    expect(envelope.params.capabilities).toEqual([
+      "complete",
+      "countTokens",
+      "reportCost",
+      "stream",
+      "stream/cancel",
+    ]);
   });
 
   it("emits harness/ready BEFORE the response to a subsequent hello request", async () => {

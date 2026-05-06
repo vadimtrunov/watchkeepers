@@ -1623,3 +1623,30 @@ Auto-mode under `/loop /rdd --auto resume` ran cleanly through Phases 1–4. Pha
 - Total wall time from /rdd to merge: ~15 min (including truncation recovery)
 
 ---
+
+## 2026-05-06 — M5.3.c.c.c.b.b: Implement stream + stream/cancel JSON-RPC methods with stream registry and multi-event notification protocol
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 iter 1, 4 iter 2
+
+### What worked
+
+Auto-mode under `/loop /rdd --auto resume` ran cleanly through both iterations. Phase 4 bounded loop caught two real defects on iter 1: (1) concurrency test serialization issue — the test "passed" but never exercised actual interleaving because the synchronous fake completed both streams before either promise resolved; (2) registry cleanup missing on dispatch-loop exception — AC8 explicit text discovered the cleanup path only when a reviewer re-read the spec. Both defects were implementation mistakes, not spec issues. The decomposition (fits one PR) was correct — no late split forced. The 5-level cascade was identified upfront so the writer's job at toggle time was deterministic.
+
+### What wasted effort
+
+Executor flagged an AC11 ambiguity: whether updating `registry.size` assertion in `llm-notification-plumbing.test.ts` (from 3→5) was owned by this TASK or not. Reasonable interpretation; no harm; but worth tightening future TASK templates. When an AC authorizes modification of an existing test file, list EXACTLY which assertions inside that file are owned by the TASK to remove ambiguity.
+
+### Suggested skill changes
+
+- `references/agent-briefs/executor.md`: add a note for streaming/async TASKs — "when testing concurrent behavior against a synchronous fake, capture handler callbacks via `vi.spyOn` and drive interleaved manually; sequential `await fake.method(...)` calls do NOT exercise concurrency."
+- TASK template: when an AC authorizes modification of an existing test file, specify EXACTLY which assertions are owned by the TASK (e.g., "AC9: update ONLY these assertions in llm-notification-plumbing.test.ts: Line 45 (registry.size: 3→5), Line 60 (capabilities array contents)").
+
+### Metrics
+
+- Review iterations: 2 (1 fix + 1 verification)
+- PR-fix iterations: 0 (Phase 6 not yet run)
+- Operator interventions outside of gates: 0
+- Total wall time from /loop tick to Phase 5a completion: ~30 min
+
+---

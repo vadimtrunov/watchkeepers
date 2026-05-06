@@ -15,6 +15,9 @@
  * code rides on `MethodError.data.code` for the caller.
  */
 
+import { randomUUID } from "node:crypto";
+
+import { notification } from "../jsonrpc.js";
 import { MethodError, type MethodHandler } from "../methods.js";
 import { JsonRpcErrorCode, type JsonRpcValue } from "../types.js";
 
@@ -31,10 +34,30 @@ import {
   type Message,
   type Model,
   type Role,
+  type StreamEvent,
+  type StreamRequest,
+  type StreamSubscription,
   type ToolCall,
   type ToolDefinition,
   type Usage,
 } from "./types.js";
+
+/**
+ * Capabilities advertised by `harness/ready` (M5.3.c.c.c.b.a) — the full
+ * surface the harness exposes when wired with a provider AND a writer.
+ * Lifted here so `index.ts` does not have to duplicate the literal.
+ *
+ * The harness "always-advertises" the same capability surface regardless
+ * of degraded mode: clients can decide whether to feature-detect via the
+ * `MethodNotFound` response or trust this list as the contractual surface.
+ */
+export const LLM_CAPABILITIES = [
+  "complete",
+  "countTokens",
+  "reportCost",
+  "stream",
+  "stream/cancel",
+] as const;
 
 /**
  * Wire shape of a `complete` JSON-RPC request's `params`. Mirrors
@@ -72,33 +95,36 @@ export interface ReportCostParams {
 }
 
 /**
- * Register the three synchronous LLM methods on `registry` against
+ * Register the synchronous + streaming LLM methods on `registry` against
  * `provider`. Idempotent in spirit but a re-registration overwrites the
- * prior handler (Map semantics). Stream is intentionally absent —
- * deferred to M5.3.c.c.c.b.
+ * prior handler (Map semantics).
  *
- * The optional `writer` parameter (M5.3.c.c.c.b.a) is captured in the
- * closure so the streaming `stream` / `stream/cancel` handlers landing
- * in M5.3.c.c.c.b.b have a place to push server-to-client
- * notifications. The current three sync handlers (`complete`,
- * `countTokens`, `reportCost`) DO NOT call the writer — they are
- * request/response shaped — so the parameter is intentionally
- * unreferenced beyond the no-op statement that pins the closure
- * binding for tooling.
+ * The optional `writer` parameter (M5.3.c.c.c.b.a) is the
+ * server-to-client notification sink consumed by the streaming `stream`
+ * handler landing in this leaf. When `writer === undefined` the
+ * `stream` and `stream/cancel` methods are NOT registered — a stream
+ * with no notification sink would have nowhere to dispatch events.
+ * Callers in degraded mode receive `MethodNotFound` (-32601).
  */
 export function wireLLMMethods(
   registry: Map<string, MethodHandler>,
   provider: LLMProvider,
   writer?: NotificationWriter,
 ): void {
-  // Closure capture for the M5.3.c.c.c.b.b stream handlers. Reading the
-  // local marks the binding as live for `noUnusedLocals` and lets future
-  // edits in this file inline the writer without re-threading the param.
-  void writer;
-
   registry.set("complete", makeCompleteHandler(provider));
   registry.set("countTokens", makeCountTokensHandler(provider));
   registry.set("reportCost", makeReportCostHandler(provider));
+
+  if (writer !== undefined) {
+    // Closure-private subscription registry. Both stream handlers below
+    // capture this Map so cancel can look up the in-flight subscription
+    // by streamID and so terminal events can self-clean. Memory leaks
+    // are impossible because every entry is cleared on terminal-event,
+    // explicit cancel, or dispatch-loop exception.
+    const streams = new Map<string, ActiveStream>();
+    registry.set("stream", makeStreamHandler(provider, writer, streams));
+    registry.set("stream/cancel", makeStreamCancelHandler(streams));
+  }
 }
 
 function makeCompleteHandler(provider: LLMProvider): MethodHandler {
@@ -137,6 +163,164 @@ function makeReportCostHandler(provider: LLMProvider): MethodHandler {
     }
     return { accepted: true };
   };
+}
+
+/**
+ * Per-stream registry entry. The `state` object is shared between the
+ * event-handler closure and the cancel handler so that a `stream/cancel`
+ * mutation (`cancelled = true`) is immediately visible to any in-flight
+ * provider dispatch that arrives after `stop()` is called (TOCTOU fix).
+ */
+interface ActiveStream {
+  subscription: StreamSubscription;
+  state: { terminated: boolean; cancelled: boolean };
+}
+
+function makeStreamHandler(
+  provider: LLMProvider,
+  writer: NotificationWriter,
+  streams: Map<string, ActiveStream>,
+): MethodHandler {
+  return async (params: JsonRpcValue | undefined): Promise<JsonRpcValue> => {
+    const req = parseStreamParams(params);
+    const streamID = generateStreamID();
+
+    // Per-stream terminal latch so the registry entry is deleted exactly
+    // once even if the provider double-emits or the SDK errors after
+    // message_stop. Wrapped in an object so the eslint/TS narrowing rule
+    // sees the field as genuinely mutable across the closure boundary.
+    // `cancelled` is set by the cancel handler before calling stop() so
+    // that any in-flight late event is silently dropped instead of being
+    // forwarded to the client after it received `accepted: true`.
+    const state = { terminated: false, cancelled: false };
+
+    const handler = (event: StreamEvent): void => {
+      // Drop events that arrive after stream/cancel has fired. The cancel
+      // handler sets `state.cancelled = true` before calling stop(), so
+      // this check closes the TOCTOU window where the provider's dispatch
+      // loop delivers one last event after the client received accepted:true.
+      if (state.cancelled) return;
+
+      // Translate + dispatch FIRST so the client always observes the
+      // terminal event before the registry entry disappears. Order
+      // matters for the cancel-after-message_stop race documented on
+      // AC4.
+      try {
+        writer(
+          notification("stream/event", {
+            streamID,
+            event: streamEventToWire(event),
+          }),
+        );
+        if (!state.terminated && (event.kind === "message_stop" || event.kind === "error")) {
+          state.terminated = true;
+          streams.delete(streamID);
+        }
+      } catch (e: unknown) {
+        // AC8: dispatch-loop exception — clean up registry so subsequent
+        // stream/cancel returns {accepted:false} rather than leaking the
+        // entry. Re-throw so FakeProvider's loop stops naturally.
+        if (!state.terminated) {
+          state.terminated = true;
+          streams.delete(streamID);
+        }
+        throw e;
+      }
+    };
+
+    let subscription: StreamSubscription;
+    try {
+      subscription = await provider.stream(req, handler);
+    } catch (e) {
+      // SYNC error path: subscription was never created → registry has
+      // nothing to clean. Lift LLMError → MethodError per AC7.
+      throw liftProviderError(e);
+    }
+
+    if (!state.terminated) {
+      // FakeProvider dispatches events synchronously inside `stream`,
+      // so the terminal flag may already be set by the time we land
+      // here. Only register the subscription if it is still live —
+      // otherwise the terminal event already cleaned up and we would
+      // re-introduce the entry we just removed.
+      streams.set(streamID, { subscription, state });
+    }
+    return { streamID };
+  };
+}
+
+function makeStreamCancelHandler(streams: Map<string, ActiveStream>): MethodHandler {
+  return async (params: JsonRpcValue | undefined): Promise<JsonRpcValue> => {
+    const streamID = parseStreamCancelParams(params);
+    const entry = streams.get(streamID);
+    if (entry === undefined) {
+      // Unknown / already-completed streamID is a no-op per AC4. Not an
+      // error: handles the race between the client receiving the
+      // terminal `message_stop` and sending its `stream/cancel`.
+      return { accepted: false };
+    }
+    // Set cancelled BEFORE calling stop() so that any in-flight event
+    // dispatched by the provider after stop() returns is silently dropped
+    // by the handler closure rather than forwarded to the client.
+    entry.state.cancelled = true;
+    streams.delete(streamID);
+    await entry.subscription.stop();
+    return { accepted: true };
+  };
+}
+
+function generateStreamID(): string {
+  // UUID v4 has a 122-bit random body — collision probability across
+  // the harness' lifetime is effectively zero. Imported from
+  // `node:crypto` because that import path is the explicit Node-runtime
+  // surface; `globalThis.crypto.randomUUID` exists too but the
+  // `node:crypto` import keeps the dependency obvious in the module
+  // graph.
+  return randomUUID();
+}
+
+/**
+ * Translate a {@link StreamEvent} discriminated-union value to a JSON-
+ * shaped wire payload (AC5). The reverse direction is unnecessary —
+ * the harness only emits these envelopes; the Go core decodes them.
+ */
+export function streamEventToWire(event: StreamEvent): JsonRpcValue {
+  switch (event.kind) {
+    case "text_delta":
+      return {
+        kind: "text_delta",
+        textDelta: event.textDelta ?? "",
+      };
+    case "tool_call_start": {
+      const tc = event.toolCall;
+      return {
+        kind: "tool_call_start",
+        id: tc?.id ?? "",
+        name: tc?.name ?? "",
+      };
+    }
+    case "tool_call_delta":
+      return {
+        kind: "tool_call_delta",
+        id: event.toolCall?.id ?? "",
+        argumentsDelta: event.textDelta ?? "",
+      };
+    case "message_stop": {
+      const out: Record<string, JsonRpcValue> = { kind: "message_stop" };
+      if (event.finishReason !== undefined) {
+        out.finishReason = event.finishReason satisfies FinishReason;
+      }
+      if (event.usage !== undefined) {
+        out.usage = usageToWire(event.usage);
+      }
+      return out;
+    }
+    case "error":
+      return {
+        kind: "error",
+        message: event.errorMessage ?? "",
+      };
+  }
 }
 
 /**
@@ -213,6 +397,37 @@ function parseCompleteParams(params: JsonRpcValue | undefined): CompleteRequest 
     ...(metadata !== undefined ? { metadata } : {}),
   };
   return req;
+}
+
+function parseStreamParams(params: JsonRpcValue | undefined): StreamRequest {
+  const obj = requireObject(params, "params");
+  const model = parseModel(obj.model);
+  const messages = parseMessages(obj.messages);
+  const tools = parseTools(obj.tools);
+  const system = parseOptionalString(obj.system, "system");
+  const maxTokens = parseOptionalNonNegativeNumber(obj.maxTokens, "maxTokens");
+  const temperature = parseOptionalNumber(obj.temperature, "temperature");
+  const metadata = parseOptionalStringRecord(obj.metadata, "metadata");
+
+  const req: StreamRequest = {
+    model,
+    messages,
+    ...(system !== undefined ? { system } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(tools !== undefined ? { tools } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
+  };
+  return req;
+}
+
+function parseStreamCancelParams(params: JsonRpcValue | undefined): string {
+  const obj = requireObject(params, "params");
+  const streamID = obj.streamID;
+  if (typeof streamID !== "string" || streamID.length === 0) {
+    throw invalidParams("streamID must be a non-empty string");
+  }
+  return streamID;
 }
 
 function parseCountTokensParams(params: JsonRpcValue | undefined): CountTokensRequest {

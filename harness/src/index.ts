@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { handleLine } from "./dispatcher.js";
 import { notification, serialize } from "./jsonrpc.js";
 import { ClaudeCodeProvider } from "./llm/claude-code-provider.js";
+import { LLM_CAPABILITIES } from "./llm/methods.js";
 import type { NotificationWriter } from "./llm/notification-writer.js";
 import type { LLMProvider } from "./llm/provider.js";
 import { HARNESS_VERSION, createDefaultRegistry, type ShutdownSignal } from "./methods.js";
@@ -69,7 +70,7 @@ export async function runHarness(
       notification("harness/ready", {
         harness: "watchkeeper",
         version: HARNESS_VERSION,
-        capabilities: ["complete", "countTokens", "reportCost"],
+        capabilities: [...LLM_CAPABILITIES],
       }),
     );
   }
