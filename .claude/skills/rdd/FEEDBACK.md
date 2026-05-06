@@ -1574,3 +1574,30 @@ The TASK listed `OverloadedError` as a dedicated SDK export. The executor discov
 - Total wall time so far: ~25 min from /loop tick
 
 ---
+
+## 2026-05-06 — M5.3.c.c.c.a: Wire complete + countTokens + reportCost JSON-RPC methods with provider injection
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4
+
+### What worked
+
+Auto mode under `/loop /rdd --auto resume` ran cleanly through Phases 1→7a without intervention. The decomposition decision at Phase 1 was sound: streaming protocol IS its own concern (multi-event notification framing + cancellation semantics), and attempting to fit both synchronous and streaming wiring into a single PR would have stressed review headroom. Phase 4's bounded loop caught AC2 wire-shape drift on iteration 1 — that loop exists for exactly this kind of catch.
+
+### What wasted effort
+
+TASK-drafting AC2 enumerated the wire shape as a closed list but omitted `errorMessage?` from the Go `CompleteResponse` contract. Cost: 1 fixer iteration (5 lines of source JSDoc + 2 vitest cases). Preventable at TASK-drafting time by deriving the AC wire-shape field-by-field from the Go source with explicit `optional` annotations. Suggest adding a preflight Check 3 augmentation to `references/task-template.md`: "For each wire-shape AC, list the source-of-truth file and confirm field-by-field parity before brainstorm closure."
+
+### Suggested skill changes
+
+- Tighten `references/task-template.md` Phase 2 brainstorm guidance: add a step "for each wire-shape AC, enumerate fields from the source-of-truth interface and mark optional fields explicitly."
+- Add a companion note to `references/agent-briefs/planner.md`: "When decomposing a feature that wraps a foreign interface (e.g., Go contract), prioritize decomposition that isolates interface-wiring concerns into dedicated sub-items; this eases per-item brainstorm rigor and reduces fixer iterations."
+
+### Metrics
+
+- Review iterations: 2 (1 fix + 1 verification)
+- PR-fix iterations: 0 (Phase 6 not yet run)
+- Operator interventions outside of gates: 1 (manual git push retry after transient HTTP2 framing error on decomposition commit `48c4c30`)
+- Total wall time from /loop tick to Phase 5a: ~30 min
+
+---
