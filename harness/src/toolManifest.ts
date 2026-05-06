@@ -178,10 +178,10 @@ export function deriveToolSchemas(manifest: ToolManifest): Map<string, ZodTypeAn
  * Recursively synthesize a zod schema from a single
  * {@link ToolInputSpec}. The `object` branch is the load-bearing case:
  * it walks the declared `properties`, marking every key NOT listed in
- * `required` as `.optional()`. The resulting `z.object({...})` is left
- * non-strict so callers can extend the wire shape additively without
- * refactoring every Manifest entry — strictness is enforced at the
- * Manifest schema layer, not the per-tool input layer.
+ * `required` as `.optional()`. The resulting `z.object({...})` is made
+ * `.strict()` so that inputs containing undeclared keys are rejected —
+ * matching the same strict posture applied at the Manifest schema layer
+ * (see {@link ToolManifestSchema}) and satisfying AC4 + AC6.
  */
 function buildSchemaForSpec(spec: ToolInputSpec): ZodTypeAny {
   switch (spec.kind) {
@@ -192,7 +192,7 @@ function buildSchemaForSpec(spec: ToolInputSpec): ZodTypeAny {
         const childSchema = buildSchemaForSpec(child);
         shape[key] = required.has(key) ? childSchema : childSchema.optional();
       }
-      return z.object(shape);
+      return z.object(shape).strict();
     }
     case "string":
       return z.string();

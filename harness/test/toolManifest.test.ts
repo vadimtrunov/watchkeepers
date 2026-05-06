@@ -189,6 +189,10 @@ describe("ToolInputSpec — primitive coverage", () => {
     const validator = getValidator(derived, "opt");
     expect(validator.parse({ a: "x" })).toEqual({ a: "x" });
     expect(validator.parse({ a: "x", b: "y" })).toEqual({ a: "x", b: "y" });
+    // optional key supplied with wrong type must be rejected
+    expect(validator.safeParse({ a: "x", b: 42 }).success).toBe(false);
+    // unknown keys must be rejected (strict posture)
+    expect(validator.safeParse({ a: "x", extra: "sneak" }).success).toBe(false);
   });
 });
 
