@@ -57,6 +57,13 @@ var languagePattern = regexp.MustCompile(`^[a-z]{2,3}(-[A-Z]{2})?$`)
 // would slip past a byte-based cap and only fail at the DB.
 const manifestPersonalityMaxRunes = 1024
 
+// manifestModelMaxRunes is the per-row cap on the manifest_version.model
+// column expressed in Unicode codepoints, to match SQL `char_length`
+// semantics enforced by the `manifest_version_model_length` CHECK
+// constraint (migration 014). Same byte-vs-rune rationale as
+// `manifestPersonalityMaxRunes` above.
+const manifestModelMaxRunes = 100
+
 // -----------------------------------------------------------------------
 // POST /v1/knowledge-chunks — handleStore
 // -----------------------------------------------------------------------
@@ -316,6 +323,7 @@ type putManifestVersionRequest struct {
 	KnowledgeSources json.RawMessage `json:"knowledge_sources"`
 	Personality      string          `json:"personality"`
 	Language         string          `json:"language"`
+	Model            string          `json:"model"`
 }
 
 // putManifestVersionResponse is the 201 body returned on successful insert.
@@ -367,6 +375,14 @@ func parsePutManifestVersionRequest(w http.ResponseWriter, req *http.Request) (p
 	// 4 bytes) bypass the cap on the wire only to fail later at Postgres.
 	if utf8.RuneCountInString(body.Personality) > manifestPersonalityMaxRunes {
 		writeError(w, http.StatusBadRequest, "personality_too_long")
+		return body, false
+	}
+	// Mirror the SQL `char_length(model) <= 100` cap from migration 014.
+	// utf8.RuneCountInString matches `char_length` codepoint semantics so
+	// a CJK / accented-Latin payload at the rune boundary cannot bypass
+	// the cap on the wire only to fail later at Postgres.
+	if utf8.RuneCountInString(body.Model) > manifestModelMaxRunes {
+		writeError(w, http.StatusBadRequest, "model_too_long")
 		return body, false
 	}
 	return body, true
@@ -434,6 +450,7 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 		knowledgeSources := jsonbOrNil(body.KnowledgeSources)
 		personality := stringOrNil(body.Personality)
 		language := stringOrNil(body.Language)
+		model := stringOrNil(body.Model)
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
@@ -451,22 +468,22 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
                 INSERT INTO watchkeeper.manifest_version (
                     manifest_id, version_no, system_prompt,
                     tools, authority_matrix, knowledge_sources,
-                    personality, language
+                    personality, language, model
                 )
                 SELECT
                     $1, $2, $3,
                     coalesce($4::jsonb, '[]'::jsonb),
                     coalesce($5::jsonb, '{}'::jsonb),
                     coalesce($6::jsonb, '[]'::jsonb),
-                    $7, $8
+                    $7, $8, $9
                 WHERE EXISTS (
                     SELECT 1 FROM watchkeeper.manifest
-                    WHERE id = $1 AND organization_id = $9
+                    WHERE id = $1 AND organization_id = $10
                 )
                 RETURNING id
             `, manifestID, body.VersionNo, body.SystemPrompt,
 				tools, authorityMatrix, knowledgeSources,
-				personality, language, claim.OrganizationID,
+				personality, language, model, claim.OrganizationID,
 			).Scan(&id)
 		})
 		if err != nil {

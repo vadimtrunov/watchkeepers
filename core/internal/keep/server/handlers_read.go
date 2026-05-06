@@ -206,6 +206,7 @@ type manifestVersionResponse struct {
 	KnowledgeSources json.RawMessage `json:"knowledge_sources"`
 	Personality      string          `json:"personality,omitempty"`
 	Language         string          `json:"language,omitempty"`
+	Model            string          `json:"model,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
 }
 
@@ -233,6 +234,7 @@ func handleGetManifest(r scopedRunner) http.Handler {
                 SELECT id, manifest_id, version_no, system_prompt,
                        tools, authority_matrix, knowledge_sources,
                        coalesce(personality, ''), coalesce(language, ''),
+                       coalesce(model, ''),
                        created_at
                 FROM watchkeeper.manifest_version
                 WHERE manifest_id = $1
@@ -242,6 +244,7 @@ func handleGetManifest(r scopedRunner) http.Handler {
 				&out.ID, &out.ManifestID, &out.VersionNo, &out.SystemPrompt,
 				&out.Tools, &out.AuthorityMatrix, &out.KnowledgeSources,
 				&out.Personality, &out.Language,
+				&out.Model,
 				&out.CreatedAt,
 			)
 		})

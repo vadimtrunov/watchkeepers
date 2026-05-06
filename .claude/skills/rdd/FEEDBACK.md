@@ -1755,3 +1755,30 @@ Phase 4 iter 1 ESM spyOn trap: `vi.spyOn(invokeToolModule, "runIsolatedJs")` doe
 - Total wall time from /rdd to Phase 4 convergence: 00:33
 
 ---
+
+## 2026-05-07 — M5.5.b.b.a: Add manifest_version.model column + server response projection
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 (iter 1 + iter 2 fixer)
+
+### What worked
+
+Autonomous /loop at 60s cadence (tick 24 build → 25 review → 26 fixer → 27 review) converged cleanly in two iterations. Fixer dispatch in Phase 4 is the right pattern: code-reviewer flags importants, executor fixes, reviewer re-runs — all in one bounded loop without operator escalation. Wire-schema-first decomposition (M5.5.b.b.a/b/c) added one extra cycle but prevented an over-large PR; review clarity and rollback ergonomics are far better as a result.
+
+### What wasted effort
+
+Phase 4 iter 1 nil-arg trap: six nullable args in the handler meant "some arg is nil" passed vacuously without verifying `model` actually wired. SQL-shape assertion (missing in iter 1) is the cheapest regression guard. Plan-step split (one GET test, three write tests) was not honoured in iter 1, requiring a fixer iteration. Cost is minimal but preventable with explicit example in the executor brief showing split-by-path test layouts.
+
+### Suggested skill changes
+
+- Add example to `references/agent-briefs/executor.md` showing test file split (GET-path tests in `handlers_read_test.go`, PUT/POST in `handlers_write_test.go`) when plan specifies one.
+- Add SQL-shape assertion pattern example (e.g., `strings.Contains(gotSQL, "model")`) to reviewer brief so column-list regressions are caught in iter 1.
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 1 (fixer, not Phase 6)
+- Operator interventions outside of gates: 0
+- Total wall time from Phase 1 to Phase 4 convergence: ~23 min
+
+---
