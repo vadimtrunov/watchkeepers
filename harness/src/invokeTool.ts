@@ -238,24 +238,27 @@ async function runWorkerTool(tool: WorkerTool, input: JsonRpcValue): Promise<Jso
     );
   }
 
-  // 3. Race the JSON-RPC request against the one-shot 'crash' event so a
-  //    worker that exits mid-call rejects the awaiter promptly with -32004.
-  let crashHandler: ((event: WorkerCrashEvent) => void) | undefined;
+  // 3. Capture the crash event in a closure flag and await the request.
+  //    spawn.ts's exit handler calls transport.dispose() BEFORE notifying
+  //    crash listeners, so a pending request rejects with
+  //    "transport disposed" instead of a typed crash error. The catch
+  //    arm consults `crashEvent` to surface the correct -32004 wire code
+  //    regardless of which rejection happened to fire first.
+  let crashEvent: WorkerCrashEvent | undefined;
+  const crashHandler = (event: WorkerCrashEvent): void => {
+    crashEvent = event;
+  };
+  worker.on("crash", crashHandler);
   try {
-    const crashPromise = new Promise<never>((_, reject) => {
-      crashHandler = (event): void => {
-        reject(
-          toolError(
-            ToolErrorCode.ToolWorkerCrashed,
-            buildCrashMessage(event),
-            crashEventData(event),
-          ),
-        );
-      };
-      worker.on("crash", crashHandler);
-    });
-    return await Promise.race([worker.request(tool.method, input), crashPromise]);
+    return await worker.request(tool.method, input);
   } catch (err) {
+    if (crashEvent !== undefined) {
+      throw toolError(
+        ToolErrorCode.ToolWorkerCrashed,
+        buildCrashMessage(crashEvent),
+        crashEventData(crashEvent),
+      );
+    }
     if (err instanceof MethodError) throw err;
     if (err instanceof JsonRpcRemoteError) throw translateRemoteError(err);
     throw toolError(
@@ -264,9 +267,9 @@ async function runWorkerTool(tool: WorkerTool, input: JsonRpcValue): Promise<Jso
     );
   } finally {
     // AC5: terminate on every code path. `off` first so a crash event
-    // arriving during terminate() does not retrigger the rejector after
+    // arriving during terminate() does not retrigger the handler after
     // the surrounding promise has already settled.
-    if (crashHandler !== undefined) worker.off("crash", crashHandler);
+    worker.off("crash", crashHandler);
     await worker.terminate();
   }
 }
