@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -209,6 +210,20 @@ func (r *SandboxRunner) Run(ctx context.Context) (*RunResult, error) {
 		}, fmt.Errorf("runtime: cmd.Start: %w", err)
 	}
 
+	// Apply rlimits BEFORE we arm the wall-clock + ctx-watcher so a
+	// failed Prlimit cannot leak a child that's already running under
+	// a guardrail with no kill path. On error we kill the just-started
+	// child synchronously, drain Wait, and return the wrapped error.
+	if err := applyRlimits(cmd, true, r.cfg); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return &RunResult{
+			TermReason: TermReasonNatural,
+			ExitCode:   -1,
+			Error:      err.Error(),
+		}, fmt.Errorf("runtime: rlimit application failed: %w", err)
+	}
+
 	timer := r.armWallClockTimer(st)
 	ctxDone := r.armCtxWatcher(ctx, st)
 
@@ -223,7 +238,7 @@ func (r *SandboxRunner) Run(ctx context.Context) (*RunResult, error) {
 		close(ctxDone)
 	}
 
-	return st.buildResult(ctx, cmd, waitErr), classifyError(ctx, st, waitErr)
+	return st.buildResult(ctx, cmd, waitErr, r.cfg), classifyError(ctx, st, waitErr)
 }
 
 // armWallClockTimer arms the wall-clock kill if the config asked for
@@ -304,7 +319,15 @@ func (s *runState) makeWriter(byteCap int64, buf *bytes.Buffer) io.Writer {
 
 // buildResult assembles the populated RunResult. The TermReason is
 // always set so the caller can switch on it without a default branch.
-func (s *runState) buildResult(_ context.Context, cmd *exec.Cmd, waitErr error) *RunResult {
+//
+// When the runner itself fired a kill (`s.killed == true`) the
+// reason is whatever the racing path stored first. When the process
+// died without our intervention, the result MAY still be a kill —
+// the kernel can raise SIGXCPU on RLIMIT_CPU and SIGKILL/SIGSEGV on
+// RLIMIT_AS — and we attribute those to the matching rlimit-driven
+// TermReason when the configured limit is non-zero. Anything else
+// is a natural exit.
+func (s *runState) buildResult(_ context.Context, cmd *exec.Cmd, waitErr error, cfg SandboxConfig) *RunResult {
 	res := &RunResult{
 		Stdout: s.stdout.Bytes(),
 		Stderr: s.stderr.Bytes(),
@@ -322,6 +345,16 @@ func (s *runState) buildResult(_ context.Context, cmd *exec.Cmd, waitErr error) 
 		if why == "" {
 			why = TermReasonNatural
 		}
+		res.TermReason = why
+		return res
+	}
+	if why := classifyRlimitKill(cmd, cfg); why != "" {
+		// Promote the kernel-driven kill into the kill funnel so
+		// classifyError wraps ErrSandboxKilled. Reason CAS is safe
+		// here — no other writer is racing this path (the runner has
+		// already returned from Wait and torn down the watchers).
+		s.reason.CompareAndSwap(nil, why)
+		s.killed.Store(true)
 		res.TermReason = why
 		return res
 	}
@@ -356,3 +389,39 @@ type writerFunc func(p []byte) (int, error)
 
 // Write implements [io.Writer].
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// classifyRlimitKill inspects the wait-status of a process whose
+// runner did NOT fire any of the in-process kill paths (wall-clock,
+// output-cap, ctx-cancel) and decides whether the kernel killed it
+// for an rlimit overrun. Returns the matching TermReason or the
+// empty string when the death looks natural.
+//
+// Linux RLIMIT_CPU surfaces as SIGXCPU; RLIMIT_AS surfaces as SIGKILL
+// (and occasionally SIGSEGV depending on which syscall trips it). The
+// SIGKILL → memory-ceiling mapping is heuristic — we only attribute
+// it when the caller actually configured a non-zero
+// MemoryCeilingBytes. Without a configured ceiling SIGKILL likely
+// came from outside the runner (operator, OOM-killer for a different
+// reason, etc.) and is left as a natural-with-non-zero-exit signal.
+//
+// On platforms whose [exec.Cmd.ProcessState.Sys] is not a
+// [syscall.WaitStatus] this helper returns "" — the rlimit shim has
+// already either no-op'd (Darwin) or refused to apply (unsupported),
+// so a kernel-driven rlimit kill cannot reach this branch.
+func classifyRlimitKill(cmd *exec.Cmd, cfg SandboxConfig) string {
+	if cmd.ProcessState == nil {
+		return ""
+	}
+	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return ""
+	}
+	sig := ws.Signal()
+	if cfg.CPUTimeSeconds > 0 && sig == syscall.SIGXCPU {
+		return TermReasonCPUTime
+	}
+	if cfg.MemoryCeilingBytes > 0 && (sig == syscall.SIGKILL || sig == syscall.SIGSEGV) {
+		return TermReasonMemoryCeiling
+	}
+	return ""
+}
