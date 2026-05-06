@@ -133,6 +133,52 @@ describe("gateToolInvocation — proc.spawn", () => {
   });
 });
 
+describe("gateToolInvocation — exact-string match contract (v1)", () => {
+  // Pins the documented allowlist semantics from broker.ts JSDoc:
+  // entries are matched verbatim, no path.normalize, no trailing-slash
+  // tolerance, no prefix matching. A future change that loosens this
+  // contract MUST update both the JSDoc and these tests in lockstep so
+  // declaration and enforcement never drift apart.
+  const TRAILING_SLASH_CAPS: CapabilityDeclaration = {
+    fs: { read: ["/tmp/data"], write: ["/tmp/out"] },
+    net: { allow: [] },
+    env: { allow: [] },
+    proc: { spawn: false },
+  };
+
+  it("denies fs.read when request adds a trailing slash to an allowlisted path", () => {
+    const decision = gateToolInvocation(TRAILING_SLASH_CAPS, {
+      kind: "fs.read",
+      path: "/tmp/data/",
+    });
+    expect(decision.allow).toBe(false);
+  });
+
+  it("denies fs.read when allowlist entry has trailing slash and request does not", () => {
+    const caps: CapabilityDeclaration = {
+      ...TRAILING_SLASH_CAPS,
+      fs: { read: ["/tmp/data/"], write: [] },
+    };
+    expect(gateToolInvocation(caps, { kind: "fs.read", path: "/tmp/data" }).allow).toBe(false);
+  });
+
+  it("denies fs.read on a sub-path even when the parent dir is allowlisted", () => {
+    const decision = gateToolInvocation(TRAILING_SLASH_CAPS, {
+      kind: "fs.read",
+      path: "/tmp/data/file.txt",
+    });
+    expect(decision.allow).toBe(false);
+  });
+
+  it("denies fs.write when request adds a trailing slash to an allowlisted path", () => {
+    const decision = gateToolInvocation(TRAILING_SLASH_CAPS, {
+      kind: "fs.write",
+      path: "/tmp/out/",
+    });
+    expect(decision.allow).toBe(false);
+  });
+});
+
 describe("gateToolInvocation — exhaustive routing", () => {
   it.each<[string, ToolOperation]>([
     ["fs.read", { kind: "fs.read", path: "/tmp/r.txt" }],

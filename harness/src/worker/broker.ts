@@ -35,6 +35,22 @@ export type ToolOperation =
  * throws. The returned `reason` (on deny) is advisory, populated for
  * observability — the dispatcher surfaces it in the JSON-RPC error
  * `data` field so callers can debug their capability declaration.
+ *
+ * **Allowlist matching contract (v1).** All allowlist axes use
+ * **exact-string** match (`Array.includes`):
+ *   - `fs.read` / `fs.write`: `op.path` must equal an entry **byte-for-byte**.
+ *     `'/tmp/data'` does NOT match `'/tmp/data/'` (trailing slash). No
+ *     `path.normalize`, no realpath resolution, no prefix matching.
+ *     Callers MUST normalize paths before declaring AND tools MUST request
+ *     the exact same string the declaration carries.
+ *   - `net.allow`: matches either `'host:port'` (verbatim) or bare `'host'`
+ *     when a port is requested (host-open declaration). No DNS resolution,
+ *     no CIDR, no wildcards.
+ *   - `env.allow`: variable name must match an entry verbatim.
+ *
+ * Normalization / glob / prefix support is intentionally deferred until
+ * a real tool needs it; keeping v1 dumb avoids a security policy that
+ * silently disagrees between declaration and enforcement.
  */
 export function gateToolInvocation(
   declaration: CapabilityDeclaration,

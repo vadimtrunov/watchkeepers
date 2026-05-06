@@ -40,6 +40,13 @@ export const WORKER_CAPABILITY_ERROR_CODE = -32003 as const;
  * list means "deny all on this axis"). `.strict()` rejects any
  * additional top-level / sub-object keys so the wire contract stays
  * versioned through explicit schema changes.
+ *
+ * **Matching is exact-string** on every allowlist (v1). `'/tmp/data'`
+ * is NOT the same as `'/tmp/data/'`; `'host'` is not the same as
+ * `'host:443'`. Callers MUST normalize paths before declaring, and
+ * tools MUST request the exact same string the declaration carries.
+ * See {@link import("./worker/broker.js").gateToolInvocation} for the
+ * full allowlist matching contract.
  */
 export const CapabilityDeclarationSchema = z
   .object({
