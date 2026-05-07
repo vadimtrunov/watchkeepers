@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   __resetActiveToolsetForTests,
+  getActiveAgentID,
   getActiveToolset,
   setActiveToolset,
 } from "../src/manifest.js";
@@ -94,6 +95,45 @@ describe("setManifest JSON-RPC method", () => {
 
   it("rejects undefined params with InvalidParams (-32602)", async () => {
     await expect(callSetManifest(undefined)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+    });
+  });
+
+  // ── M5.5.d.b: agentID extension ─────────────────────────────────────
+
+  it("SetManifest_AcceptsAgentID_Persists", async () => {
+    const result = await callSetManifest({ toolset: ["remember"], agentID: "agent-7" });
+    expect(result).toEqual({ ok: true });
+    expect(getActiveToolset()).toEqual(["remember"]);
+    expect(getActiveAgentID()).toBe("agent-7");
+  });
+
+  it("SetManifest_OmitsAgentID_StillWorks", async () => {
+    // Backward-compat: existing callers omit agentID. The handler
+    // must accept the call and leave activeAgentID undefined so
+    // built-in tools requiring an identity fail with
+    // ToolUnauthorized rather than silently using a stale id.
+    const result = await callSetManifest({ toolset: ["echo"] });
+    expect(result).toEqual({ ok: true });
+    expect(getActiveToolset()).toEqual(["echo"]);
+    expect(getActiveAgentID()).toBeUndefined();
+  });
+
+  it("clears agentID when a subsequent setManifest call omits it", async () => {
+    // First call: identity is set.
+    await callSetManifest({ toolset: ["a"], agentID: "agent-9" });
+    expect(getActiveAgentID()).toBe("agent-9");
+
+    // Second call: identity is omitted — must clear, not retain.
+    // (Otherwise a session reset would leave a stale agentID
+    //  associated with a fresh toolset.)
+    await callSetManifest({ toolset: ["b"] });
+    expect(getActiveToolset()).toEqual(["b"]);
+    expect(getActiveAgentID()).toBeUndefined();
+  });
+
+  it("rejects a non-string agentID with InvalidParams (-32602)", async () => {
+    await expect(callSetManifest({ toolset: [], agentID: 42 })).rejects.toMatchObject({
       code: JsonRpcErrorCode.InvalidParams,
     });
   });
