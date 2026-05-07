@@ -346,6 +346,12 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
     - [x] **M5.5.d.b** Register Remember as a built-in harness tool: extend invokeTool dispatch with a 'builtin' kind that routes to the notebook.remember method, gated by the M5.5.b.a manifest ACL
     - [x] **M5.5.d.c** Manifest projection + end-to-end test: surface 'remember' in manifest_version.tools projection, assert ACL allow/deny, and add an integration test that drives invokeTool('remember', {category, content}) through to a per-agent SQLite notebook.DB row
 - [ ] **M5.6** **Reflection lifecycle** — auto-reflection on tool error writes a `lesson` entry with `evidence_log_ref`, `tool_version`, and `active_after = now() + 24h` (visible but not auto-injected during the cooling-off window); on tool hot-load, lessons tied to a superseded version are flagged `needs_review` and excluded from auto-injection until reviewed (never deleted).
+  - [ ] **M5.6.a** Add needs_review column + cooling-off/exclusion predicates in notebook.DB
+  - [ ] **M5.6.b** Auto-reflect on tool error: compose lesson Entry and write via Remember
+  - [ ] **M5.6.c** Emit lesson_learned to Keeper's Log with evidence_log_ref linkage
+  - [ ] **M5.6.d** Gate auto-injection in BuildTurnRequest by active_after and needs_review
+  - [ ] **M5.6.e** Boot-time hot-load check: flag lessons on superseded tool_version as needs_review
+  - [ ] **M5.6.f** E2E verification: forced tool error produces lesson + cooling-off injection behavior
 - [ ] **M5.7** **Provider plumbing** — Claude Code credentials flow through the secrets interface (no `ANTHROPIC_API_KEY` references in core); a dummy `FakeProvider` passes the same harness tests as the real provider, proving swap-without-touching-core.
 
 **Artifacts**: Go `runtime/` and `llm/` packages, TS `harness/` package, JSON-RPC contract doc, provider conformance test harness.
