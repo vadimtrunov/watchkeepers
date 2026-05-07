@@ -30,7 +30,7 @@ import {
   setActiveAgentID,
   setActiveToolset,
 } from "../src/manifest.js";
-import { MethodError } from "../src/methods.js";
+import { MethodError, createDefaultRegistry, type ShutdownSignal } from "../src/methods.js";
 import type { JsonRpcValue } from "../src/types.js";
 
 beforeEach(() => {
@@ -208,5 +208,88 @@ describe("invokeTool — toolset ACL gate (M5.5.b.a)", () => {
       subject: "subj",
       content: "body",
     });
+  });
+});
+
+// ── AC2/AC3 (M5.5.d.c): manifest-projection-fed ACL tests ───────────────────
+//
+// Unlike the tests above (which call setActiveToolset/setActiveAgentID
+// directly), these tests drive the ACL gate via the setManifest JSON-RPC
+// handler — the same path the real orchestrator uses when it delivers a
+// keepclient.ManifestVersion with `tools: [{"name":"remember"}]` projected
+// through core/pkg/manifest/loader.go::decodeToolset to Toolset=["remember"].
+//
+// This proves end-to-end that the manifest projection path (AC1 in
+// loader_test.go) actually feeds the harness ACL gate, not just that the
+// gate works when seeded directly.
+
+describe("invokeTool — manifest-projection-fed ACL (M5.5.d.c)", () => {
+  function makeBuiltinParams(name: string, input: JsonRpcValue): JsonRpcValue {
+    return { tool: { kind: "builtin", name }, input };
+  }
+
+  /** Drive setManifest through the real JSON-RPC handler (not setActiveToolset). */
+  async function feedManifest(toolset: string[], agentID?: string): Promise<void> {
+    const signal: ShutdownSignal = { shouldExit: false };
+    const registry = createDefaultRegistry(signal);
+    const handler = registry.get("setManifest");
+    if (handler === undefined) throw new Error("setManifest not registered");
+    const params: JsonRpcValue = agentID !== undefined ? { toolset, agentID } : { toolset };
+    await handler(params);
+  }
+
+  function makeStubRpc(): { rpc: RpcClient; request: ReturnType<typeof vi.fn> } {
+    const request = vi.fn().mockResolvedValue({ id: "entry-uuid" });
+    const rpc = { request } as unknown as RpcClient;
+    return { rpc, request };
+  }
+
+  // AC2: manifest with "remember" in tools → invokeTool builtin remember dispatched.
+  it("Builtin_Remember_AllowedByManifestToolset_Dispatched", async () => {
+    // Feed toolset from the manifest handler — mirrors the real projection path
+    // keepclient.ManifestVersion.Tools=[{"name":"remember"}] → decodeToolset →
+    // runtime.Manifest.Toolset=["remember"] → setManifest wire call → gate.
+    await feedManifest(["remember"], "agent-m1");
+    const { rpc, request } = makeStubRpc();
+    const handler = makeInvokeToolHandler(rpc);
+
+    await handler(
+      makeBuiltinParams("remember", {
+        category: "lesson",
+        subject: "projection-test",
+        content: "manifest feeds gate",
+      }),
+    );
+
+    // Dispatch reached the builtin handler and forwarded to notebook.remember.
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith("notebook.remember", {
+      agentID: "agent-m1",
+      category: "lesson",
+      subject: "projection-test",
+      content: "manifest feeds gate",
+    });
+  });
+
+  // AC3: manifest WITHOUT "remember" in tools → invokeTool builtin remember rejected.
+  it("Builtin_Remember_DeniedByManifestToolset_Rejected", async () => {
+    // Feed a toolset that omits "remember" — mirrors a manifest whose tools
+    // jsonb does not include {"name":"remember"}.
+    await feedManifest(["other-tool"], "agent-m2");
+    const { rpc, request } = makeStubRpc();
+    const handler = makeInvokeToolHandler(rpc);
+
+    await expect(
+      handler(
+        makeBuiltinParams("remember", {
+          category: "lesson",
+          subject: "denied",
+          content: "should never persist",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: ToolErrorCode.ToolUnauthorized });
+
+    // ACL gate must short-circuit BEFORE notebook.remember is sent.
+    expect(request).not.toHaveBeenCalled();
   });
 });

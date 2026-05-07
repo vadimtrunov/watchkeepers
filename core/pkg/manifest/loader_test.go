@@ -458,6 +458,34 @@ func TestLoadManifest_ProjectsNotebookRecallFields(t *testing.T) {
 	}
 }
 
+// TestLoadManifest_ProjectsRememberInToolset asserts M5.5.d.c AC1: a
+// [keepclient.ManifestVersion] whose Tools jsonb contains `{"name":"remember"}`
+// projects to Toolset = ["remember"] on [runtime.Manifest]. This fixture makes
+// the projection of the "remember" builtin tool name explicit as the upstream
+// source fed into the harness ACL gate (M5.5.d.b) and e2e tests (M5.5.d.c).
+//
+// "remember" is a plain string entry — no special decode logic vs. any other
+// name — so this test is a named regression guard rather than a new code path.
+// It documents that decodeToolset projects the builtin tool name correctly and
+// can be used as the canonical fixture reference in downstream ACL/e2e tests.
+func TestLoadManifest_ProjectsRememberInToolset(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`[{"name":"remember"}]`),
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(got.Toolset) != 1 || got.Toolset[0] != "remember" {
+		t.Errorf("Toolset = %v, want [\"remember\"]", got.Toolset)
+	}
+}
+
 // TestLoadManifest_NotebookRecallFields_ZeroPassThrough asserts M5.5.c.b
 // AC4: zero values from [keepclient.ManifestVersion] project to zero on
 // [runtime.Manifest] — no transformation, no default substitution.
