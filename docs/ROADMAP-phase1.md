@@ -320,10 +320,10 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M5.5.a** Harness boot fetches Manifest via keepclient and templates personality/language into system prompt
   - [ ] **M5.5.b** Apply Manifest toolset ACLs, model selection, and autonomy bounds in harness loop
     - [x] **M5.5.b.a** Decode Manifest toolset jsonb and enforce ACLs at harness InvokeTool gate
-    - [ ] **M5.5.b.b** Project Manifest model field into LLMProvider config at runtime boot
+    - [x] **M5.5.b.b** Project Manifest model field into LLMProvider config at runtime boot
       - [x] **M5.5.b.b.a** Add manifest_version.model column + server response projection
       - [x] **M5.5.b.b.b** Extend keepclient.ManifestVersion with Model field + decoder tests
-      - [ ] **M5.5.b.b.c** Project Model via manifest loader into LLMProvider boot config
+      - [x] **M5.5.b.b.c** Project Model via manifest loader into LLMProvider boot config
     - [ ] **M5.5.b.c** Decode authority_matrix and apply autonomy bounds at approval gates
   - [ ] **M5.5.c** Open per-agent SQLite Notebook on boot and auto-recall top-K entries with relevance threshold
   - [ ] **M5.5.d** Expose Remember as a built-in harness tool writing to per-agent Notebook

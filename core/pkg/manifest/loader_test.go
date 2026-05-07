@@ -175,6 +175,51 @@ func TestLoadManifest_FetcherErrorPropagated(t *testing.T) {
 	}
 }
 
+// TestLoadManifest_ProjectsModel asserts M5.5.b.b.c AC2: a non-empty
+// [keepclient.ManifestVersion.Model] copies verbatim onto
+// [runtime.Manifest.Model] — no transformation, no default substitution.
+func TestLoadManifest_ProjectsModel(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Model:        "claude-sonnet-4",
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.Model != "claude-sonnet-4" {
+		t.Errorf("Model = %q, want %q", got.Model, "claude-sonnet-4")
+	}
+}
+
+// TestLoadManifest_ModelEmptyString_ProjectsVerbatim asserts M5.5.b.b.c
+// AC3: an empty [keepclient.ManifestVersion.Model] propagates as the empty
+// string — the loader does NOT supply a default. The empty-Model rejection
+// gate is downstream in [llm.composeBaseFields] (returns
+// [llm.ErrInvalidManifest]); see [TestLoadManifest_ChainsThroughBuildCompleteRequest]
+// for the round-trip proof.
+func TestLoadManifest_ModelEmptyString_ProjectsVerbatim(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Model:        "",
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.Model != "" {
+		t.Errorf("Model = %q, want empty (loader supplies no default)", got.Model)
+	}
+}
+
 // TestLoadManifest_DecodesToolsetNames asserts the M5.5.b.a happy path
 // (AC1): the loader decodes mv.Tools from `[{"name":"echo"},{"name":"sum"}]`
 // into Toolset = ["echo", "sum"].

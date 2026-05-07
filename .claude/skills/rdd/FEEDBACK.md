@@ -1808,3 +1808,29 @@ None. Process scaled well to a small, focused mirror PR.
 - Total wall time from /rdd to merge: pending — Phase 5b+
 
 ---
+
+## 2026-05-07 — M5.5.b.b.c: Project Model via manifest loader into LLMProvider boot config
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+
+Phase 1+2 fold-in for a re-decomposed leaf. M5.5.b.b.c's planner verdict (`fits` immediately, no blockers — both siblings merged) and explore enumeration (all needed file:line refs in one pass) converged in ~1 minute. No need to split Phase 1 and Phase 2 across ticks. Pattern: when a leaf is the third decomposition of a labeled M-id and prior two siblings just merged, planner+explore consumes ~20 KB tokens and ~1 min agent time.
+
+### What wasted effort
+
+None. Phase 4 iter 1 reviewer noticed the loader's struct initialiser walks fields in `runtime.Manifest` declaration order — a gratuitous-but-cheap consistency check preventing diff-noise on future field additions. Worth promoting into executor brief as a "preserve field order" rubric line.
+
+### Suggested skill changes
+
+- Add "preserve struct-field initialization order matching declaration order" as an explicit rubric line in `references/agent-briefs/executor.md` §Go code style for field initializers, with an example (manifest initialiser walking AgentID/SystemPrompt/Personality/Language/Model/Toolset in struct order).
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending — Phase 5b+
+
+---

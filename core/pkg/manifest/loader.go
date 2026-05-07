@@ -65,9 +65,13 @@ type ManifestFetcher interface {
 // Toolset is decoded from mv.Tools via [decodeToolset]: a JSON array of
 // `{"name": string}` entries projects to []string of names; null/empty
 // arrays produce a nil Toolset (the deny-all default per
-// runtime.go:99-103). AuthorityMatrix, Model, Autonomy, and Metadata are
-// not set by this loader; their wiring lands in M5.5.b.b/c alongside
-// authority/autonomy enforcement.
+// runtime.go:99-103). Model is copied verbatim from
+// [keepclient.ManifestVersion.Model] onto [runtime.Manifest.Model]; the
+// loader does NOT supply a default — empty Model propagates as the empty
+// string and downstream [llm.composeBaseFields] is the gate that rejects
+// it with [llm.ErrInvalidManifest]. AuthorityMatrix, Autonomy, and
+// Metadata are not set by this loader; their wiring lands in M5.5.b.c
+// alongside authority/autonomy enforcement.
 func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (runtime.Manifest, error) {
 	if manifestID == "" {
 		return runtime.Manifest{}, runtime.ErrInvalidManifest
@@ -88,6 +92,7 @@ func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (r
 		SystemPrompt: composeSystemPrompt(mv.SystemPrompt, mv.Personality, mv.Language),
 		Personality:  mv.Personality,
 		Language:     mv.Language,
+		Model:        mv.Model,
 		Toolset:      toolset,
 	}, nil
 }
