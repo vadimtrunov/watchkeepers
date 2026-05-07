@@ -78,3 +78,35 @@ func TestLoadManifest_AuthorityAutonomyChain(t *testing.T) {
 		t.Errorf("Autonomy = %q, want %q", m.Autonomy, runtime.AutonomyAutonomous)
 	}
 }
+
+// TestLoadManifest_NotebookRecallChain asserts M5.5.c.b AC4+AC5: the
+// NotebookTopK and NotebookRelevanceThreshold fields round-trip from the
+// wire-format [keepclient.ManifestVersion] through [LoadManifest] onto
+// [runtime.Manifest.NotebookTopK] and
+// [runtime.Manifest.NotebookRelevanceThreshold]. This is the
+// integration-style proof that the loader's projection slots are wired
+// through the struct initialiser; a regression in either slot fails this
+// test, not the unit tests on either side.
+//
+// Mirrors the M5.5.b.c.c.a chain test pattern.
+func TestLoadManifest_NotebookRecallChain(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:                 "m",
+		SystemPrompt:               "You are X.",
+		NotebookTopK:               42,
+		NotebookRelevanceThreshold: 0.6,
+	}}
+
+	m, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if m.NotebookTopK != 42 {
+		t.Errorf("NotebookTopK = %d, want 42", m.NotebookTopK)
+	}
+	if m.NotebookRelevanceThreshold != 0.6 {
+		t.Errorf("NotebookRelevanceThreshold = %v, want 0.6", m.NotebookRelevanceThreshold)
+	}
+}
