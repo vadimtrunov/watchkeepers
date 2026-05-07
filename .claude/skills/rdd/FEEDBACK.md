@@ -2071,3 +2071,16 @@ The second-tier Edit-after-merge race repeated: writer agent on M5.5.c.d.a's squ
 - Total wall time from /rdd to merge: pending
 
 ---
+
+## M5.5.c.d.b.b (2026-05-07)
+
+**Phase 4 iter 1**: 0 blocker / 3 important / 4 nit. Important: (1) negative TopK falls through to recall instead of disabled — fix `<=0`; (2) godoc claims `NotebookRelevanceThreshold` consumed but unused — implement post-filter; (3) nil-embedder branch missing test. Iter 2 fixer (5388b61) addressed all 3. Iter 3 re-review: 0/0/0 converged.
+
+**What worked**: Two-tier decomposition (M5.5.c.d → b.a/b.b) was clean. Each PR converged in 1–3 iterations. Reviewer iter 1 caught real contract drift (`NotebookRelevanceThreshold` claimed but unused) plus semantic defect (`==0` not `<=0`) — both undetected by 9 tests because fixtures didn't exercise negative-TopK/non-zero-threshold edges. High-value review confirms bounded-loop ceiling of 5 iterations is right shape.
+
+**What wasted effort**: Iter-1 important #2 (contract drift on `NotebookRelevanceThreshold`) caused by ambiguous TASK AC. TASK said "calls notebook.DB.Recall(topK, threshold)" but actual API has no threshold parameter — executor inherited planner wording verbatim. Planner-level audit ("which method-name + parameter list does the task ACTUALLY call?") would have surfaced drift pre-TDD. Cost: one fixer pass + 150 LOC of threshold post-filter test scaffolding.
+
+**Suggested process change**: In planner-phase verification, for any sub-item claiming to call downstream API with N parameters, verify the API actually accepts N parameters (not N-1 or N+1). Ambiguity pre-Gate-1 saves a Phase-4 cycle.
+
+**Metrics**: Review iterations: 3. PR-fix iterations: 0. Operator interventions outside gates: 0. Executor commits: 91d1c0c (original) + 5388b61 (fixer). Final: 3 files / +749 LOC.
+
