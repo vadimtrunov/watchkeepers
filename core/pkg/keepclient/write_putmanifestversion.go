@@ -95,6 +95,16 @@ type PutManifestVersionRequest struct {
 	// "supervised". Server and DB CHECK constraint (migration 015)
 	// enforce the same enum.
 	Autonomy string `json:"autonomy,omitempty"`
+	// NotebookTopK is the optional notebook recall top-K count. When
+	// non-zero, must be in [1, 100]; zero round-trips as SQL NULL (treated
+	// as "unset"; omitempty drops it from the wire). Server and DB CHECK
+	// constraint (migration 016) enforce the same range.
+	NotebookTopK int `json:"notebook_top_k,omitempty"`
+	// NotebookRelevanceThreshold is the optional notebook recall relevance
+	// threshold. When non-zero, must be in (0, 1]; zero round-trips as SQL
+	// NULL (treated as "unset"; omitempty drops it from the wire). Server
+	// and DB CHECK constraint (migration 016) enforce the same range.
+	NotebookRelevanceThreshold float64 `json:"notebook_relevance_threshold,omitempty"`
 }
 
 // PutManifestVersionResponse mirrors the server's
@@ -144,6 +154,18 @@ func (c *Client) PutManifestVersion(ctx context.Context, manifestID string, req 
 	// the network hit so the caller sees ErrInvalidRequest, not a 400 from
 	// the server.
 	if _, ok := manifestAutonomyAllowed[req.Autonomy]; !ok {
+		return nil, ErrInvalidRequest
+	}
+	// NotebookTopK mirrors the server's CHECK range (migration 016):
+	// [0, 100] where 0 means "unset". Out-of-range short-circuits before
+	// the network hit.
+	if req.NotebookTopK < 0 || req.NotebookTopK > 100 {
+		return nil, ErrInvalidRequest
+	}
+	// NotebookRelevanceThreshold mirrors the server's CHECK range
+	// (migration 016): [0, 1] where 0 means "unset". Out-of-range
+	// short-circuits before the network hit.
+	if req.NotebookRelevanceThreshold < 0 || req.NotebookRelevanceThreshold > 1 {
 		return nil, ErrInvalidRequest
 	}
 	var out PutManifestVersionResponse

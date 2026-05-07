@@ -108,7 +108,7 @@ func TestPutManifestVersion_OmitsEmptyOptionalFields(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PutManifestVersion: %v", err)
 	}
-	for _, k := range []string{`"tools"`, `"authority_matrix"`, `"knowledge_sources"`, `"personality"`, `"language"`, `"autonomy"`} {
+	for _, k := range []string{`"tools"`, `"authority_matrix"`, `"knowledge_sources"`, `"personality"`, `"language"`, `"autonomy"`, `"notebook_top_k"`, `"notebook_relevance_threshold"`} {
 		if strings.Contains(string(rawBody), k) {
 			t.Errorf("body included %s field; got %s", k, rawBody)
 		}
@@ -580,5 +580,154 @@ func TestPutManifestVersion_AutonomyInvalid_RejectedBeforeHTTP(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&hits); got != 0 {
 		t.Errorf("network hits = %d, want 0", got)
+	}
+}
+
+// TestPutManifestVersionRequest_OmitsEmptyNotebookRecall asserts that
+// marshalling a request with both NotebookTopK and
+// NotebookRelevanceThreshold at zero produces JSON with neither key
+// (M5.5.c.b AC2 — omitempty drops zero numerics).
+func TestPutManifestVersionRequest_OmitsEmptyNotebookRecall(t *testing.T) {
+	t.Parallel()
+
+	req := PutManifestVersionRequest{
+		VersionNo:    1,
+		SystemPrompt: "sp",
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, k := range []string{`"notebook_top_k"`, `"notebook_relevance_threshold"`} {
+		if strings.Contains(string(raw), k) {
+			t.Errorf("body included %s field; got %s", k, raw)
+		}
+	}
+}
+
+// TestPutManifestVersion_NotebookTopKOutOfRange_PreHTTP asserts that
+// NotebookTopK = 101 and = -1 are rejected with ErrInvalidRequest before
+// any HTTP call (M5.5.c.b AC2). The httptest recorder asserts zero
+// recorded requests.
+func TestPutManifestVersion_NotebookTopKOutOfRange_PreHTTP(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		topK int
+	}{
+		{"above_max", 101},
+		{"negative", -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var hits int32
+			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				atomic.AddInt32(&hits, 1)
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+			_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+				VersionNo:    1,
+				SystemPrompt: "sp",
+				NotebookTopK: tc.topK,
+			})
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("err = %v, want ErrInvalidRequest", err)
+			}
+			if got := atomic.LoadInt32(&hits); got != 0 {
+				t.Errorf("network hits = %d, want 0", got)
+			}
+		})
+	}
+}
+
+// TestPutManifestVersion_NotebookRelevanceThresholdOutOfRange_PreHTTP asserts
+// that NotebookRelevanceThreshold = 1.5 and = -0.1 are rejected with
+// ErrInvalidRequest before any HTTP call (M5.5.c.b AC2).
+func TestPutManifestVersion_NotebookRelevanceThresholdOutOfRange_PreHTTP(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		threshold float64
+	}{
+		{"above_max", 1.5},
+		{"negative", -0.1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var hits int32
+			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				atomic.AddInt32(&hits, 1)
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+			_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+				VersionNo:                  1,
+				SystemPrompt:               "sp",
+				NotebookRelevanceThreshold: tc.threshold,
+			})
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("err = %v, want ErrInvalidRequest", err)
+			}
+			if got := atomic.LoadInt32(&hits); got != 0 {
+				t.Errorf("network hits = %d, want 0", got)
+			}
+		})
+	}
+}
+
+// TestPutManifestVersion_NotebookRecallBoundaries_Accepted asserts that
+// the boundary values NotebookTopK ∈ {0, 1, 100} and
+// NotebookRelevanceThreshold ∈ {0, 0.5, 1.0} all pass pre-HTTP
+// validation and reach the server (M5.5.c.b AC2).
+func TestPutManifestVersion_NotebookRecallBoundaries_Accepted(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		topK      int
+		threshold float64
+	}{
+		{"zero_both", 0, 0},
+		{"topk_1", 1, 0},
+		{"topk_100", 100, 0},
+		{"threshold_half", 0, 0.5},
+		{"threshold_one", 0, 1.0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var hits int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				atomic.AddInt32(&hits, 1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, `{"id":"row-1"}`)
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+			_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+				VersionNo:                  1,
+				SystemPrompt:               "sp",
+				NotebookTopK:               tc.topK,
+				NotebookRelevanceThreshold: tc.threshold,
+			})
+			if err != nil {
+				t.Fatalf("PutManifestVersion: %v", err)
+			}
+			if got := atomic.LoadInt32(&hits); got != 1 {
+				t.Errorf("network hits = %d, want 1", got)
+			}
+		})
 	}
 }
