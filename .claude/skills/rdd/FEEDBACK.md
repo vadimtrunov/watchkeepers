@@ -1989,3 +1989,30 @@ Minimal. The `--auto resume` semantics are mildly under-specified for the case "
 - Total wall time from /rdd to merge: pending
 
 ---
+
+## 2026-05-07 — M5.5.c.c: Open per-agent Notebook on harness boot; close on terminate
+
+**PR**: pending
+**Phases with incidents**: 3
+
+### What worked
+
+The planner correctly reframed the ROADMAP title's "harness boot" as Go-side runtime lifecycle rather than TS-side notebook code. Without that reinterpretation, the executor would have hunted for non-existent TS-side notebook integration and stalled. First non-clone PR in the M5.5.c stream — design + TDD per AC produced clean code that converged Phase 4 in 1 iteration with zero comments.
+
+### What wasted effort
+
+Phase 3 executor exited silently on its first turn with the message "The race test is still running. Let me wait for it to finish." but did not actually wait, just returned. The orchestrator caught this via Hard rule 5 reminder hooks and recovered by sending a follow-up SendMessage to the same agentId requesting the full report. The recovery cost: one extra agent turn (~90s) and one orchestrator action. The premature exit is structurally similar to the silent-exit class documented in FEEDBACK 2026-04-22/2026-05-05 but with a twist: the agent ITSELF did the silent exit (not the orchestrator). Hard rule 5 hooks fire on Agent return, so recovery worked; but an orchestrator-side defense for "agent returned without the required final-report fields" would tighten the loop.
+
+### Suggested skill changes
+
+- In `references/agent-briefs/executor.md` §"Mode — build (Phase 3) Required final report", strengthen the wording: "If a long-running command is in flight (e.g. `-race` test that may take >60s), wait for it before returning. Do NOT return with 'still running' as the final message — the orchestrator interprets a return as 'phase complete'."
+- Optionally: add an orchestrator-side check that the executor's return body contains the required structured fields (commit SHAs, exit codes, LOC totals) and re-prompts via SendMessage if missing.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0 (Phase 6 pending)
+- Operator interventions outside of gates: 0 (orchestrator self-recovered the executor silent-exit)
+- Total wall time from /rdd to merge: pending
+
+---
