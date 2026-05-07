@@ -382,3 +382,81 @@ func TestManifestVersion_MarshalOmitsEmptyModel(t *testing.T) {
 		t.Errorf("body included model key; got %s", raw)
 	}
 }
+
+// TestGetManifest_DecodesAutonomy asserts that a server response carrying
+// `autonomy:"autonomous"` decodes into [ManifestVersion.Autonomy] verbatim
+// (M5.5.b.c.b). The server emits this field since M5.5.b.c.a; the client
+// merely mirrors the wire shape.
+func TestGetManifest_DecodesAutonomy(t *testing.T) {
+	t.Parallel()
+
+	const wantAutonomy = "autonomous"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "id":"r","manifest_id":"m","version_no":1,
+            "system_prompt":"sp","tools":null,
+            "authority_matrix":null,"knowledge_sources":null,
+            "autonomy":"`+wantAutonomy+`",
+            "created_at":"2026-05-02T12:00:00Z"
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	mv, err := c.GetManifest(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if mv.Autonomy != wantAutonomy {
+		t.Errorf("Autonomy = %q, want %q", mv.Autonomy, wantAutonomy)
+	}
+}
+
+// TestGetManifest_AutonomyOmitted_EmptyString asserts that a server response
+// without an `autonomy` key decodes into the zero value (empty string) —
+// symmetric with the omitempty handling on Personality/Language/Model.
+func TestGetManifest_AutonomyOmitted_EmptyString(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "id":"r","manifest_id":"m","version_no":1,
+            "system_prompt":"","tools":null,
+            "authority_matrix":null,"knowledge_sources":null,
+            "created_at":"2026-05-02T12:00:00Z"
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	mv, err := c.GetManifest(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if mv.Autonomy != "" {
+		t.Errorf("Autonomy = %q, want empty string", mv.Autonomy)
+	}
+}
+
+// TestManifestVersion_MarshalOmitsEmptyAutonomy asserts that marshaling a
+// [ManifestVersion] whose Autonomy is the zero value never emits an
+// `autonomy` key on the wire — the `omitempty` tag must hold.
+func TestManifestVersion_MarshalOmitsEmptyAutonomy(t *testing.T) {
+	t.Parallel()
+
+	mv := ManifestVersion{
+		ID:         "r",
+		ManifestID: "m",
+		VersionNo:  1,
+		CreatedAt:  "2026-05-02T12:00:00Z",
+	}
+	raw, err := json.Marshal(mv)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(raw), `"autonomy"`) {
+		t.Errorf("body included autonomy key; got %s", raw)
+	}
+}

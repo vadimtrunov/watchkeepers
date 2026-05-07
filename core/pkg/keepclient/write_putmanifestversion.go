@@ -38,6 +38,19 @@ const clientPersonalityMaxRunes = 1024
 // past a byte-based cap.
 const manifestModelMaxRunes = 100
 
+// manifestAutonomyAllowed mirrors the server-side enum CHECK constraint
+// from migration 015 (`autonomy IN ('supervised','autonomous')`) plus the
+// NULL/empty-string case (server treats NULL as the runtime default of
+// "supervised"). Membership-test set so a future enum extension stays a
+// single-line edit.
+//
+//nolint:gochecknoglobals // intentional package-scoped immutable allowed-set.
+var manifestAutonomyAllowed = map[string]struct{}{
+	"":           {},
+	"supervised": {},
+	"autonomous": {},
+}
+
 // PutManifestVersionRequest is the typed request body for
 // [Client.PutManifestVersion]. Field names and `omitempty` placement mirror
 // the server's `putManifestVersionRequest` shape verbatim (handlers_write.go).
@@ -76,6 +89,12 @@ type PutManifestVersionRequest struct {
 	// to mirror SQL char_length semantics. Server and DB CHECK constraint
 	// (migration 014) enforce the same cap.
 	Model string `json:"model,omitempty"`
+	// Autonomy is the optional manifest autonomy level. When non-empty,
+	// must be one of {"supervised", "autonomous"} — the empty string
+	// round-trips as SQL NULL and the server defaults the runtime to
+	// "supervised". Server and DB CHECK constraint (migration 015)
+	// enforce the same enum.
+	Autonomy string `json:"autonomy,omitempty"`
 }
 
 // PutManifestVersionResponse mirrors the server's
@@ -118,6 +137,13 @@ func (c *Client) PutManifestVersion(ctx context.Context, manifestID string, req 
 	// Boundary at exactly 100 is accepted; rune-count semantics so a
 	// non-ASCII payload cannot smuggle past a byte-based cap.
 	if utf8.RuneCountInString(req.Model) > manifestModelMaxRunes {
+		return nil, ErrInvalidRequest
+	}
+	// Autonomy mirrors the server's CHECK enum (migration 015): empty,
+	// "supervised", or "autonomous". Anything else short-circuits before
+	// the network hit so the caller sees ErrInvalidRequest, not a 400 from
+	// the server.
+	if _, ok := manifestAutonomyAllowed[req.Autonomy]; !ok {
 		return nil, ErrInvalidRequest
 	}
 	var out PutManifestVersionResponse

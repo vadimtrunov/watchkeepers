@@ -1860,3 +1860,28 @@ Estimation undershot wire-field cost. M5.5.b.c.a landed at 384 LOC (24% over tar
 - Total wall time from /rdd to merge: pending (Phase 5a in progress)
 
 ---
+## 2026-05-07 — M5.5.b.c.b: Extend keepclient.ManifestVersion with Autonomy field + tests
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 (Phase 4 iteration 1)
+
+### What worked
+
+Folding Phase 1 + 2 on near-clones continues to pay off: the precedent (M5.5.b.b.b, commit `2612b2c`) gave every file:line anchor, so planner skipped straight to executor with seven acceptance criteria and a seven-step plan. Executor converged in two TDD iterations; Phase 4 reviewer caught the aggregator-test gap (AC6a) immediately, and the one-line fixer was dispositive. Cost-benefit on the fixer iteration is right: 3 ticks total (iter 1 → fixer → iter 2 converged).
+
+### What wasted effort
+
+None. The bounded-loop severity contract held: the `important` flagged in Phase 4 iteration 1 was a genuine semantic gap (omitted-key slice missing `"autonomy"` at line 111), and the 3 nits correctly deferred to follow-up.
+
+### Suggested skill changes
+
+- None at this time. Cascade the "aggregator-test AC gap" pattern from this TASK into the executor brief for future wire-field PRs: add a checkbox-style verification step to verify aggregator test covers the field and add to assertion slice if missing.
+
+### Metrics
+
+- Review iterations: 2 (iter 1 flagged important, iter 2 converged)
+- PR-fix iterations: 1 (single-line fixer)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to converge: approximately 14 minutes
+
+---
