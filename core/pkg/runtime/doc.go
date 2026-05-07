@@ -178,6 +178,17 @@
 // matched the M5.4.a reasons keep working; new callers can opt in
 // by configuring the rlimit fields and matching the new constants.
 //
+// # Notebook supervisor seam
+//
+// [NotebookSupervisor] is the per-agent [notebook.DB] lifecycle owner
+// shipped by M5.5.c.c. It exposes Open/Lookup/Close on a `sync.Mutex`-
+// guarded registry; the eventual concrete [AgentRuntime] calls Open
+// from its `Start` impl and Close from its `Terminate` impl, while
+// the M5.5.c.d auto-recall layer calls Lookup per turn. The supervisor
+// is callable directly so tests and harness-side integration code can
+// drive it without a runtime in front. Wiring into a concrete runtime
+// is deferred to M5.5.c.d / M6.
+//
 // # Out of scope (deferred)
 //
 //   - Concrete runtime implementations — the Claude-Code-via-TS-harness
