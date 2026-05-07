@@ -2135,3 +2135,22 @@ Phase 4 iter 2: fixer addressed all 5 in one commit; zero new defects in iter 3 
 ### Metrics
 Review iterations: 3 (initial + fixer + re-review); PR-fix iterations: 0 (pending Phase 6 merge); operator interventions outside gates: 0; total wall time from /rdd to merge: pending.
 
+
+## 2026-05-07 — M5.5.d.b: Register Remember as a built-in harness tool
+
+**PR**: [#81](https://github.com/vadimtrunov/watchkeepers/pull/81)
+**Phases with incidents**: Phase 4 iter 1 (1 important — out-of-scope wiring caught without test).
+
+### What worked
+
+**Per-method dispatch on the seam was small and clean**: the ACL gate from M5.5.b.a continues to apply unchanged for builtins. No security regression. ~600 LOC for a new tool kind + first builtin + bidirectional wiring is acceptable for a single PR.
+
+**Reviewer caught the out-of-scope wiring's missing test**: the executor wired `looksLikeResponse` into `runHarness` because `RpcClient` had to land somewhere, but didn't write a focused unit test for the classifier. iter 1 caught it; iter 2 fixer extracted the function into a unit-testable export and added a 6-case table test. Phase 4 reviewer's value-add is highest when the executor lands necessary side-effects without recognizing them as testable surface.
+
+### What wasted effort
+
+**Out-of-scope wiring decision was implicit**: M5.5.d.a.a's TASK Scope explicitly deferred `runHarness` integration to M6 ("This PR introduces the package but does NOT have to wire it into runtime/runtime.go — the package can be tested standalone via in-memory pipes"). The executor of M5.5.d.b correctly identified that `RpcClient` had to land in `runHarness` to thread it into the dispatcher, but didn't surface this as a TASK-Scope expansion in the executor's report. A clearer "TASK assumes M6 wiring is unbuilt; doing the minimum here" check would have prompted explicit acknowledgement.
+
+### Suggested skill changes
+
+In `references/agent-briefs/executor.md`, recommend: when the executor recognizes that a sibling-deferred integration is needed RIGHT NOW (because dispatch requires it), the executor MUST surface this in their final report as a "scope expansion" line item with rationale. The reviewer can then evaluate whether the expansion is justified or warrants halt-for-decomposition.

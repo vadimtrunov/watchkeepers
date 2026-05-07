@@ -22,8 +22,10 @@
 
 import ivm from "isolated-vm";
 
+import { BuiltinAgentIDMissing, getBuiltinHandler } from "./builtinTools.js";
 import { CapabilityDeclarationSchema, type CapabilityDeclaration } from "./capabilities.js";
-import { getActiveToolset } from "./manifest.js";
+import { type RpcClient } from "./jsonrpc.js";
+import { getActiveAgentID, getActiveToolset } from "./manifest.js";
 import { MethodError } from "./methods.js";
 import { JsonRpcErrorCode, type JsonRpcErrorCodeValue, type JsonRpcValue } from "./types.js";
 import { gateToolInvocation, type ToolOperation } from "./worker/broker.js";
@@ -55,6 +57,8 @@ export const ToolErrorCode = {
   ToolWorkerCrashed: -32004,
   /** Tool name absent from the active toolset (M5.5.b.a manifest ACL gate). */
   ToolUnauthorized: -32005,
+  /** Builtin tool name not registered in `builtinHandlers` (M5.5.d.b). */
+  ToolUnknown: -32006,
 } as const;
 
 /**
@@ -126,12 +130,32 @@ export interface WorkerTool {
 }
 
 /**
+ * First-party harness operation that routes to a Go-side JSON-RPC
+ * method via the bidirectional {@link RpcClient} (M5.5.d.b). Unlike
+ * `isolated-vm` and `worker` kinds, the call payload is fixed by the
+ * registry entry in `builtinTools.ts`; the wire payload only carries
+ * `name` (registry key) plus the standard `input`.
+ *
+ * `name` is matched against the M5.5.b.a manifest ACL gate the same
+ * way the other kinds are, then dispatched to
+ * `builtinHandlers.get(name)`. Unknown names surface as
+ * {@link ToolErrorCode.ToolUnknown}; the per-handler "missing agent
+ * identity" error surfaces as {@link ToolErrorCode.ToolUnauthorized}.
+ */
+export interface BuiltinTool {
+  readonly kind: "builtin";
+  readonly name: string;
+}
+
+/**
  * Wire shape of `invokeTool` params. Discriminator is `tool.kind`. The
  * `'isolated-vm'` variant runs an in-process sandbox; the `'worker'`
- * variant forks an OS-isolated child for I/O-gated tool calls.
+ * variant forks an OS-isolated child for I/O-gated tool calls; the
+ * `'builtin'` variant (M5.5.d.b) routes to a Go-side JSON-RPC method
+ * via the shared {@link RpcClient}.
  */
 export interface InvokeToolParams {
-  readonly tool: IsolatedVmTool | WorkerTool;
+  readonly tool: IsolatedVmTool | WorkerTool | BuiltinTool;
   readonly input: JsonRpcValue;
   readonly limits?: {
     readonly wallClockMs?: number;
@@ -197,34 +221,100 @@ export async function runIsolatedJs(args: RunIsolatedJsArgs): Promise<JsonRpcVal
 }
 
 /**
- * `invokeTool` JSON-RPC handler. Validates the params shape WITHOUT
- * allocating an Isolate / spawning a worker (AC6) and dispatches to the
- * matching backend on success. Returns the canonical `{ output }`
- * envelope.
+ * Build an `invokeTool` JSON-RPC handler bound to the supplied
+ * {@link RpcClient}. The `rpc` is captured by the returned closure and
+ * threaded into the built-in tool dispatch branch (M5.5.d.b). Pass
+ * `undefined` for the no-RpcClient mode used by call sites that have
+ * no Go-side seam (legacy tests, `isolated-vm`-only callers); built-in
+ * tools then fail closed with {@link ToolErrorCode.ToolExecutionError}
+ * because the dispatch path requires a real client.
+ *
+ * The handler validates the params shape WITHOUT allocating an Isolate
+ * / spawning a worker / making an outbound JSON-RPC call (AC6) and
+ * dispatches to the matching backend on success. Returns the canonical
+ * `{ output }` envelope.
  *
  * The M5.5.b.a manifest ACL gate runs BEFORE dispatch: the resolved
- * tool name (`tool.name` for isolated-vm, `tool.name ?? tool.method`
- * for worker) is matched against the active toolset stored in
+ * tool name is matched against the active toolset stored in
  * `manifest.ts`. A miss surfaces as
  * {@link ToolErrorCode.ToolUnauthorized} and never reaches
- * {@link runIsolatedJs} / {@link runWorkerTool}.
+ * {@link runIsolatedJs} / {@link runWorkerTool} / the built-in
+ * registry.
  */
-export async function invokeToolHandler(params: JsonRpcValue | undefined): Promise<JsonRpcValue> {
-  const validated = validateParams(params);
-  enforceToolsetAcl(validated.tool);
-  if (validated.tool.kind === "isolated-vm") {
-    const wallClockMs = validated.limits?.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
-    const memoryMb = validated.limits?.memoryMb ?? DEFAULT_MEMORY_MB;
-    const output = await runIsolatedJs({
-      source: validated.tool.source,
-      input: validated.input,
-      wallClockMs,
-      memoryMb,
-    });
+export function makeInvokeToolHandler(
+  rpc?: RpcClient,
+): (params: JsonRpcValue | undefined) => Promise<JsonRpcValue> {
+  return async (params) => {
+    const validated = validateParams(params);
+    enforceToolsetAcl(validated.tool);
+    if (validated.tool.kind === "isolated-vm") {
+      const wallClockMs = validated.limits?.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
+      const memoryMb = validated.limits?.memoryMb ?? DEFAULT_MEMORY_MB;
+      const output = await runIsolatedJs({
+        source: validated.tool.source,
+        input: validated.input,
+        wallClockMs,
+        memoryMb,
+      });
+      return { output } satisfies InvokeToolResult;
+    }
+    if (validated.tool.kind === "builtin") {
+      const output = await runBuiltinTool(validated.tool, validated.input, rpc);
+      return { output } satisfies InvokeToolResult;
+    }
+    const output = await runWorkerTool(validated.tool, validated.input);
     return { output } satisfies InvokeToolResult;
+  };
+}
+
+/**
+ * Default `invokeTool` handler, kept as a top-level export for
+ * backward compatibility with call sites that do not need outbound
+ * JSON-RPC (legacy tests, isolated-vm-only fixtures). The harness
+ * boot path in `methods.ts` constructs an instance via
+ * {@link makeInvokeToolHandler} so the built-in dispatch branch sees
+ * a real {@link RpcClient}.
+ */
+export const invokeToolHandler: (params: JsonRpcValue | undefined) => Promise<JsonRpcValue> =
+  makeInvokeToolHandler();
+
+/**
+ * Built-in dispatch branch (M5.5.d.b). Looks up `tool.name` in
+ * {@link builtinHandlers}; unknown names surface as
+ * {@link ToolErrorCode.ToolUnknown} (NOT InvalidParams — the wire
+ * shape was valid, the registry just does not know the name). Missing
+ * {@link RpcClient} (boot path didn't wire one) surfaces as
+ * {@link ToolErrorCode.ToolExecutionError} since the call has no
+ * outbound seam to use. {@link BuiltinAgentIDMissing} thrown by the
+ * handler maps to {@link ToolErrorCode.ToolUnauthorized}.
+ */
+async function runBuiltinTool(
+  tool: BuiltinTool,
+  input: JsonRpcValue,
+  rpc: RpcClient | undefined,
+): Promise<JsonRpcValue> {
+  const handler = getBuiltinHandler(tool.name);
+  if (handler === undefined) {
+    throw toolError(ToolErrorCode.ToolUnknown, `builtin tool not found: ${tool.name}`);
   }
-  const output = await runWorkerTool(validated.tool, validated.input);
-  return { output } satisfies InvokeToolResult;
+  if (rpc === undefined) {
+    throw toolError(
+      ToolErrorCode.ToolExecutionError,
+      `builtin tool ${tool.name} requires an RpcClient seam (none wired)`,
+    );
+  }
+  try {
+    return await handler(rpc, getActiveAgentID(), input);
+  } catch (err) {
+    if (err instanceof BuiltinAgentIDMissing) {
+      throw toolError(ToolErrorCode.ToolUnauthorized, err.message);
+    }
+    if (err instanceof MethodError) throw err;
+    throw toolError(
+      ToolErrorCode.ToolExecutionError,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 }
 
 /**
@@ -233,10 +323,12 @@ export async function invokeToolHandler(params: JsonRpcValue | undefined): Promi
  * worker tools the field is {@link WorkerTool.name}, falling back to
  * {@link WorkerTool.method} when `name` is omitted (M5.3.b backward
  * compatibility — pre-M5.5.b.a callers identified the tool only by
- * its JSON-RPC method).
+ * its JSON-RPC method); for builtin tools (M5.5.d.b) the field is
+ * always {@link BuiltinTool.name}.
  */
-function resolveToolName(tool: IsolatedVmTool | WorkerTool): string | undefined {
+function resolveToolName(tool: IsolatedVmTool | WorkerTool | BuiltinTool): string | undefined {
   if (tool.kind === "isolated-vm") return tool.name;
+  if (tool.kind === "builtin") return tool.name;
   return tool.name ?? tool.method;
 }
 
@@ -248,7 +340,7 @@ function resolveToolName(tool: IsolatedVmTool | WorkerTool): string | undefined 
  * the active toolset is `undefined`, which the gate treats as an
  * empty allow-list (AC6).
  */
-function enforceToolsetAcl(tool: IsolatedVmTool | WorkerTool): void {
+function enforceToolsetAcl(tool: IsolatedVmTool | WorkerTool | BuiltinTool): void {
   const allowed = getActiveToolset();
   const name = resolveToolName(tool);
   if (allowed === undefined || allowed.length === 0) {
@@ -395,8 +487,8 @@ function validateParams(params: JsonRpcValue | undefined): InvokeToolParams {
     throw invalidParams("params.tool must be an object");
   }
   const toolRaw = obj.tool as { kind?: unknown };
-  if (toolRaw.kind !== "isolated-vm" && toolRaw.kind !== "worker") {
-    throw invalidParams('params.tool.kind must be "isolated-vm" or "worker"');
+  if (toolRaw.kind !== "isolated-vm" && toolRaw.kind !== "worker" && toolRaw.kind !== "builtin") {
+    throw invalidParams('params.tool.kind must be "isolated-vm", "worker", or "builtin"');
   }
   if (!("input" in obj)) {
     throw invalidParams("params.input is required");
@@ -408,7 +500,7 @@ function validateParams(params: JsonRpcValue | undefined): InvokeToolParams {
     : { tool, input: obj.input as JsonRpcValue, limits };
 }
 
-function validateTool(raw: { kind?: unknown }): IsolatedVmTool | WorkerTool {
+function validateTool(raw: { kind?: unknown }): IsolatedVmTool | WorkerTool | BuiltinTool {
   if (raw.kind === "isolated-vm") {
     const t = raw as { kind: "isolated-vm"; name?: unknown; source?: unknown };
     if (typeof t.source !== "string") {
@@ -418,6 +510,17 @@ function validateTool(raw: { kind?: unknown }): IsolatedVmTool | WorkerTool {
     return name === undefined
       ? { kind: "isolated-vm", source: t.source }
       : { kind: "isolated-vm", name, source: t.source };
+  }
+  if (raw.kind === "builtin") {
+    // Builtin tools (M5.5.d.b) require `name` since the wire payload
+    // carries no source / method — `name` IS the registry key. Empty /
+    // missing fails fast with InvalidParams.
+    const t = raw as { kind: "builtin"; name?: unknown };
+    const name = validateToolName(t.name);
+    if (name === undefined) {
+      throw invalidParams('params.tool.name is required when tool.kind is "builtin"');
+    }
+    return { kind: "builtin", name };
   }
   // raw.kind === "worker" (narrowed by caller).
   const t = raw as {

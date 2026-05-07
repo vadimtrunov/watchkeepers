@@ -21,10 +21,15 @@
  *     while `name: "forbidden", method: "allowed"` is denied.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ToolErrorCode, invokeToolHandler } from "../src/invokeTool.js";
-import { __resetActiveToolsetForTests, setActiveToolset } from "../src/manifest.js";
+import { ToolErrorCode, invokeToolHandler, makeInvokeToolHandler } from "../src/invokeTool.js";
+import { type RpcClient } from "../src/jsonrpc.js";
+import {
+  __resetActiveToolsetForTests,
+  setActiveAgentID,
+  setActiveToolset,
+} from "../src/manifest.js";
 import { MethodError } from "../src/methods.js";
 import type { JsonRpcValue } from "../src/types.js";
 
@@ -148,5 +153,60 @@ describe("invokeTool — toolset ACL gate (M5.5.b.a)", () => {
     await expect(
       invokeToolHandler(makeWorkerParams("allowed", null, "forbidden")),
     ).rejects.toMatchObject({ code: ToolErrorCode.ToolUnauthorized });
+  });
+
+  // ── builtin kind — ACL gate parity (M5.5.d.b) ───────────────────────
+
+  function makeBuiltinParams(name: string, input: JsonRpcValue): JsonRpcValue {
+    return { tool: { kind: "builtin", name }, input };
+  }
+
+  function makeStubRpc(): { rpc: RpcClient; request: ReturnType<typeof vi.fn> } {
+    const request = vi.fn().mockResolvedValue({ id: "entry-uuid" });
+    const rpc = { request } as unknown as RpcClient;
+    return { rpc, request };
+  }
+
+  it("Builtin_Remember_NotInToolset_RejectedByGate", async () => {
+    // Deliberately omit "remember" from the active toolset; the ACL
+    // gate must reject before the dispatcher consults the registry.
+    setActiveToolset(["something-else"]);
+    setActiveAgentID("agent-1");
+    const { rpc, request } = makeStubRpc();
+    const handler = makeInvokeToolHandler(rpc);
+
+    await expect(
+      handler(makeBuiltinParams("remember", { category: "lesson", subject: "", content: "x" })),
+    ).rejects.toMatchObject({ code: ToolErrorCode.ToolUnauthorized });
+
+    // ACL gate must short-circuit BEFORE notebook.remember is sent.
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("Builtin_Remember_InToolset_PassesGate", async () => {
+    // Toolset includes "remember": ACL gate passes, dispatch reaches
+    // the registry, registry resolves the handler, handler calls
+    // rpc.request("notebook.remember", ...). The stub records the
+    // call so we can assert structurally that the gate did NOT fire.
+    setActiveToolset(["remember"]);
+    setActiveAgentID("agent-1");
+    const { rpc, request } = makeStubRpc();
+    const handler = makeInvokeToolHandler(rpc);
+
+    await handler(
+      makeBuiltinParams("remember", {
+        category: "lesson",
+        subject: "subj",
+        content: "body",
+      }),
+    );
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith("notebook.remember", {
+      agentID: "agent-1",
+      category: "lesson",
+      subject: "subj",
+      content: "body",
+    });
   });
 });
