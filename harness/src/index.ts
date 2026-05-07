@@ -134,7 +134,7 @@ export async function runHarness(
  * line still routes to the request dispatcher's spec-compliant
  * ParseError reply.
  */
-function looksLikeResponse(line: string): boolean {
+export function looksLikeResponse(line: string): boolean {
   let raw: unknown;
   try {
     raw = JSON.parse(line);
