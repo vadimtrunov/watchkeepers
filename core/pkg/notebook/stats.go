@@ -11,8 +11,14 @@ import (
 //   - `TotalEntries` — every row, including superseded ones;
 //   - `Active` — `superseded_by IS NULL AND active_after <= now`;
 //   - `Superseded` — `superseded_by IS NOT NULL`;
+//   - `NeedsReview` (M5.6.a) — `needs_review = 1 AND superseded_by IS NULL`;
 //   - `ByCategory` — count of *active* entries per category, with the five
 //     [categoryEnum] keys always present (zero when none).
+//
+// Per AC5 of M5.6.a, `Active` and `NeedsReview` are intentionally
+// overlapping: a review-flagged row still counts as `Active` until it is
+// explicitly superseded. The review flag governs Recall visibility, not
+// lifecycle membership.
 //
 // Two queries are issued back-to-back rather than one CTE so the second can
 // drive the partial index on `entry(category) WHERE superseded_by IS NULL`.
@@ -28,9 +34,10 @@ func (d *DB) Stats(ctx context.Context) (Stats, error) {
 		SELECT
 			COUNT(*),
 			COUNT(*) FILTER (WHERE superseded_by IS NULL AND active_after <= ?),
-			COUNT(*) FILTER (WHERE superseded_by IS NOT NULL)
+			COUNT(*) FILTER (WHERE superseded_by IS NOT NULL),
+			COUNT(*) FILTER (WHERE needs_review = 1 AND superseded_by IS NULL)
 		FROM entry
-	`, nowMillis).Scan(&s.TotalEntries, &s.Active, &s.Superseded); err != nil {
+	`, nowMillis).Scan(&s.TotalEntries, &s.Active, &s.Superseded, &s.NeedsReview); err != nil {
 		return Stats{}, fmt.Errorf("notebook: stats totals: %w", err)
 	}
 
