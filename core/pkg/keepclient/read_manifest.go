@@ -39,6 +39,12 @@ type ManifestVersion struct {
 	// response). Capped at 100 Unicode codepoints by the server CHECK
 	// constraint (migration 014); the client mirrors the cap on PUT.
 	Model string `json:"model,omitempty"`
+	// Autonomy is the optional manifest autonomy level (omitempty matches
+	// the server: empty string is omitted from the wire response). When
+	// non-empty, must be one of {"supervised", "autonomous"} per the server
+	// CHECK enum constraint (migration 015); the client mirrors the
+	// constraint on PUT.
+	Autonomy string `json:"autonomy,omitempty"`
 	// CreatedAt is the row's created_at timestamp (RFC3339 on the wire).
 	CreatedAt string `json:"created_at"`
 }

@@ -488,3 +488,97 @@ func TestPutManifestVersion_Model101Runes_RejectedBeforeHTTP(t *testing.T) {
 		t.Errorf("network hits = %d, want 0", got)
 	}
 }
+
+// TestPutManifestVersionRequest_MarshalIncludesSupervised asserts that a
+// request with Autonomy="supervised" carries `"autonomy":"supervised"` on
+// the wire (M5.5.b.c.b).
+func TestPutManifestVersionRequest_MarshalIncludesSupervised(t *testing.T) {
+	t.Parallel()
+
+	const wantAutonomy = "supervised"
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		rawBody = raw
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"row-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	if _, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:    1,
+		SystemPrompt: "sp",
+		Autonomy:     wantAutonomy,
+	}); err != nil {
+		t.Fatalf("PutManifestVersion: %v", err)
+	}
+	if !strings.Contains(string(rawBody), `"autonomy":"`+wantAutonomy+`"`) {
+		t.Errorf("body missing autonomy field; got %s", rawBody)
+	}
+}
+
+// TestPutManifestVersionRequest_MarshalIncludesAutonomous asserts that a
+// request with Autonomy="autonomous" carries `"autonomy":"autonomous"` on
+// the wire (M5.5.b.c.b).
+func TestPutManifestVersionRequest_MarshalIncludesAutonomous(t *testing.T) {
+	t.Parallel()
+
+	const wantAutonomy = "autonomous"
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		rawBody = raw
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"row-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	if _, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:    1,
+		SystemPrompt: "sp",
+		Autonomy:     wantAutonomy,
+	}); err != nil {
+		t.Fatalf("PutManifestVersion: %v", err)
+	}
+	if !strings.Contains(string(rawBody), `"autonomy":"`+wantAutonomy+`"`) {
+		t.Errorf("body missing autonomy field; got %s", rawBody)
+	}
+}
+
+// TestPutManifestVersion_AutonomyInvalid_RejectedBeforeHTTP asserts the
+// negative case: a value not in {"", "supervised", "autonomous"} (e.g.
+// "manual") returns ErrInvalidRequest synchronously and the transport
+// records zero requests. Mirrors the server CHECK enum constraint
+// (migration 015).
+func TestPutManifestVersion_AutonomyInvalid_RejectedBeforeHTTP(t *testing.T) {
+	t.Parallel()
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		atomic.AddInt32(&hits, 1)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:    1,
+		SystemPrompt: "sp",
+		Autonomy:     "manual",
+	})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("network hits = %d, want 0", got)
+	}
+}
