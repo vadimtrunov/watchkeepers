@@ -73,6 +73,14 @@ import (
 // schemaSQL is the idempotent schema definition. Every column constraint is
 // enforced server-side (no client-only checks) so M2b.2's Go API can rely on
 // the database to reject malformed writes.
+//
+// The 12-column shape is: id (PK), category, subject, content, created_at,
+// last_used_at, relevance_score, superseded_by, evidence_log_ref,
+// tool_version, active_after, and (since M5.6.a) needs_review. The
+// `needs_review` boolean (SQLite int idiom) is treated by [DB.Recall] as a
+// hard exclusion predicate alongside `superseded_by IS NOT NULL` and
+// `active_after > now`, and is flipped via
+// [DB.MarkNeedsReview] / [DB.ClearNeedsReview].
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS entry (
   id TEXT PRIMARY KEY,
@@ -85,7 +93,8 @@ CREATE TABLE IF NOT EXISTS entry (
   superseded_by TEXT NULL REFERENCES entry(id),
   evidence_log_ref TEXT NULL,
   tool_version TEXT NULL,
-  active_after INTEGER NOT NULL DEFAULT 0
+  active_after INTEGER NOT NULL DEFAULT 0,
+  needs_review INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS entry_vec USING vec0(
@@ -100,6 +109,12 @@ CREATE INDEX IF NOT EXISTS entry_category_active
   ON entry(category) WHERE superseded_by IS NULL;
 CREATE INDEX IF NOT EXISTS entry_active_after
   ON entry(active_after) WHERE superseded_by IS NULL;
+
+-- Partial index added by M5.6.a so the [DB.Stats] NeedsReview counter and
+-- any future query that scopes to review-flagged rows stays sub-millisecond.
+-- IF NOT EXISTS keeps the create idempotent across re-opens.
+CREATE INDEX IF NOT EXISTS entry_needs_review
+  ON entry(needs_review) WHERE needs_review = 1;
 `
 
 // EmbeddingDim is the embedding dimension used by the `entry_vec` virtual
@@ -261,11 +276,73 @@ func openAt(ctx context.Context, path string, opts ...DBOption) (*DB, error) {
 		return nil, fmt.Errorf("notebook: schema init on %q: %w", path, err)
 	}
 
+	// M5.6.a forward-migration: a Notebook file created by a pre-M5.6.a
+	// binary will have the `entry` table without the `needs_review` column,
+	// because `CREATE TABLE IF NOT EXISTS` above is a no-op when the table
+	// already exists. Inspect `PRAGMA table_info(entry)` and ALTER TABLE
+	// only when the column is missing. The ALTER is idempotent in
+	// aggregate (repeat opens stop after the column-existence check
+	// succeeds) but not at the SQL level, so we must guard it ourselves —
+	// SQLite has no `ADD COLUMN IF NOT EXISTS`.
+	if err := migrateAddNeedsReview(ctx, sqlDB); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("notebook: migrate needs_review on %q: %w", path, err)
+	}
+
 	db := &DB{sql: sqlDB, path: path}
 	for _, opt := range opts {
 		opt(db)
 	}
 	return db, nil
+}
+
+// migrateAddNeedsReview ensures the `entry` table carries the M5.6.a
+// `needs_review` column. It probes `PRAGMA table_info(entry)` and runs
+// `ALTER TABLE entry ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0`
+// only when the column is missing — SQLite has no `ADD COLUMN IF NOT
+// EXISTS` so the existence check has to live in Go. Re-opens of an
+// already-migrated file see the column on the first probe and short-circuit
+// without issuing any DDL. Held as a package-private function rather than
+// inlined into [openAt] so unit tests can target it directly when a future
+// migration extends the same idiom.
+func migrateAddNeedsReview(ctx context.Context, sqlDB *sql.DB) error {
+	rows, err := sqlDB.QueryContext(ctx, `PRAGMA table_info(entry)`)
+	if err != nil {
+		return fmt.Errorf("pragma table_info: %w", err)
+	}
+	defer rows.Close()
+
+	var hasColumn bool
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan pragma row: %w", err)
+		}
+		if name == "needs_review" {
+			hasColumn = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate pragma rows: %w", err)
+	}
+	if hasColumn {
+		return nil
+	}
+
+	if _, err := sqlDB.ExecContext(
+		ctx,
+		`ALTER TABLE entry ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0`,
+	); err != nil {
+		return fmt.Errorf("alter table: %w", err)
+	}
+	return nil
 }
 
 // Close closes the underlying [database/sql.DB]. Safe to call multiple times
