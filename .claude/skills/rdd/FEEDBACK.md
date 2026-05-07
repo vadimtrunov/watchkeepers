@@ -2043,3 +2043,31 @@ The TASK's AC1 wording "re-exported from notebook (OR imported by callers)" was 
 - Total wall time from /rdd to merge: pending
 
 ---
+
+## 2026-05-07 — M5.5.c.d.b.a: Add llm.WithRecalledMemory option + RecalledMemory shape + injection into System slot
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+
+The second decomposition pass at Gate 1 (M5.5.c.d.b → b.a + b.b) was clean. `planner` correctly identified that "WithRecalledMemory option" + "manifest-aware turn helper with fail-soft matrix" are two coupled-but-distinct concerns — splitting kept each PR small and reviewable. ROADMAP edit + commit on main per `references/roadmap-migration.md` §"Decomposition at Gate 1" landed cleanly (commit `78edafc`).
+
+First Phase-4-iter-1 zero-comment converge in the M5.5.c.d branch since M5.5.c.c. The option mirrors the established `WithMaxTokens` / `WithMetadata` pattern verbatim — reviewer brief's "consistency with established pattern" check did its job in one pass.
+
+### What wasted effort
+
+The second-tier Edit-after-merge race repeated: writer agent on M5.5.c.d.a's squash merge updated the ROADMAP file on `main`, so the orchestrator's first Edit attempt for M5.5.c.d.b decomposition failed with "File has been modified since read". Reproduced from M5.5.c.b/c → c.d sequence. Fix: orchestrator should Read ROADMAP file just-in-time before applying decomposition Edits, especially right after a Phase 7a merge that may have updated it.
+
+### Suggested skill changes
+
+- In `references/roadmap-migration.md` §"Decomposition at Gate 1", add an explicit "always Read ROADMAP at HEAD just before the Edit" reminder so future orchestrators avoid the post-merge file-state-drift retry.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0 (Phase 6 pending)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending
+
+---
