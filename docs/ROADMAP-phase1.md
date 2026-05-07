@@ -328,6 +328,8 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
       - [x] **M5.5.b.c.a** Add manifest_version.autonomy column + server PUT/GET projection
       - [x] **M5.5.b.c.b** Extend keepclient.ManifestVersion with Autonomy field + tests
       - [ ] **M5.5.b.c.c** Project AuthorityMatrix + Autonomy in loader; enforce at approval gate
+        - [ ] **M5.5.b.c.c.a** Project AuthorityMatrix + Autonomy in manifest loader
+        - [ ] **M5.5.b.c.c.b** Add runtime authority/autonomy enforcement at approval gate
   - [ ] **M5.5.c** Open per-agent SQLite Notebook on boot and auto-recall top-K entries with relevance threshold
   - [ ] **M5.5.d** Expose Remember as a built-in harness tool writing to per-agent Notebook
 - [ ] **M5.6** **Reflection lifecycle** — auto-reflection on tool error writes a `lesson` entry with `evidence_log_ref`, `tool_version`, and `active_after = now() + 24h` (visible but not auto-injected during the cooling-off window); on tool hot-load, lessons tied to a superseded version are flagged `needs_review` and excluded from auto-injection until reviewed (never deleted).
