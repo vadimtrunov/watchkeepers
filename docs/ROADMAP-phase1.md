@@ -325,7 +325,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
       - [x] **M5.5.b.b.b** Extend keepclient.ManifestVersion with Model field + decoder tests
       - [x] **M5.5.b.b.c** Project Model via manifest loader into LLMProvider boot config
     - [ ] **M5.5.b.c** Decode authority_matrix and apply autonomy bounds at approval gates
-      - [ ] **M5.5.b.c.a** Add manifest_version.autonomy column + server PUT/GET projection
+      - [x] **M5.5.b.c.a** Add manifest_version.autonomy column + server PUT/GET projection
       - [ ] **M5.5.b.c.b** Extend keepclient.ManifestVersion with Autonomy field + tests
       - [ ] **M5.5.b.c.c** Project AuthorityMatrix + Autonomy in loader; enforce at approval gate
   - [ ] **M5.5.c** Open per-agent SQLite Notebook on boot and auto-recall top-K entries with relevance threshold
