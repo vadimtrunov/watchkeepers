@@ -330,15 +330,15 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
       - [x] **M5.5.b.c.c** Project AuthorityMatrix + Autonomy in loader; enforce at approval gate
         - [x] **M5.5.b.c.c.a** Project AuthorityMatrix + Autonomy in manifest loader
         - [x] **M5.5.b.c.c.b** Add runtime authority/autonomy enforcement at approval gate
-  - [ ] **M5.5.c** Open per-agent SQLite Notebook on boot and auto-recall top-K entries with relevance threshold
+  - [x] **M5.5.c** Open per-agent SQLite Notebook on boot and auto-recall top-K entries with relevance threshold
     - [x] **M5.5.c.a** Add manifest_version columns notebook_top_k + notebook_relevance_threshold + server projection
     - [x] **M5.5.c.b** Extend keepclient.ManifestVersion with NotebookTopK / NotebookRelevanceThreshold + loader projection
     - [x] **M5.5.c.c** Open per-agent Notebook on harness boot; close on terminate
-    - [ ] **M5.5.c.d** Auto-recall top-K with relevance threshold per turn; inject into LLM request
+    - [x] **M5.5.c.d** Auto-recall top-K with relevance threshold per turn; inject into LLM request
       - [x] **M5.5.c.d.a** Introduce llm.EmbeddingProvider seam (interface + in-process fake) for per-turn query embedding
-      - [ ] **M5.5.c.d.b** Add llm.WithRecalledMemory option + manifest-aware turn helper that calls notebook.DB.Recall(topK, threshold) via NotebookSupervisor and injects results into the LLM request
+      - [x] **M5.5.c.d.b** Add llm.WithRecalledMemory option + manifest-aware turn helper that calls notebook.DB.Recall(topK, threshold) via NotebookSupervisor and injects results into the LLM request
         - [x] **M5.5.c.d.b.a** Add llm.WithRecalledMemory option + RecalledMemory shape + injection into BuildCompleteRequest/BuildStreamRequest/BuildCountTokensRequest System slot
-        - [ ] **M5.5.c.d.b.b** Add manifest-aware turn helper (BuildTurnRequest) that calls NotebookSupervisor.Lookup + EmbeddingProvider.Embed + notebook.DB.Recall(TopK, Threshold) and threads results via WithRecalledMemory, with fail-soft matrix
+        - [x] **M5.5.c.d.b.b** Add manifest-aware turn helper (BuildTurnRequest) that calls NotebookSupervisor.Lookup + EmbeddingProvider.Embed + notebook.DB.Recall(TopK, Threshold) and threads results via WithRecalledMemory, with fail-soft matrix
   - [ ] **M5.5.d** Expose Remember as a built-in harness tool writing to per-agent Notebook
 - [ ] **M5.6** **Reflection lifecycle** — auto-reflection on tool error writes a `lesson` entry with `evidence_log_ref`, `tool_version`, and `active_after = now() + 24h` (visible but not auto-injected during the cooling-off window); on tool hot-load, lessons tied to a superseded version are flagged `needs_review` and excluded from auto-injection until reviewed (never deleted).
 - [ ] **M5.7** **Provider plumbing** — Claude Code credentials flow through the secrets interface (no `ANTHROPIC_API_KEY` references in core); a dummy `FakeProvider` passes the same harness tests as the real provider, proving swap-without-touching-core.
