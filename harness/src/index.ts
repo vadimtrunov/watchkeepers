@@ -17,7 +17,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { handleLine } from "./dispatcher.js";
-import { notification, serialize } from "./jsonrpc.js";
+import { RpcClient, notification, serialize } from "./jsonrpc.js";
 import { ClaudeCodeProvider } from "./llm/claude-code-provider.js";
 import { LLM_CAPABILITIES } from "./llm/methods.js";
 import type { NotificationWriter } from "./llm/notification-writer.js";
@@ -56,7 +56,17 @@ export async function runHarness(
     };
   }
 
-  const registry = createDefaultRegistry(signal, provider, writer);
+  // M5.5.d.b: shared RpcClient for outbound harness → Go JSON-RPC
+  // calls. Threaded into the registry so built-in tools (e.g.
+  // `remember`) can dispatch via the bidirectional seam (M5.5.d.a.a).
+  // Inbound responses are matched on `id` by the read loop below
+  // before the standard request dispatcher runs — see the dispatcher
+  // wire-up next to the readline loop.
+  const rpc = new RpcClient((line) => {
+    stdout.write(line);
+  });
+
+  const registry = createDefaultRegistry(signal, provider, writer, rpc);
 
   // Boot-time readiness signal (M5.3.c.c.c.b.a): one `harness/ready`
   // notification announces the harness identity, version, and the
@@ -89,6 +99,19 @@ export async function runHarness(
       const line = rawLine.trim();
       if (line.length === 0) continue;
 
+      // M5.5.d.b: inbound NDJSON lines may be either incoming
+      // requests (Go → harness) OR responses to outbound harness →
+      // Go calls (matched by id against the {@link RpcClient}'s
+      // pending map). Classify by peeking at top-level keys: a JSON
+      // object carrying `result` or `error` is a response; anything
+      // else (including parse failures) falls through to the
+      // standard request dispatcher, which surfaces ParseError /
+      // InvalidRequest envelopes.
+      if (looksLikeResponse(line)) {
+        rpc.handleResponseLine(line);
+        continue;
+      }
+
       const response = await handleLine(registry, line);
       if (response !== undefined) {
         stdout.write(response);
@@ -97,6 +120,30 @@ export async function runHarness(
   } finally {
     rl.close();
   }
+}
+
+/**
+ * Cheap classifier — does the line carry a JSON-RPC response envelope?
+ * A response object has `result` or `error` at the top level; a
+ * request has `method`. Parse failures and ambiguous objects fall
+ * through to the request dispatcher for a structured error envelope.
+ *
+ * Uses a single `JSON.parse` so the request dispatcher's later parse
+ * pays a duplicated cost only on responses (negligible — responses
+ * are short-lived and not in a hot loop). Wraps errors so a malformed
+ * line still routes to the request dispatcher's spec-compliant
+ * ParseError reply.
+ */
+function looksLikeResponse(line: string): boolean {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(line);
+  } catch {
+    return false;
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+  if ("method" in raw) return false;
+  return "result" in raw || "error" in raw;
 }
 
 /**

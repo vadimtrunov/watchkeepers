@@ -17,11 +17,12 @@
 
 import { z } from "zod";
 
-import { invokeToolHandler } from "./invokeTool.js";
+import { makeInvokeToolHandler } from "./invokeTool.js";
+import { type RpcClient } from "./jsonrpc.js";
 import { wireLLMMethods } from "./llm/methods.js";
 import type { NotificationWriter } from "./llm/notification-writer.js";
 import type { LLMProvider } from "./llm/provider.js";
-import { setActiveToolset } from "./manifest.js";
+import { setActiveAgentID, setActiveToolset } from "./manifest.js";
 import {
   JsonRpcErrorCode,
   type JsonRpcErrorCodeValue,
@@ -31,10 +32,17 @@ import {
 } from "./types.js";
 
 /**
- * zod schema for `setManifest` params (M5.5.b.a). The Go core projects
- * `manifest_version.tools` jsonb into a `[]string` of tool names and
- * delivers the list once at session boot via this method. The harness
- * stores it via {@link setActiveToolset} for the `invokeTool` ACL gate.
+ * zod schema for `setManifest` params (M5.5.b.a, extended M5.5.d.b).
+ * The Go core projects `manifest_version.tools` jsonb into a `[]string`
+ * of tool names and delivers the list once at session boot via this
+ * method. The harness stores it via {@link setActiveToolset} for the
+ * `invokeTool` ACL gate.
+ *
+ * M5.5.d.b adds the optional `agentID` field — the per-agent identity
+ * built-in tools (e.g. `notebook.remember`) consult at dispatch time.
+ * Backward-compatible: existing callers that omit it leave the active
+ * agent identity at `undefined` (built-in tools requiring identity
+ * fail with `ToolUnauthorized` until a manifest provides one).
  *
  * `.strict()` rejects future-protocol fields explicitly so a version
  * skew surfaces as a wire error rather than silent acceptance.
@@ -42,6 +50,7 @@ import {
 const SetManifestParamsSchema = z
   .object({
     toolset: z.array(z.string()),
+    agentID: z.string().optional(),
   })
   .strict();
 
@@ -112,11 +121,19 @@ export interface ShutdownSignal {
  * handlers landing in M5.3.c.c.c.b.b can capture it. When `provider`
  * is omitted the writer is ignored — the LLM surface is absent in
  * degraded mode and there is nothing to receive the closure.
+ *
+ * The optional `rpc` parameter (M5.5.d.b) is the shared
+ * {@link RpcClient} the harness uses for outbound JSON-RPC. It threads
+ * into the `invokeTool` handler so built-in tools (e.g. `remember`)
+ * can route to Go-side methods. When omitted, built-in tool
+ * invocations fail with `ToolExecutionError` because the dispatch
+ * branch has no seam to use.
  */
 export function createDefaultRegistry(
   signal: ShutdownSignal,
   provider?: LLMProvider,
   writer?: NotificationWriter,
+  rpc?: RpcClient,
 ): MethodRegistry {
   const registry = new Map<string, MethodHandler>();
 
@@ -129,7 +146,7 @@ export function createDefaultRegistry(
     return { accepted: true } satisfies ShutdownResult;
   });
 
-  registry.set("invokeTool", invokeToolHandler);
+  registry.set("invokeTool", makeInvokeToolHandler(rpc));
 
   registry.set("setManifest", (params) => {
     const parsed = SetManifestParamsSchema.safeParse(params);
@@ -140,6 +157,7 @@ export function createDefaultRegistry(
       );
     }
     setActiveToolset(parsed.data.toolset);
+    setActiveAgentID(parsed.data.agentID);
     return { ok: true };
   });
 

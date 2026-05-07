@@ -29,6 +29,17 @@
 let activeToolset: readonly string[] | undefined;
 
 /**
+ * Active agent identifier, or `undefined` when `setManifest` has not
+ * yet been called with an `agentID` field (M5.5.d.b). Builtin tools
+ * that need a per-agent identity (e.g. `notebook.remember`) consult
+ * this getter; a missing value is treated as a "no identity" miss
+ * that maps to {@link ToolErrorCode.ToolUnauthorized} at the dispatch
+ * boundary. Existing callers that omit `agentID` continue to work for
+ * non-builtin paths (isolated-vm + worker tools never read it).
+ */
+let activeAgentID: string | undefined;
+
+/**
  * Return the currently active toolset, or `undefined` when no
  * `setManifest` call has yet been honoured. Callers MUST treat
  * `undefined` and the empty array as the same deny-all decision; the
@@ -37,6 +48,17 @@ let activeToolset: readonly string[] | undefined;
  */
 export function getActiveToolset(): readonly string[] | undefined {
   return activeToolset;
+}
+
+/**
+ * Return the currently active agent identifier (M5.5.d.b), or
+ * `undefined` when `setManifest` has not delivered one. Builtin tool
+ * handlers consult this at dispatch time; the wire-level
+ * {@link ToolErrorCode.ToolUnauthorized} surfaces when a builtin tool
+ * needs an identity but the manifest never set one.
+ */
+export function getActiveAgentID(): string | undefined {
+  return activeAgentID;
 }
 
 /**
@@ -51,6 +73,16 @@ export function setActiveToolset(names: readonly string[]): void {
 }
 
 /**
+ * Replace the active agent identifier with `id` (M5.5.d.b). Pass
+ * `undefined` to clear (the manifest never advertised an agent id).
+ * Caller is responsible for shape validation; the `setManifest`
+ * JSON-RPC handler does that via zod before reaching this entry point.
+ */
+export function setActiveAgentID(id: string | undefined): void {
+  activeAgentID = id;
+}
+
+/**
  * Test-only reset. Clears the module-level state so each test starts
  * from the deny-by-default posture without leaking across files. NOT
  * exposed on the wire and NOT called from production code paths — the
@@ -59,4 +91,5 @@ export function setActiveToolset(names: readonly string[]): void {
  */
 export function __resetActiveToolsetForTests(): void {
   activeToolset = undefined;
+  activeAgentID = undefined;
 }
