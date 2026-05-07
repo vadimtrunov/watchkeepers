@@ -2,6 +2,8 @@ module github.com/vadimtrunov/watchkeepers
 
 go 1.26
 
+toolchain go1.26.3
+
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/coder/websocket v1.8.13
