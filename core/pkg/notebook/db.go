@@ -109,10 +109,16 @@ CREATE INDEX IF NOT EXISTS entry_category_active
   ON entry(category) WHERE superseded_by IS NULL;
 CREATE INDEX IF NOT EXISTS entry_active_after
   ON entry(active_after) WHERE superseded_by IS NULL;
+`
 
--- Partial index added by M5.6.a so the [DB.Stats] NeedsReview counter and
--- any future query that scopes to review-flagged rows stays sub-millisecond.
--- IF NOT EXISTS keeps the create idempotent across re-opens.
+// needsReviewIndexSQL creates the M5.6.a partial index on the
+// `needs_review` column. Held out of `schemaSQL` because it cannot run
+// against a pre-M5.6.a Notebook file until [migrateAddNeedsReview] has
+// added the column — referencing a non-existent column in
+// `CREATE INDEX ... WHERE` errors `no such column`. Issued after the
+// migration in [openAt] so fresh-create and existing-DB-without-column
+// paths both end up with the index.
+const needsReviewIndexSQL = `
 CREATE INDEX IF NOT EXISTS entry_needs_review
   ON entry(needs_review) WHERE needs_review = 1;
 `
@@ -287,6 +293,13 @@ func openAt(ctx context.Context, path string, opts ...DBOption) (*DB, error) {
 	if err := migrateAddNeedsReview(ctx, sqlDB); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("notebook: migrate needs_review on %q: %w", path, err)
+	}
+
+	// The partial index references the `needs_review` column directly, so
+	// it can only run AFTER the migration has ensured the column exists.
+	if _, err := sqlDB.ExecContext(ctx, needsReviewIndexSQL); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("notebook: create needs_review index on %q: %w", path, err)
 	}
 
 	db := &DB{sql: sqlDB, path: path}
