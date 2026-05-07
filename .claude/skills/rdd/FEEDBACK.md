@@ -2016,3 +2016,30 @@ Phase 3 executor exited silently on its first turn with the message "The race te
 - Total wall time from /rdd to merge: pending
 
 ---
+## 2026-05-07 — M5.5.c.d.a: Introduce llm.EmbeddingProvider seam (interface + in-process fake) for per-turn query embedding
+
+**PR**: pending
+**Phases with incidents**: Phase 4 iter 1
+
+### What worked
+
+Decomposition at Gate 1 was clean. The planner caught that M5.5.c.d's bundled scope ("auto-recall + inject") required a non-existent embedding seam — instead of forcing a too-large PR, returned `fits: false` with a 2-way decomposition. ROADMAP edit + commit on main per `references/roadmap-migration.md` §"Decomposition at Gate 1" + auto-yes on the FIRST decomposed sub-item per `references/gates.md` §"Gate 1 auto-decision" landed cleanly.
+
+The 2 iter-1 important items (AC1 constant re-export + precedence test) were genuine AC-compliance findings, not over-strict review noise. The fixer commit addressed both in one focused diff. Phase 4 converged in 3 iterations (initial + fixer + re-review) without escalation.
+
+### What wasted effort
+
+The TASK's AC1 wording "re-exported from notebook (OR imported by callers)" was ambiguous — the executor read it as "OR imported by callers" satisfied via the test file's `notebook.EmbeddingDim` reference, but the reviewer read it as requiring a local handle in the llm package. Tighter AC wording ("MUST add `const EmbeddingDim = notebook.EmbeddingDim` in `embedding_provider.go`") would have avoided the iter-1 round-trip.
+
+### Suggested skill changes
+
+- In `references/task-template.md` or `references/agent-briefs/planner.md`, add an AC-precision rule: when an AC offers a choice ("X OR Y"), the executor will pick whichever is cheapest, which may differ from reviewer expectations. Prefer concrete single-path ACs ("MUST do X") and let the executor propose alternatives in the report if X is infeasible.
+
+### Metrics
+
+- Review iterations: 3 (initial + fixer + re-review)
+- PR-fix iterations: 0 (Phase 6 pending)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending
+
+---

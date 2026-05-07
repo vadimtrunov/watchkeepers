@@ -335,7 +335,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
     - [x] **M5.5.c.b** Extend keepclient.ManifestVersion with NotebookTopK / NotebookRelevanceThreshold + loader projection
     - [x] **M5.5.c.c** Open per-agent Notebook on harness boot; close on terminate
     - [ ] **M5.5.c.d** Auto-recall top-K with relevance threshold per turn; inject into LLM request
-      - [ ] **M5.5.c.d.a** Introduce llm.EmbeddingProvider seam (interface + in-process fake) for per-turn query embedding
+      - [x] **M5.5.c.d.a** Introduce llm.EmbeddingProvider seam (interface + in-process fake) for per-turn query embedding
       - [ ] **M5.5.c.d.b** Add llm.WithRecalledMemory option + manifest-aware turn helper that calls notebook.DB.Recall(topK, threshold) via NotebookSupervisor and injects results into the LLM request
   - [ ] **M5.5.d** Expose Remember as a built-in harness tool writing to per-agent Notebook
 - [ ] **M5.6** **Reflection lifecycle** — auto-reflection on tool error writes a `lesson` entry with `evidence_log_ref`, `tool_version`, and `active_after = now() + 24h` (visible but not auto-injected during the cooling-off window); on tool hot-load, lessons tied to a superseded version are flagged `needs_review` and excluded from auto-injection until reviewed (never deleted).
