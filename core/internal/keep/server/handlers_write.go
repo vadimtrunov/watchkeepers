@@ -329,15 +329,17 @@ func handleLogAppend(r scopedRunner) http.Handler {
 // json.RawMessage so the handler can round-trip any valid JSON without
 // re-shaping it; SQL defaults cover the empty case.
 type putManifestVersionRequest struct {
-	VersionNo        int             `json:"version_no"`
-	SystemPrompt     string          `json:"system_prompt"`
-	Tools            json.RawMessage `json:"tools"`
-	AuthorityMatrix  json.RawMessage `json:"authority_matrix"`
-	KnowledgeSources json.RawMessage `json:"knowledge_sources"`
-	Personality      string          `json:"personality"`
-	Language         string          `json:"language"`
-	Model            string          `json:"model"`
-	Autonomy         string          `json:"autonomy"`
+	VersionNo                  int             `json:"version_no"`
+	SystemPrompt               string          `json:"system_prompt"`
+	Tools                      json.RawMessage `json:"tools"`
+	AuthorityMatrix            json.RawMessage `json:"authority_matrix"`
+	KnowledgeSources           json.RawMessage `json:"knowledge_sources"`
+	Personality                string          `json:"personality"`
+	Language                   string          `json:"language"`
+	Model                      string          `json:"model"`
+	Autonomy                   string          `json:"autonomy"`
+	NotebookTopK               int             `json:"notebook_top_k"`
+	NotebookRelevanceThreshold float64         `json:"notebook_relevance_threshold"`
 }
 
 // putManifestVersionResponse is the 201 body returned on successful insert.
@@ -347,6 +349,8 @@ type putManifestVersionResponse struct {
 
 // parsePutManifestVersionRequest handles the 415 / 413 / 400 envelope and
 // the field-level validation for PUT /v1/manifests/{manifest_id}/versions.
+//
+//nolint:gocyclo // sequential field validations; each branch is a distinct AC; splitting would obscure the validation contract.
 func parsePutManifestVersionRequest(w http.ResponseWriter, req *http.Request) (putManifestVersionRequest, bool) {
 	var body putManifestVersionRequest
 
@@ -419,7 +423,38 @@ func parsePutManifestVersionRequest(w http.ResponseWriter, req *http.Request) (p
 			return body, false
 		}
 	}
+	if !validateNotebookRecallFields(w, body) {
+		return body, false
+	}
 	return body, true
+}
+
+// validateNotebookRecallFields checks the notebook_top_k and
+// notebook_relevance_threshold field ranges on the PUT manifest version
+// request body. It writes a 400 error and returns false on the first
+// out-of-range value; returns true when both fields are acceptable.
+// Extracted from parsePutManifestVersionRequest to keep that function
+// under the gocyclo budget.
+//
+// Range rules (mirror migration 016 CHECK constraints):
+//   - notebook_top_k: 0 (disabled) or 1–100 inclusive; negative or > 100 rejected.
+//   - notebook_relevance_threshold: 0.0 (unset) or [0, 1] inclusive; < 0 or > 1 rejected.
+func validateNotebookRecallFields(w http.ResponseWriter, body putManifestVersionRequest) bool {
+	// Zero is accepted (means "auto-recall disabled" → intOrNil writes SQL
+	// NULL); any non-zero value MUST satisfy `1 <= notebook_top_k <= 100`.
+	// Negative values are also rejected with a stable `invalid_notebook_top_k`
+	// reason so the caller gets a clear signal before the row reaches Postgres.
+	if body.NotebookTopK < 0 || body.NotebookTopK > 100 {
+		writeError(w, http.StatusBadRequest, "invalid_notebook_top_k")
+		return false
+	}
+	// Zero is accepted (means "unset" → floatOrNil writes SQL NULL); any
+	// non-zero value MUST satisfy `0 <= notebook_relevance_threshold <= 1`.
+	if body.NotebookRelevanceThreshold < 0 || body.NotebookRelevanceThreshold > 1 {
+		writeError(w, http.StatusBadRequest, "invalid_notebook_relevance_threshold")
+		return false
+	}
+	return true
 }
 
 // handlePutManifestVersion serves PUT /v1/manifests/{manifest_id}/versions.
@@ -486,6 +521,8 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 		language := stringOrNil(body.Language)
 		model := stringOrNil(body.Model)
 		autonomy := stringOrNil(body.Autonomy)
+		notebookTopK := intOrNil(body.NotebookTopK)
+		notebookRelevanceThreshold := floatOrNil(body.NotebookRelevanceThreshold)
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
@@ -503,22 +540,25 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
                 INSERT INTO watchkeeper.manifest_version (
                     manifest_id, version_no, system_prompt,
                     tools, authority_matrix, knowledge_sources,
-                    personality, language, model, autonomy
+                    personality, language, model, autonomy,
+                    notebook_top_k, notebook_relevance_threshold
                 )
                 SELECT
                     $1, $2, $3,
                     coalesce($4::jsonb, '[]'::jsonb),
                     coalesce($5::jsonb, '{}'::jsonb),
                     coalesce($6::jsonb, '[]'::jsonb),
-                    $7, $8, $9, $10
+                    $7, $8, $9, $10,
+                    $11, $12
                 WHERE EXISTS (
                     SELECT 1 FROM watchkeeper.manifest
-                    WHERE id = $1 AND organization_id = $11
+                    WHERE id = $1 AND organization_id = $13
                 )
                 RETURNING id
             `, manifestID, body.VersionNo, body.SystemPrompt,
 				tools, authorityMatrix, knowledgeSources,
-				personality, language, model, autonomy, claim.OrganizationID,
+				personality, language, model, autonomy,
+				notebookTopK, notebookRelevanceThreshold, claim.OrganizationID,
 			).Scan(&id)
 		})
 		if err != nil {
@@ -556,6 +596,30 @@ func stringOrNil(s string) any {
 		return nil
 	}
 	return s
+}
+
+// intOrNil returns nil for a zero int so the nullable column holds SQL NULL
+// rather than a zero integer. Zero is the wire-level sentinel meaning
+// "unset / auto-recall disabled" for notebook_top_k; it round-trips to SQL
+// NULL via this helper, matching the `coalesce(notebook_top_k, 0)` read
+// convention.
+func intOrNil(n int) any {
+	if n == 0 {
+		return nil
+	}
+	return n
+}
+
+// floatOrNil returns nil for a zero float64 so the nullable column holds SQL
+// NULL rather than a zero value. Zero is the wire-level sentinel meaning
+// "unset" for notebook_relevance_threshold; it round-trips to SQL NULL via
+// this helper, matching the `coalesce(notebook_relevance_threshold, 0)` read
+// convention.
+func floatOrNil(f float64) any {
+	if f == 0 {
+		return nil
+	}
+	return f
 }
 
 // -----------------------------------------------------------------------

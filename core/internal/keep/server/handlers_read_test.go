@@ -511,7 +511,9 @@ func TestGetManifest_ModelProjection(t *testing.T) {
 			*dest[8].(*string) = ""
 			*dest[9].(*string) = wantModel
 			*dest[10].(*string) = ""
-			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
+			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
+			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -566,7 +568,9 @@ func TestGetManifest_AutonomyProjection(t *testing.T) {
 			*dest[8].(*string) = ""
 			*dest[9].(*string) = ""
 			*dest[10].(*string) = wantAutonomy
-			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
+			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
+			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -589,6 +593,71 @@ func TestGetManifest_AutonomyProjection(t *testing.T) {
 	}
 	if got["autonomy"] != wantAutonomy {
 		t.Errorf("GET response autonomy = %v, want %q; body=%s", got["autonomy"], wantAutonomy, rec.Body.String())
+	}
+}
+
+// TestGetManifest_NotebookRecallProjection is the dedicated GET-path
+// coverage for the manifest_version.notebook_top_k and
+// manifest_version.notebook_relevance_threshold columns (M5.5.c.a AC3/AC5).
+// It stages a fake SELECT row whose notebook slots are set to known values
+// and asserts that the GET /v1/manifests/{id} response JSON carries both
+// `"notebook_top_k":<value>` and `"notebook_relevance_threshold":<value>`.
+// Keeping this in handlers_read_test.go isolates the SELECT projection from
+// the INSERT wiring tested in handlers_write_test.go.
+func TestGetManifest_NotebookRecallProjection(t *testing.T) {
+	const wantTopK = 20
+	const wantThreshold = 0.75
+	queryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			// SELECT order from handleGetManifest:
+			//   id, manifest_id, version_no, system_prompt,
+			//   tools, authority_matrix, knowledge_sources,
+			//   coalesce(personality, ''), coalesce(language, ''),
+			//   coalesce(model, ''),
+			//   coalesce(autonomy, ''),
+			//   coalesce(notebook_top_k, 0),
+			//   coalesce(notebook_relevance_threshold, 0),
+			//   created_at
+			*dest[0].(*string) = fakeUUID
+			*dest[1].(*string) = putManifestID
+			*dest[2].(*int) = 1
+			*dest[3].(*string) = "sys"
+			*dest[4].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[5].(*json.RawMessage) = json.RawMessage(`{}`)
+			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[7].(*string) = ""
+			*dest[8].(*string) = ""
+			*dest[9].(*string) = ""
+			*dest[10].(*string) = ""
+			*dest[11].(*int) = wantTopK
+			*dest[12].(*float64) = wantThreshold
+			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			return nil
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/v1/manifests/"+putManifestID, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	// JSON numbers unmarshal to float64 in map[string]any.
+	if got["notebook_top_k"] != float64(wantTopK) {
+		t.Errorf("GET response notebook_top_k = %v, want %v; body=%s", got["notebook_top_k"], wantTopK, rec.Body.String())
+	}
+	if got["notebook_relevance_threshold"] != wantThreshold {
+		t.Errorf("GET response notebook_relevance_threshold = %v, want %v; body=%s", got["notebook_relevance_threshold"], wantThreshold, rec.Body.String())
 	}
 }
 

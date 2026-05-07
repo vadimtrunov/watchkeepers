@@ -1937,3 +1937,29 @@ None. Planner's decomposition rationale (no consumer integration; library API on
 - Total wall time from /rdd to merge: pending (Phase 5b+)
 
 ---
+
+## 2026-05-07 — M5.5.c.a: Add manifest_version columns notebook_top_k + notebook_relevance_threshold + server projection
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+
+`--auto resume` after a previous tick scaffolded the migration but did not commit — resume mode detected the untracked file as in-flight Phase 3 work and executor folded it cleanly into `b75b5c3`. State recovery via TASK progress log + branch name matched correctly. Phase 4 converged in 1 iteration because the diff is a close clone of M5.5.b.b.a/b.c.a precedent — the reviewer brief's "consistency with established pattern" check did its job in one pass.
+
+### What wasted effort
+
+Preflight Check 4 ("clean tree") strictly interpreted would have halted on the untracked migration scaffold. The orchestrator made the right resume-mode interpretation (in-progress executor scaffold ≠ dirty) but a tighter skill rule would prevent deadlock: in resume mode, untracked files inside the TASK plan's expected directories should be treated as in-flight Phase 3 rather than blocking preflight.
+
+### Suggested skill changes
+
+- In `references/preflight.md` Check 4, add a resume-mode exception: when the current branch matches a resumable `rdd/*` and every untracked file is inside the TASK plan's expected paths, treat as in-flight Phase 3 instead of failing.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0 (Phase 6 not yet run — pending after PR open)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending
+
+---
