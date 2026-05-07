@@ -45,6 +45,17 @@ type ManifestVersion struct {
 	// CHECK enum constraint (migration 015); the client mirrors the
 	// constraint on PUT.
 	Autonomy string `json:"autonomy,omitempty"`
+	// NotebookTopK is the optional notebook recall top-K count (omitempty
+	// matches the server: zero is omitted from the wire response). When
+	// non-zero, must be in [1, 100]; the client mirrors the range on PUT
+	// (migration 016). Zero is treated as "unset" and the runtime uses its
+	// own default.
+	NotebookTopK int `json:"notebook_top_k,omitempty"`
+	// NotebookRelevanceThreshold is the optional notebook recall relevance
+	// threshold (omitempty matches the server: zero is omitted from the wire
+	// response). When non-zero, must be in (0, 1]; the client mirrors the
+	// range on PUT (migration 016). Zero is treated as "unset".
+	NotebookRelevanceThreshold float64 `json:"notebook_relevance_threshold,omitempty"`
 	// CreatedAt is the row's created_at timestamp (RFC3339 on the wire).
 	CreatedAt string `json:"created_at"`
 }
