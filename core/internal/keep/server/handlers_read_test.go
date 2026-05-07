@@ -498,6 +498,7 @@ func TestGetManifest_ModelProjection(t *testing.T) {
 			//   tools, authority_matrix, knowledge_sources,
 			//   coalesce(personality, ''), coalesce(language, ''),
 			//   coalesce(model, ''),
+			//   coalesce(autonomy, ''),
 			//   created_at
 			*dest[0].(*string) = fakeUUID
 			*dest[1].(*string) = putManifestID
@@ -509,7 +510,8 @@ func TestGetManifest_ModelProjection(t *testing.T) {
 			*dest[7].(*string) = ""
 			*dest[8].(*string) = ""
 			*dest[9].(*string) = wantModel
-			*dest[10].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[10].(*string) = ""
+			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -532,6 +534,61 @@ func TestGetManifest_ModelProjection(t *testing.T) {
 	}
 	if got["model"] != wantModel {
 		t.Errorf("GET response model = %v, want %q; body=%s", got["model"], wantModel, rec.Body.String())
+	}
+}
+
+// TestGetManifest_AutonomyProjection is the dedicated GET-path coverage
+// for the manifest_version.autonomy column (M5.5.b.c.a AC3/AC5). It
+// stages a fake SELECT row whose autonomy slot is set to a known value
+// and asserts that the GET /v1/manifests/{id} response JSON carries
+// `"autonomy":"<value>"` on the wire. Keeping this in handlers_read_test.go
+// isolates the SELECT projection from the INSERT wiring tested in
+// handlers_write_test.go.
+func TestGetManifest_AutonomyProjection(t *testing.T) {
+	const wantAutonomy = "autonomous"
+	queryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			// SELECT order from handleGetManifest:
+			//   id, manifest_id, version_no, system_prompt,
+			//   tools, authority_matrix, knowledge_sources,
+			//   coalesce(personality, ''), coalesce(language, ''),
+			//   coalesce(model, ''),
+			//   coalesce(autonomy, ''),
+			//   created_at
+			*dest[0].(*string) = fakeUUID
+			*dest[1].(*string) = putManifestID
+			*dest[2].(*int) = 1
+			*dest[3].(*string) = "sys"
+			*dest[4].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[5].(*json.RawMessage) = json.RawMessage(`{}`)
+			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[7].(*string) = ""
+			*dest[8].(*string) = ""
+			*dest[9].(*string) = ""
+			*dest[10].(*string) = wantAutonomy
+			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			return nil
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/v1/manifests/"+putManifestID, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	if got["autonomy"] != wantAutonomy {
+		t.Errorf("GET response autonomy = %v, want %q; body=%s", got["autonomy"], wantAutonomy, rec.Body.String())
 	}
 }
 
