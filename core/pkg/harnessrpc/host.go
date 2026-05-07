@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // JSON-RPC 2.0 standard error codes the [Host] emits. Application-level
@@ -94,20 +95,33 @@ func (h *Host) Register(method string, handler MethodHandler) {
 // request dispatches in its own goroutine; writes to `out` are
 // serialized internally. The handler receives the same `ctx` so it
 // can react to cancellation; the host imposes no per-request deadline.
+//
+// Trust: peer is the harness child process; flooding is treated as a
+// peer bug, not a DOS vector. Bounded concurrency is M6 work if the
+// trust assumption changes.
 func (h *Host) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	scanner := bufio.NewScanner(in)
 	const maxLine = 1 << 20
 	scanner.Buffer(make([]byte, 0, 64<<10), maxLine)
 
 	var writeMu sync.Mutex
+	// writeErr stores the first write error observed by any dispatched
+	// goroutine. Once set, the read loop exits so that callers whose
+	// pending promises would hang forever get an early error instead.
+	var writeErr atomic.Pointer[error]
+
 	writeLine := func(line []byte) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		if _, err := out.Write(line); err != nil {
+			writeErr.CompareAndSwap(nil, &err)
 			return err
 		}
-		_, err := out.Write([]byte{'\n'})
-		return err
+		if _, err := out.Write([]byte{'\n'}); err != nil {
+			writeErr.CompareAndSwap(nil, &err)
+			return err
+		}
+		return nil
 	}
 
 	var wg sync.WaitGroup
@@ -118,6 +132,9 @@ func (h *Host) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+		if p := writeErr.Load(); p != nil {
+			return fmt.Errorf("harnessrpc: write: %w", *p)
 		}
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
@@ -138,8 +155,6 @@ func (h *Host) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 			if !ok {
 				return
 			}
-			// Writing failed: the next scanner.Scan() will return EOF
-			// or an error; surfacing here would clutter the protocol.
 			_ = writeLine(respLine)
 		}(buf)
 	}

@@ -128,10 +128,8 @@ func (s *rpcShim) request(method string, params any) (json.RawMessage, *response
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := s.w.Write(line); err != nil {
-		return nil, nil, err
-	}
-	if _, err := s.w.Write([]byte{'\n'}); err != nil {
+	payload := append(line, '\n')
+	if _, err := s.w.Write(payload); err != nil {
 		return nil, nil, err
 	}
 
