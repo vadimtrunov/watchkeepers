@@ -2154,3 +2154,32 @@ Review iterations: 3 (initial + fixer + re-review); PR-fix iterations: 0 (pendin
 ### Suggested skill changes
 
 In `references/agent-briefs/executor.md`, recommend: when the executor recognizes that a sibling-deferred integration is needed RIGHT NOW (because dispatch requires it), the executor MUST surface this in their final report as a "scope expansion" line item with rationale. The reviewer can then evaluate whether the expansion is justified or warrants halt-for-decomposition.
+
+---
+
+## 2026-05-07 — M5.5.d.c: manifest projection + end-to-end test
+
+**PR**: [#82](https://github.com/vadimtrunov/watchkeepers/pull/82)
+**Phases with incidents**: 0
+
+### What worked
+
+**Pragmatic AC scoping at Gate 2 paid off**: TASK ACs noted that AC1-AC3 might be near-zero LOC if existing tests covered projection/ACL paths. Executor confirmed AC1 fixture was a 28-line addition to existing decodeToolset tests; AC2/AC3 were 85 lines of TS test extension feeding the real `setManifest` handler. Bulk was the e2e test (139 lines). Total 251 LOC vs target 600 — 58% under target. Pre-empting "may collapse to docs-only" in the TASK saved an iteration of executor judgement.
+
+**Phase 4 iter 1 cleanup-correctness check**: reviewer specifically verified `t.Cleanup`/`defer` for the bridge goroutine + DB close + temp dir. This catches the "test passes but leaks goroutines/handles" failure class invisible in CI but bites later in large test suites under `-race`.
+
+### What wasted effort
+
+Minimal — 1 commit, 1 review iteration, 0 fixer. Closest thing to "wasted" was dispatching reviewer for what turned out to be a clean PR; but reviewer iter 1 is the contract.
+
+### Suggested skill changes
+
+In `references/agent-briefs/code-reviewer.md`, recommend (as already practiced informally) that reviewers EXPLICITLY check `t.Cleanup`/`defer` discipline for any test constructing goroutines, opening files/DBs, or setting process-global env. Make the check a numbered focus area, not just implicit reading.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending
+
