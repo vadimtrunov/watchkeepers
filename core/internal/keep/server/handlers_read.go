@@ -207,6 +207,7 @@ type manifestVersionResponse struct {
 	Personality      string          `json:"personality,omitempty"`
 	Language         string          `json:"language,omitempty"`
 	Model            string          `json:"model,omitempty"`
+	Autonomy         string          `json:"autonomy,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
 }
 
@@ -235,6 +236,7 @@ func handleGetManifest(r scopedRunner) http.Handler {
                        tools, authority_matrix, knowledge_sources,
                        coalesce(personality, ''), coalesce(language, ''),
                        coalesce(model, ''),
+                       coalesce(autonomy, ''),
                        created_at
                 FROM watchkeeper.manifest_version
                 WHERE manifest_id = $1
@@ -245,6 +247,7 @@ func handleGetManifest(r scopedRunner) http.Handler {
 				&out.Tools, &out.AuthorityMatrix, &out.KnowledgeSources,
 				&out.Personality, &out.Language,
 				&out.Model,
+				&out.Autonomy,
 				&out.CreatedAt,
 			)
 		})

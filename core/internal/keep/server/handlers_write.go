@@ -64,6 +64,19 @@ const manifestPersonalityMaxRunes = 1024
 // `manifestPersonalityMaxRunes` above.
 const manifestModelMaxRunes = 100
 
+// manifestAutonomyAllowed is the closed set of accepted values for the
+// manifest_version.autonomy wire field, mirroring the SQL CHECK
+// `manifest_version_autonomy_enum` from migration 015 and the runtime
+// `AutonomyLevel` enum constants `runtime.AutonomySupervised` /
+// `runtime.AutonomyAutonomous` (see core/pkg/runtime/runtime.go:33-48).
+// `runtime.AutonomyManual` is intentionally absent at this milestone:
+// M5.5.b.c.a is wire-schema-first and does not yet ship the manual flow.
+// Empty `""` is accepted (round-trips to SQL NULL → runtime defaults to
+// supervised) and short-circuits the lookup before this slice is consulted.
+//
+//nolint:gochecknoglobals // intentional module-scoped enum-membership set.
+var manifestAutonomyAllowed = []string{"supervised", "autonomous"}
+
 // -----------------------------------------------------------------------
 // POST /v1/knowledge-chunks — handleStore
 // -----------------------------------------------------------------------
@@ -324,6 +337,7 @@ type putManifestVersionRequest struct {
 	Personality      string          `json:"personality"`
 	Language         string          `json:"language"`
 	Model            string          `json:"model"`
+	Autonomy         string          `json:"autonomy"`
 }
 
 // putManifestVersionResponse is the 201 body returned on successful insert.
@@ -384,6 +398,26 @@ func parsePutManifestVersionRequest(w http.ResponseWriter, req *http.Request) (p
 	if utf8.RuneCountInString(body.Model) > manifestModelMaxRunes {
 		writeError(w, http.StatusBadRequest, "model_too_long")
 		return body, false
+	}
+	// Mirror the SQL `manifest_version_autonomy_enum` CHECK from migration
+	// 015 plus the `runtime.AutonomyLevel` enum (see runtime.go:33-48). An
+	// empty Autonomy round-trips as SQL NULL (allowed; runtime defaults to
+	// supervised); any non-empty value MUST be in `manifestAutonomyAllowed`.
+	// Reject before the row hits Postgres so the caller gets a stable
+	// `invalid_autonomy` reason instead of an opaque 500. Pattern mirrors
+	// the `invalid_language` check above.
+	if body.Autonomy != "" {
+		ok := false
+		for _, allowed := range manifestAutonomyAllowed {
+			if body.Autonomy == allowed {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid_autonomy")
+			return body, false
+		}
 	}
 	return body, true
 }
@@ -451,6 +485,7 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 		personality := stringOrNil(body.Personality)
 		language := stringOrNil(body.Language)
 		model := stringOrNil(body.Model)
+		autonomy := stringOrNil(body.Autonomy)
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
@@ -468,22 +503,22 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
                 INSERT INTO watchkeeper.manifest_version (
                     manifest_id, version_no, system_prompt,
                     tools, authority_matrix, knowledge_sources,
-                    personality, language, model
+                    personality, language, model, autonomy
                 )
                 SELECT
                     $1, $2, $3,
                     coalesce($4::jsonb, '[]'::jsonb),
                     coalesce($5::jsonb, '{}'::jsonb),
                     coalesce($6::jsonb, '[]'::jsonb),
-                    $7, $8, $9
+                    $7, $8, $9, $10
                 WHERE EXISTS (
                     SELECT 1 FROM watchkeeper.manifest
-                    WHERE id = $1 AND organization_id = $10
+                    WHERE id = $1 AND organization_id = $11
                 )
                 RETURNING id
             `, manifestID, body.VersionNo, body.SystemPrompt,
 				tools, authorityMatrix, knowledgeSources,
-				personality, language, model, claim.OrganizationID,
+				personality, language, model, autonomy, claim.OrganizationID,
 			).Scan(&id)
 		})
 		if err != nil {

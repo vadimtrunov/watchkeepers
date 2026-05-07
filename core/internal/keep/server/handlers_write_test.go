@@ -880,6 +880,7 @@ func TestPutManifestVersion_WithModel_201_RoundTrip(t *testing.T) {
 			//   tools, authority_matrix, knowledge_sources,
 			//   coalesce(personality, ''), coalesce(language, ''),
 			//   coalesce(model, ''),
+			//   coalesce(autonomy, ''),
 			//   created_at
 			*dest[0].(*string) = fakeUUID
 			*dest[1].(*string) = putManifestID
@@ -891,7 +892,8 @@ func TestPutManifestVersion_WithModel_201_RoundTrip(t *testing.T) {
 			*dest[7].(*string) = ""
 			*dest[8].(*string) = ""
 			*dest[9].(*string) = capturedModel
-			*dest[10].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[10].(*string) = ""
+			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -954,12 +956,12 @@ func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	// Expect exactly 6 nil args: tools, authority_matrix, knowledge_sources,
-	// personality, language, model. If model wiring is absent the count drops
-	// to 5 and this assertion catches the regression.
-	const wantNilArgs = 6
+	// Expect exactly 7 nil args: tools, authority_matrix, knowledge_sources,
+	// personality, language, model, autonomy. If model or autonomy wiring is
+	// absent the count drops to 6 and this assertion catches the regression.
+	const wantNilArgs = 7
 	if nilArgCount != wantNilArgs {
-		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model)", nilArgCount, wantNilArgs)
+		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy)", nilArgCount, wantNilArgs)
 	}
 
 	// Step 2: GET — SELECT returns coalesce(model, '') == "" so the
@@ -975,8 +977,9 @@ func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
 			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
 			*dest[7].(*string) = ""
 			*dest[8].(*string) = ""
-			*dest[9].(*string) = "" // model NULL → coalesce → ""
-			*dest[10].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[9].(*string) = ""  // model NULL → coalesce → ""
+			*dest[10].(*string) = "" // autonomy NULL → coalesce → ""
+			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1052,6 +1055,255 @@ func TestPutManifestVersion_ModelOver100Chars_400_ModelTooLong(t *testing.T) {
 	}
 	if env.Error != "model_too_long" {
 		t.Errorf("error = %q, want model_too_long", env.Error)
+	}
+}
+
+// TestPutManifestVersion_WithAutonomy_201_RoundTrip — PUT body carries
+// `autonomy:"autonomous"`; the handler must thread the value through
+// the INSERT (M5.5.b.c.a AC4) and a subsequent GET on the same fake
+// runner returns the captured autonomy on the wire. Round-trip is
+// asserted at the wire shape: (1) the INSERT's bound args contain the
+// autonomy string, and (2) the GET response JSON has
+// `autonomy:"autonomous"`. The handler tests do not run a real DB; the
+// fake tx captures the autonomy arg from PUT and a fakeRow Scan closure
+// replays it for GET.
+func TestPutManifestVersion_WithAutonomy_201_RoundTrip(t *testing.T) {
+	const wantAutonomy = "autonomous"
+	var capturedAutonomy string
+	var gotSQL string
+	queryRow := func(_ context.Context, sql string, args ...any) pgx.Row {
+		gotSQL = sql
+		// PUT INSERT branch: capture the bound autonomy arg. The handler
+		// passes `stringOrNil(body.Autonomy)` so a non-empty autonomy
+		// becomes a `string`; a NULL autonomy becomes `nil`. Walk the
+		// args slice and grab the first string that matches the input.
+		for _, a := range args {
+			if s, ok := a.(string); ok && s == wantAutonomy {
+				capturedAutonomy = s
+			}
+		}
+		return server.NewFakeRow(func(dest ...any) error {
+			if sp, ok := dest[0].(*string); ok {
+				*sp = fakeUUID
+			}
+			return nil
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	// Step 1: PUT with autonomy — assert 201 and autonomy arg threaded.
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+			"autonomy":      wantAutonomy,
+		}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if capturedAutonomy != wantAutonomy {
+		t.Fatalf("autonomy arg not bound on INSERT; capturedAutonomy=%q want=%q", capturedAutonomy, wantAutonomy)
+	}
+	if !strings.Contains(gotSQL, "autonomy") {
+		t.Errorf("INSERT SQL missing autonomy column; got SQL: %s", gotSQL)
+	}
+
+	// Step 2: GET — stage a SELECT row that replays the captured autonomy.
+	getQueryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			// SELECT order from handleGetManifest:
+			//   id, manifest_id, version_no, system_prompt,
+			//   tools, authority_matrix, knowledge_sources,
+			//   coalesce(personality, ''), coalesce(language, ''),
+			//   coalesce(model, ''),
+			//   coalesce(autonomy, ''),
+			//   created_at
+			*dest[0].(*string) = fakeUUID
+			*dest[1].(*string) = putManifestID
+			*dest[2].(*int) = 1
+			*dest[3].(*string) = "ok"
+			*dest[4].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[5].(*json.RawMessage) = json.RawMessage(`{}`)
+			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[7].(*string) = ""
+			*dest[8].(*string) = ""
+			*dest[9].(*string) = ""
+			*dest[10].(*string) = capturedAutonomy
+			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			return nil
+		})
+	}
+	getRunner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: getQueryRow})}
+	gh, gti := writeRouterForTest(t, mustFixedNow(), getRunner)
+	gtok := mustMintToken(t, gti, "org")
+
+	greq := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/v1/manifests/"+putManifestID, nil)
+	greq.Header.Set("Authorization", "Bearer "+gtok)
+	grec := httptest.NewRecorder()
+	gh.ServeHTTP(grec, greq)
+	if grec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body=%s", grec.Code, grec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(grec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	if got["autonomy"] != wantAutonomy {
+		t.Errorf("GET response autonomy = %v, want %q; body=%s", got["autonomy"], wantAutonomy, grec.Body.String())
+	}
+}
+
+// TestPutManifestVersion_AutonomyOmitted_201_GetHasNoAutonomyKey — when
+// the PUT body omits `autonomy`, a subsequent GET must NOT include an
+// `autonomy` key in the response JSON (omitempty). Mirrors the wire-omit
+// posture of `personality` / `language` / `model`.
+func TestPutManifestVersion_AutonomyOmitted_201_GetHasNoAutonomyKey(t *testing.T) {
+	// Step 1: PUT without autonomy — assert 201 and runner sees exactly
+	// seven nil args (tools, authority_matrix, knowledge_sources,
+	// personality, language, model, autonomy). Counting all seven means
+	// a regression that removes only the autonomy binding surfaces as
+	// count=6, not a silent pass.
+	var nilArgCount int
+	queryRow := func(_ context.Context, _ string, args ...any) pgx.Row {
+		// Handler passes stringOrNil("") / jsonbOrNil(nil) which both
+		// return the untyped nil interface for omitted fields.
+		for _, a := range args {
+			if a == nil {
+				nilArgCount++
+			}
+		}
+		return server.NewFakeRow(func(dest ...any) error {
+			if sp, ok := dest[0].(*string); ok {
+				*sp = fakeUUID
+			}
+			return nil
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+		}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	const wantNilArgs = 7
+	if nilArgCount != wantNilArgs {
+		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy)", nilArgCount, wantNilArgs)
+	}
+
+	// Step 2: GET — SELECT returns coalesce(autonomy, '') == "" so the
+	// response JSON must not carry an `autonomy` key.
+	getQueryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			*dest[0].(*string) = fakeUUID
+			*dest[1].(*string) = putManifestID
+			*dest[2].(*int) = 1
+			*dest[3].(*string) = "ok"
+			*dest[4].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[5].(*json.RawMessage) = json.RawMessage(`{}`)
+			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[7].(*string) = ""
+			*dest[8].(*string) = ""
+			*dest[9].(*string) = ""
+			*dest[10].(*string) = "" // autonomy NULL → coalesce → ""
+			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			return nil
+		})
+	}
+	getRunner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: getQueryRow})}
+	gh, gti := writeRouterForTest(t, mustFixedNow(), getRunner)
+	gtok := mustMintToken(t, gti, "org")
+
+	greq := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/v1/manifests/"+putManifestID, nil)
+	greq.Header.Set("Authorization", "Bearer "+gtok)
+	grec := httptest.NewRecorder()
+	gh.ServeHTTP(grec, greq)
+	if grec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body=%s", grec.Code, grec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(grec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	if _, present := got["autonomy"]; present {
+		t.Errorf("GET response carries autonomy key when body omitted it; body=%s", grec.Body.String())
+	}
+}
+
+// TestPutManifestVersion_AutonomySupervised_201 — `autonomy:"supervised"`
+// is the second valid enum member and must be accepted with 201.
+func TestPutManifestVersion_AutonomySupervised_201(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: fakeUUID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+			"autonomy":      "supervised",
+		}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPutManifestVersion_AutonomyInvalid_400_InvalidAutonomy — a non-empty
+// `autonomy` body field that is not one of `{"supervised","autonomous"}`
+// must be rejected with 400 invalid_autonomy before the row reaches
+// Postgres. Mirrors the SQL `manifest_version_autonomy_enum` CHECK from
+// migration 015 and the `invalid_language` precedent.
+func TestPutManifestVersion_AutonomyInvalid_400_InvalidAutonomy(t *testing.T) {
+	cases := []struct {
+		name, autonomy string
+	}{
+		{"unknown_word", "invalid"},
+		{"manual_not_in_set", "manual"}, // runtime.AutonomyManual exists but is OUT of M5.5.b.c.a's accepted set
+		{"uppercase", "Autonomous"},
+		{"trailing_space", "autonomous "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &server.FakeScopedRunner{}
+			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+			tok := mustMintToken(t, ti, "org")
+
+			rec := writeDo(t, h, http.MethodPut,
+				"/v1/manifests/"+putManifestID+"/versions",
+				tok, map[string]any{
+					"version_no":    1,
+					"system_prompt": "ok",
+					"autonomy":      tc.autonomy,
+				}, "")
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if runner.FnInvoked {
+				t.Error("runner was invoked; expected rejection before tx")
+			}
+			var env struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if env.Error != "invalid_autonomy" {
+				t.Errorf("error = %q, want invalid_autonomy", env.Error)
+			}
+		})
 	}
 }
 

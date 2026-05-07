@@ -1834,3 +1834,29 @@ None. Phase 4 iter 1 reviewer noticed the loader's struct initialiser walks fiel
 - Total wall time from /rdd to merge: pending — Phase 5b+
 
 ---
+
+## 2026-05-07 — M5.5.b.c.a: Add manifest_version.autonomy column + server PUT/GET projection
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+
+Phase 1+2 folded into single tick: precedent M5.5.b.b.a provided every file:line reference, enum-via-CHECK pattern, and test-scaffold shape. Planner correctly identified the near-clone structure; executor consumed the spec without ambiguity. Zero-iteration executor run → converged Phase 4 review on first iteration with 0 blockers, 0 important items.
+
+### What wasted effort
+
+None. Review loop was clean.
+
+### Suggested skill changes
+
+Estimation undershot wire-field cost. M5.5.b.c.a landed at 384 LOC (24% over target 320) due to mechanical test-scaffold reindexing. Wire-shape extensions on `manifest_version` consistently cost ~350-400 LOC once test index cascades are counted. Suggest retargeting TASK-size estimates from 280-320 → 350-400 for future `manifest_version` wire-field adds.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending (Phase 5a in progress)
+
+---
