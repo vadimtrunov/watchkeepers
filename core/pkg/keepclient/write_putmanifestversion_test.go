@@ -108,7 +108,7 @@ func TestPutManifestVersion_OmitsEmptyOptionalFields(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PutManifestVersion: %v", err)
 	}
-	for _, k := range []string{`"tools"`, `"authority_matrix"`, `"knowledge_sources"`, `"personality"`, `"language"`} {
+	for _, k := range []string{`"tools"`, `"authority_matrix"`, `"knowledge_sources"`, `"personality"`, `"language"`, `"autonomy"`} {
 		if strings.Contains(string(rawBody), k) {
 			t.Errorf("body included %s field; got %s", k, rawBody)
 		}
