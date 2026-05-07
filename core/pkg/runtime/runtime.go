@@ -109,6 +109,18 @@ type Manifest struct {
 	// loader is the projection's owner.
 	AuthorityMatrix map[string]string
 
+	// NotebookTopK is the optional notebook recall top-K count. Zero
+	// means "unset" — the runtime uses its own default. Populated by
+	// the M5.5.c.b loader from keepclient.ManifestVersion.NotebookTopK;
+	// consumed by the M5.5.c.d recall layer.
+	NotebookTopK int
+
+	// NotebookRelevanceThreshold is the optional notebook recall relevance
+	// threshold (0–1). Zero means "unset". Populated by the M5.5.c.b
+	// loader from keepclient.ManifestVersion.NotebookRelevanceThreshold;
+	// consumed by the M5.5.c.d recall layer.
+	NotebookRelevanceThreshold float64
+
 	// Metadata carries runtime-specific extensions (TS-harness module
 	// path, Claude Code subprocess flags, isolate options, …). The
 	// runtime consumes only the keys it recognises and ignores the
