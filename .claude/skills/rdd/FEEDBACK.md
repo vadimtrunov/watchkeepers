@@ -1963,3 +1963,29 @@ Preflight Check 4 ("clean tree") strictly interpreted would have halted on the u
 - Total wall time from /rdd to merge: pending
 
 ---
+## 2026-05-07 — M5.5.c.b: Extend keepclient.ManifestVersion with NotebookTopK / NotebookRelevanceThreshold + loader projection
+
+**PR**: pending
+**Phases with incidents**: none
+
+### What worked
+
+After M5.5.c.a closed and `--auto resume` re-entered on `main` with no in-progress TASK, the orchestrator correctly interpreted this as Phase 1 fresh-pick (clean tree on `main`, preflight Check 5 satisfied) and selected the unique top-down first leaf with met deps (M5.5.c.b). The lessons file `docs/lessons/M5.md` had four near-clone precedent entries (M5.5.b.b.b/c.b/b.c/c.c.a) plus the just-written M5.5.c.a entry—the orchestrator wrote the TASK file directly without dispatching `explore`, reducing one agent hop. Phase 4 converged iter 1 because the diff is a 5th repetition of an established pattern.
+
+### What wasted effort
+
+Minimal. The `--auto resume` semantics are mildly under-specified for the case "TASK closed on tick N, tick N+1 should pick fresh"; SKILL.md says strict resume halts when no TASK is in progress. The orchestrator interpreted the loop intent as "continue ROADMAP" and proceeded with Phase 1 fresh-pick. Worth tightening.
+
+### Suggested skill changes
+
+- In SKILL.md §State recovery, clarify that `/rdd --auto resume` after a TASK closes auto-falls-through to Phase 1 fresh-pick when on `main` and ROADMAP candidates remain. The current strict text "If no such file exists, tell the operator and exit" applies to interactive `/rdd resume` but should be relaxed for `--auto resume` in `/loop`.
+- In `references/agent-briefs/code-reviewer.md`, consider adding "doc-comment / validator range asymmetry" as a recognized nit-class, so the reviewer's rationale can cite a stable category instead of free-form prose.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0 (Phase 6 pending after PR open)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending
+
+---
