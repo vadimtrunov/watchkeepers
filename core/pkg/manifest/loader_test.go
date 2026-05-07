@@ -430,3 +430,54 @@ func TestLoadManifest_AutonomyEmpty_ProjectsVerbatim(t *testing.T) {
 		t.Errorf("Autonomy = %q, want empty (loader supplies no default)", got.Autonomy)
 	}
 }
+
+// TestLoadManifest_ProjectsNotebookRecallFields asserts M5.5.c.b AC4: a
+// non-zero [keepclient.ManifestVersion.NotebookTopK] and
+// [keepclient.ManifestVersion.NotebookRelevanceThreshold] copy verbatim
+// onto [runtime.Manifest.NotebookTopK] and
+// [runtime.Manifest.NotebookRelevanceThreshold] — no transformation.
+func TestLoadManifest_ProjectsNotebookRecallFields(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:                 "m",
+		SystemPrompt:               "x",
+		NotebookTopK:               20,
+		NotebookRelevanceThreshold: 0.75,
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.NotebookTopK != 20 {
+		t.Errorf("NotebookTopK = %d, want 20", got.NotebookTopK)
+	}
+	if got.NotebookRelevanceThreshold != 0.75 {
+		t.Errorf("NotebookRelevanceThreshold = %v, want 0.75", got.NotebookRelevanceThreshold)
+	}
+}
+
+// TestLoadManifest_NotebookRecallFields_ZeroPassThrough asserts M5.5.c.b
+// AC4: zero values from [keepclient.ManifestVersion] project to zero on
+// [runtime.Manifest] — no transformation, no default substitution.
+func TestLoadManifest_NotebookRecallFields_ZeroPassThrough(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		// NotebookTopK and NotebookRelevanceThreshold are zero (unset).
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.NotebookTopK != 0 {
+		t.Errorf("NotebookTopK = %d, want 0 (zero pass-through)", got.NotebookTopK)
+	}
+	if got.NotebookRelevanceThreshold != 0 {
+		t.Errorf("NotebookRelevanceThreshold = %v, want 0 (zero pass-through)", got.NotebookRelevanceThreshold)
+	}
+}

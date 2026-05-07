@@ -460,3 +460,68 @@ func TestManifestVersion_MarshalOmitsEmptyAutonomy(t *testing.T) {
 		t.Errorf("body included autonomy key; got %s", raw)
 	}
 }
+
+// TestReadManifestVersion_NotebookRecallFields_Decoded asserts the decoder
+// happy path (M5.5.c.b AC1): a wire response carrying both
+// `notebook_top_k` and `notebook_relevance_threshold` decodes verbatim
+// onto [ManifestVersion.NotebookTopK] and
+// [ManifestVersion.NotebookRelevanceThreshold].
+func TestReadManifestVersion_NotebookRecallFields_Decoded(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "id":"r","manifest_id":"m","version_no":1,
+            "system_prompt":"sp","tools":null,
+            "authority_matrix":null,"knowledge_sources":null,
+            "notebook_top_k":20,
+            "notebook_relevance_threshold":0.75,
+            "created_at":"2026-05-02T12:00:00Z"
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	mv, err := c.GetManifest(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if mv.NotebookTopK != 20 {
+		t.Errorf("NotebookTopK = %d, want 20", mv.NotebookTopK)
+	}
+	if mv.NotebookRelevanceThreshold != 0.75 {
+		t.Errorf("NotebookRelevanceThreshold = %v, want 0.75", mv.NotebookRelevanceThreshold)
+	}
+}
+
+// TestReadManifestVersion_NotebookRecallFields_Omitted asserts the decoder
+// edge case (M5.5.c.b AC1): a wire response without `notebook_top_k` or
+// `notebook_relevance_threshold` decodes to zero values — omitempty on the
+// client mirrors the server contract.
+func TestReadManifestVersion_NotebookRecallFields_Omitted(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "id":"r","manifest_id":"m","version_no":1,
+            "system_prompt":"","tools":null,
+            "authority_matrix":null,"knowledge_sources":null,
+            "created_at":"2026-05-02T12:00:00Z"
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	mv, err := c.GetManifest(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if mv.NotebookTopK != 0 {
+		t.Errorf("NotebookTopK = %d, want 0 (omitted)", mv.NotebookTopK)
+	}
+	if mv.NotebookRelevanceThreshold != 0 {
+		t.Errorf("NotebookRelevanceThreshold = %v, want 0 (omitted)", mv.NotebookRelevanceThreshold)
+	}
+}

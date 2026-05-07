@@ -1,12 +1,13 @@
 // Package manifest implements the M5.5 loader that promotes a wire-format
 // [keepclient.ManifestVersion] into a portable [runtime.Manifest]. This
 // sub-package covers the personality/language slice (template Personality
-// and Language into SystemPrompt; forward AgentID verbatim) and the
-// toolset slice (decode the `tools` jsonb column into the Toolset
-// []string the runtime ACL consults at InvokeTool time, M5.5.b.a). The
-// AuthorityMatrix projection, Notebook open, and the Remember built-in
-// tool live in sibling milestones (M5.5.b.c, M5.5.c, M5.5.d) and do NOT
-// belong here.
+// and Language into SystemPrompt; forward AgentID verbatim), the toolset
+// slice (decode the `tools` jsonb column into the Toolset []string the
+// runtime ACL consults at InvokeTool time, M5.5.b.a), the AuthorityMatrix
+// projection (M5.5.b.c.c.a), the Autonomy projection (M5.5.b.c.c.a), and
+// the notebook recall tunables NotebookTopK / NotebookRelevanceThreshold
+// (M5.5.c.b). Notebook open and the Remember built-in tool live in sibling
+// milestones (M5.5.c.c, M5.5.d) and do NOT belong here.
 package manifest
 
 import (
@@ -76,8 +77,11 @@ type ManifestFetcher interface {
 // [keepclient.ManifestVersion.Autonomy] onto
 // [runtime.Manifest.Autonomy] verbatim — empty string propagates as the
 // empty [runtime.AutonomyLevel]; the runtime defaults to
-// [runtime.AutonomySupervised] downstream per runtime.go:97. Metadata
-// is not set by this loader; its wiring lands in a sibling milestone.
+// [runtime.AutonomySupervised] downstream per runtime.go:97.
+// NotebookTopK and NotebookRelevanceThreshold are copied verbatim from
+// [keepclient.ManifestVersion] onto [runtime.Manifest]; zero propagates
+// as zero ("unset"). Metadata is not set by this loader; its wiring
+// lands in a sibling milestone.
 func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (runtime.Manifest, error) {
 	if manifestID == "" {
 		return runtime.Manifest{}, runtime.ErrInvalidManifest
@@ -99,14 +103,16 @@ func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (r
 	}
 
 	return runtime.Manifest{
-		AgentID:         mv.ManifestID,
-		SystemPrompt:    composeSystemPrompt(mv.SystemPrompt, mv.Personality, mv.Language),
-		Personality:     mv.Personality,
-		Language:        mv.Language,
-		Model:           mv.Model,
-		Autonomy:        runtime.AutonomyLevel(mv.Autonomy),
-		Toolset:         toolset,
-		AuthorityMatrix: authorityMatrix,
+		AgentID:                    mv.ManifestID,
+		SystemPrompt:               composeSystemPrompt(mv.SystemPrompt, mv.Personality, mv.Language),
+		Personality:                mv.Personality,
+		Language:                   mv.Language,
+		Model:                      mv.Model,
+		Autonomy:                   runtime.AutonomyLevel(mv.Autonomy),
+		Toolset:                    toolset,
+		AuthorityMatrix:            authorityMatrix,
+		NotebookTopK:               mv.NotebookTopK,
+		NotebookRelevanceThreshold: mv.NotebookRelevanceThreshold,
 	}, nil
 }
 
