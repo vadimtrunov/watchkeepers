@@ -197,18 +197,20 @@ func handleSearch(r scopedRunner) http.Handler {
 // version row returned by GET /v1/manifests/{manifest_id}. Field names
 // mirror the database columns verbatim.
 type manifestVersionResponse struct {
-	ID               string          `json:"id"`
-	ManifestID       string          `json:"manifest_id"`
-	VersionNo        int             `json:"version_no"`
-	SystemPrompt     string          `json:"system_prompt"`
-	Tools            json.RawMessage `json:"tools"`
-	AuthorityMatrix  json.RawMessage `json:"authority_matrix"`
-	KnowledgeSources json.RawMessage `json:"knowledge_sources"`
-	Personality      string          `json:"personality,omitempty"`
-	Language         string          `json:"language,omitempty"`
-	Model            string          `json:"model,omitempty"`
-	Autonomy         string          `json:"autonomy,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
+	ID                         string          `json:"id"`
+	ManifestID                 string          `json:"manifest_id"`
+	VersionNo                  int             `json:"version_no"`
+	SystemPrompt               string          `json:"system_prompt"`
+	Tools                      json.RawMessage `json:"tools"`
+	AuthorityMatrix            json.RawMessage `json:"authority_matrix"`
+	KnowledgeSources           json.RawMessage `json:"knowledge_sources"`
+	Personality                string          `json:"personality,omitempty"`
+	Language                   string          `json:"language,omitempty"`
+	Model                      string          `json:"model,omitempty"`
+	Autonomy                   string          `json:"autonomy,omitempty"`
+	NotebookTopK               int             `json:"notebook_top_k,omitempty"`
+	NotebookRelevanceThreshold float64         `json:"notebook_relevance_threshold,omitempty"`
+	CreatedAt                  time.Time       `json:"created_at"`
 }
 
 // handleGetManifest serves GET /v1/manifests/{manifest_id}. It returns
@@ -237,6 +239,8 @@ func handleGetManifest(r scopedRunner) http.Handler {
                        coalesce(personality, ''), coalesce(language, ''),
                        coalesce(model, ''),
                        coalesce(autonomy, ''),
+                       coalesce(notebook_top_k, 0),
+                       coalesce(notebook_relevance_threshold, 0),
                        created_at
                 FROM watchkeeper.manifest_version
                 WHERE manifest_id = $1
@@ -248,6 +252,8 @@ func handleGetManifest(r scopedRunner) http.Handler {
 				&out.Personality, &out.Language,
 				&out.Model,
 				&out.Autonomy,
+				&out.NotebookTopK,
+				&out.NotebookRelevanceThreshold,
 				&out.CreatedAt,
 			)
 		})

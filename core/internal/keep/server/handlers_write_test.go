@@ -881,6 +881,8 @@ func TestPutManifestVersion_WithModel_201_RoundTrip(t *testing.T) {
 			//   coalesce(personality, ''), coalesce(language, ''),
 			//   coalesce(model, ''),
 			//   coalesce(autonomy, ''),
+			//   coalesce(notebook_top_k, 0),
+			//   coalesce(notebook_relevance_threshold, 0),
 			//   created_at
 			*dest[0].(*string) = fakeUUID
 			*dest[1].(*string) = putManifestID
@@ -893,7 +895,9 @@ func TestPutManifestVersion_WithModel_201_RoundTrip(t *testing.T) {
 			*dest[8].(*string) = ""
 			*dest[9].(*string) = capturedModel
 			*dest[10].(*string) = ""
-			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
+			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
+			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -956,12 +960,13 @@ func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	// Expect exactly 7 nil args: tools, authority_matrix, knowledge_sources,
-	// personality, language, model, autonomy. If model or autonomy wiring is
-	// absent the count drops to 6 and this assertion catches the regression.
-	const wantNilArgs = 7
+	// Expect exactly 9 nil args: tools, authority_matrix, knowledge_sources,
+	// personality, language, model, autonomy, notebook_top_k,
+	// notebook_relevance_threshold. If any wiring is absent the count drops
+	// and this assertion catches the regression.
+	const wantNilArgs = 9
 	if nilArgCount != wantNilArgs {
-		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy)", nilArgCount, wantNilArgs)
+		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy/notebook_top_k/notebook_relevance_threshold)", nilArgCount, wantNilArgs)
 	}
 
 	// Step 2: GET — SELECT returns coalesce(model, '') == "" so the
@@ -979,7 +984,9 @@ func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
 			*dest[8].(*string) = ""
 			*dest[9].(*string) = ""  // model NULL → coalesce → ""
 			*dest[10].(*string) = "" // autonomy NULL → coalesce → ""
-			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
+			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
+			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1120,6 +1127,8 @@ func TestPutManifestVersion_WithAutonomy_201_RoundTrip(t *testing.T) {
 			//   coalesce(personality, ''), coalesce(language, ''),
 			//   coalesce(model, ''),
 			//   coalesce(autonomy, ''),
+			//   coalesce(notebook_top_k, 0),
+			//   coalesce(notebook_relevance_threshold, 0),
 			//   created_at
 			*dest[0].(*string) = fakeUUID
 			*dest[1].(*string) = putManifestID
@@ -1132,7 +1141,9 @@ func TestPutManifestVersion_WithAutonomy_201_RoundTrip(t *testing.T) {
 			*dest[8].(*string) = ""
 			*dest[9].(*string) = ""
 			*dest[10].(*string) = capturedAutonomy
-			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
+			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
+			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1196,9 +1207,9 @@ func TestPutManifestVersion_AutonomyOmitted_201_GetHasNoAutonomyKey(t *testing.T
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	const wantNilArgs = 7
+	const wantNilArgs = 9
 	if nilArgCount != wantNilArgs {
-		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy)", nilArgCount, wantNilArgs)
+		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy/notebook_top_k/notebook_relevance_threshold)", nilArgCount, wantNilArgs)
 	}
 
 	// Step 2: GET — SELECT returns coalesce(autonomy, '') == "" so the
@@ -1216,7 +1227,9 @@ func TestPutManifestVersion_AutonomyOmitted_201_GetHasNoAutonomyKey(t *testing.T
 			*dest[8].(*string) = ""
 			*dest[9].(*string) = ""
 			*dest[10].(*string) = "" // autonomy NULL → coalesce → ""
-			*dest[11].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
+			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
+			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1503,5 +1516,339 @@ func TestPutManifestVersion_LegacyClaimRejected(t *testing.T) {
 	}
 	if env.Error != "organization_required" {
 		t.Errorf("error = %q, want organization_required", env.Error)
+	}
+}
+
+// -----------------------------------------------------------------------
+// M5.5.c.a — notebook_top_k + notebook_relevance_threshold wire tests
+// -----------------------------------------------------------------------
+
+// TestPutManifestVersion_WithNotebookRecall_201_RoundTrip — PUT body carries
+// both notebook fields; the handler must thread them through the INSERT and a
+// subsequent GET replays both values on the wire. Round-trip is asserted at
+// the wire shape: (1) INSERT args contain both values and (2) GET response
+// JSON has `notebook_top_k` and `notebook_relevance_threshold`.
+func TestPutManifestVersion_WithNotebookRecall_201_RoundTrip(t *testing.T) { //nolint:gocyclo // round-trip test captures two values; splitting hides the test narrative.
+	const wantTopK = 10
+	const wantThreshold = 0.8
+	var capturedTopK int
+	var capturedThreshold float64
+	var gotSQL string
+	queryRow := func(_ context.Context, sql string, args ...any) pgx.Row {
+		gotSQL = sql
+		for _, a := range args {
+			switch v := a.(type) {
+			case int:
+				if v == wantTopK {
+					capturedTopK = v
+				}
+			case float64:
+				if v == wantThreshold {
+					capturedThreshold = v
+				}
+			}
+		}
+		return server.NewFakeRow(func(dest ...any) error {
+			if sp, ok := dest[0].(*string); ok {
+				*sp = fakeUUID
+			}
+			return nil
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	// Step 1: PUT with both notebook fields — assert 201 and args threaded.
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":                   1,
+			"system_prompt":                "ok",
+			"notebook_top_k":               wantTopK,
+			"notebook_relevance_threshold": wantThreshold,
+		}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if capturedTopK != wantTopK {
+		t.Fatalf("notebook_top_k arg not bound on INSERT; got=%d want=%d", capturedTopK, wantTopK)
+	}
+	if capturedThreshold != wantThreshold {
+		t.Fatalf("notebook_relevance_threshold arg not bound on INSERT; got=%v want=%v", capturedThreshold, wantThreshold)
+	}
+	if !strings.Contains(gotSQL, "notebook_top_k") {
+		t.Errorf("INSERT SQL missing notebook_top_k column; got SQL: %s", gotSQL)
+	}
+	if !strings.Contains(gotSQL, "notebook_relevance_threshold") {
+		t.Errorf("INSERT SQL missing notebook_relevance_threshold column; got SQL: %s", gotSQL)
+	}
+
+	// Step 2: GET — stage a SELECT row that replays the captured values.
+	getQueryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			// SELECT order from handleGetManifest:
+			//   id, manifest_id, version_no, system_prompt,
+			//   tools, authority_matrix, knowledge_sources,
+			//   coalesce(personality, ''), coalesce(language, ''),
+			//   coalesce(model, ''),
+			//   coalesce(autonomy, ''),
+			//   coalesce(notebook_top_k, 0),
+			//   coalesce(notebook_relevance_threshold, 0),
+			//   created_at
+			*dest[0].(*string) = fakeUUID
+			*dest[1].(*string) = putManifestID
+			*dest[2].(*int) = 1
+			*dest[3].(*string) = "ok"
+			*dest[4].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[5].(*json.RawMessage) = json.RawMessage(`{}`)
+			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[7].(*string) = ""
+			*dest[8].(*string) = ""
+			*dest[9].(*string) = ""
+			*dest[10].(*string) = ""
+			*dest[11].(*int) = capturedTopK
+			*dest[12].(*float64) = capturedThreshold
+			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			return nil
+		})
+	}
+	getRunner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: getQueryRow})}
+	gh, gti := writeRouterForTest(t, mustFixedNow(), getRunner)
+	gtok := mustMintToken(t, gti, "org")
+
+	greq := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/v1/manifests/"+putManifestID, nil)
+	greq.Header.Set("Authorization", "Bearer "+gtok)
+	grec := httptest.NewRecorder()
+	gh.ServeHTTP(grec, greq)
+	if grec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body=%s", grec.Code, grec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(grec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	if got["notebook_top_k"] != float64(wantTopK) {
+		t.Errorf("GET notebook_top_k = %v, want %v; body=%s", got["notebook_top_k"], wantTopK, grec.Body.String())
+	}
+	if got["notebook_relevance_threshold"] != wantThreshold {
+		t.Errorf("GET notebook_relevance_threshold = %v, want %v; body=%s", got["notebook_relevance_threshold"], wantThreshold, grec.Body.String())
+	}
+}
+
+// TestPutManifestVersion_NotebookRecallOmitted_201_GetHasNoKeys — when the
+// PUT body omits both notebook fields, a subsequent GET must NOT include
+// `notebook_top_k` or `notebook_relevance_threshold` keys in the response
+// JSON (omitempty). Both fields zero-value → SQL NULL → coalesce → 0 →
+// omitempty drops them.
+func TestPutManifestVersion_NotebookRecallOmitted_201_GetHasNoKeys(t *testing.T) {
+	var nilArgCount int
+	queryRow := func(_ context.Context, _ string, args ...any) pgx.Row {
+		for _, a := range args {
+			if a == nil {
+				nilArgCount++
+			}
+		}
+		return server.NewFakeRow(func(dest ...any) error {
+			if sp, ok := dest[0].(*string); ok {
+				*sp = fakeUUID
+			}
+			return nil
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+		}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	// Expect 9 nil args: tools, authority_matrix, knowledge_sources,
+	// personality, language, model, autonomy, notebook_top_k,
+	// notebook_relevance_threshold.
+	const wantNilArgs = 9
+	if nilArgCount != wantNilArgs {
+		t.Errorf("nil arg count = %d, want %d", nilArgCount, wantNilArgs)
+	}
+
+	// Step 2: GET — both notebook columns NULL → coalesce → 0 → omitempty.
+	getQueryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			*dest[0].(*string) = fakeUUID
+			*dest[1].(*string) = putManifestID
+			*dest[2].(*int) = 1
+			*dest[3].(*string) = "ok"
+			*dest[4].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[5].(*json.RawMessage) = json.RawMessage(`{}`)
+			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[7].(*string) = ""
+			*dest[8].(*string) = ""
+			*dest[9].(*string) = ""
+			*dest[10].(*string) = ""
+			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
+			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
+			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			return nil
+		})
+	}
+	getRunner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: getQueryRow})}
+	gh, gti := writeRouterForTest(t, mustFixedNow(), getRunner)
+	gtok := mustMintToken(t, gti, "org")
+
+	greq := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/v1/manifests/"+putManifestID, nil)
+	greq.Header.Set("Authorization", "Bearer "+gtok)
+	grec := httptest.NewRecorder()
+	gh.ServeHTTP(grec, greq)
+	if grec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body=%s", grec.Code, grec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(grec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	if _, present := got["notebook_top_k"]; present {
+		t.Errorf("GET response carries notebook_top_k key when omitted; body=%s", grec.Body.String())
+	}
+	if _, present := got["notebook_relevance_threshold"]; present {
+		t.Errorf("GET response carries notebook_relevance_threshold key when omitted; body=%s", grec.Body.String())
+	}
+}
+
+// TestPutManifestVersion_NotebookTopKZero_201 — `notebook_top_k = 0` is
+// accepted (means "auto-recall disabled"; intOrNil writes SQL NULL). The
+// handler must return 201 and must NOT invoke rejection logic for zero.
+func TestPutManifestVersion_NotebookTopKZero_201(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: fakeUUID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":     1,
+			"system_prompt":  "ok",
+			"notebook_top_k": 0,
+		}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPutManifestVersion_NotebookTopKOver100_400_InvalidNotebookTopK —
+// `notebook_top_k = 101` must be rejected with 400 invalid_notebook_top_k
+// before the row reaches Postgres. Mirrors the SQL CHECK constraint from
+// migration 016.
+func TestPutManifestVersion_NotebookTopKOver100_400_InvalidNotebookTopK(t *testing.T) {
+	runner := &server.FakeScopedRunner{}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":     1,
+			"system_prompt":  "ok",
+			"notebook_top_k": 101,
+		}, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked; expected rejection before tx")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "invalid_notebook_top_k" {
+		t.Errorf("error = %q, want invalid_notebook_top_k", env.Error)
+	}
+}
+
+// TestPutManifestVersion_NotebookTopKNegative_400_InvalidNotebookTopK —
+// `notebook_top_k = -1` must be rejected with 400 invalid_notebook_top_k.
+func TestPutManifestVersion_NotebookTopKNegative_400_InvalidNotebookTopK(t *testing.T) {
+	runner := &server.FakeScopedRunner{}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":     1,
+			"system_prompt":  "ok",
+			"notebook_top_k": -1,
+		}, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked; expected rejection before tx")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "invalid_notebook_top_k" {
+		t.Errorf("error = %q, want invalid_notebook_top_k", env.Error)
+	}
+}
+
+// TestPutManifestVersion_NotebookRelevanceThresholdOutOfRange_400_InvalidNotebookRelevanceThreshold
+// — values outside [0, 1] must be rejected with 400
+// invalid_notebook_relevance_threshold. Tests both above-1 (1.5) and
+// below-0 (-0.1) cases.
+func TestPutManifestVersion_NotebookRelevanceThresholdOutOfRange_400_InvalidNotebookRelevanceThreshold(t *testing.T) {
+	cases := []struct {
+		name      string
+		threshold float64
+	}{
+		{"above_one", 1.5},
+		{"below_zero", -0.1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &server.FakeScopedRunner{}
+			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+			tok := mustMintToken(t, ti, "org")
+
+			rec := writeDo(t, h, http.MethodPut,
+				"/v1/manifests/"+putManifestID+"/versions", tok,
+				map[string]any{
+					"version_no":                   1,
+					"system_prompt":                "ok",
+					"notebook_relevance_threshold": tc.threshold,
+				}, "")
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if runner.FnInvoked {
+				t.Error("runner was invoked; expected rejection before tx")
+			}
+			var env struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if env.Error != "invalid_notebook_relevance_threshold" {
+				t.Errorf("error = %q, want invalid_notebook_relevance_threshold", env.Error)
+			}
+		})
 	}
 }
