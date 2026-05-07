@@ -28,6 +28,33 @@ import (
 	"sync/atomic"
 )
 
+// RPCError is a typed error that [MethodHandler] implementations return when
+// they need to emit a specific JSON-RPC error code instead of the default
+// [ErrCodeInternalError] (-32603). The [Host] dispatcher checks for this type
+// via [errors.As] before falling back to the generic -32603 mapping.
+//
+// Use [NewRPCError] to construct one; callers can match with [errors.As].
+type RPCError struct {
+	Code    int
+	Message string
+}
+
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message)
+}
+
+// NewRPCError constructs an [RPCError] with the given code and message.
+// Handlers that need -32602 (invalid params) call
+// NewRPCError(ErrCodeInvalidParams, "...").
+func NewRPCError(code int, message string) *RPCError {
+	return &RPCError{Code: code, Message: message}
+}
+
+// ErrCodeInvalidParams is the JSON-RPC 2.0 error code for a request whose
+// params cannot be decoded or fail application-level validation. Handlers
+// return NewRPCError(ErrCodeInvalidParams, ...) to signal this condition.
+const ErrCodeInvalidParams = -32602
+
 // JSON-RPC 2.0 standard error codes the [Host] emits. Application-level
 // codes belong outside the reserved `-32768..-32000` range.
 const (
@@ -186,7 +213,12 @@ func (h *Host) dispatchOne(ctx context.Context, line []byte) ([]byte, bool) {
 
 	result, handlerErr := handler(ctx, params)
 	if handlerErr != nil {
-		encoded, _ := json.Marshal(buildErrorResponse(id, ErrCodeInternalError, handlerErr.Error()))
+		code := ErrCodeInternalError
+		var rpcErr *RPCError
+		if errors.As(handlerErr, &rpcErr) {
+			code = rpcErr.Code
+		}
+		encoded, _ := json.Marshal(buildErrorResponse(id, code, handlerErr.Error()))
 		return encoded, true
 	}
 

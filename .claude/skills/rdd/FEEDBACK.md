@@ -2115,3 +2115,23 @@ The second-tier Edit-after-merge race repeated: writer agent on M5.5.c.d.a's squ
 - Files touched: 5 (TS: 2, Go: 3) — ≤6 target met
 - Final diff: +1383 LOC (38% over 1000-LOC target; acceptable for foundational cross-language seam)
 
+
+## M5.5.d.a.b — Wire notebook.remember over the M5.5.d.a.a bridge (2026-05-07)
+
+### Review Iterations
+Phase 4 iter 1: 1 blocker + 4 important + 5 nit (heavier than typical Phase 4 round but all caught real defects).
+Phase 4 iter 2: fixer addressed all 5 in one commit; zero new defects in iter 3 re-review.
+
+### What Worked
+**Per-method delta on fresh seam was small as expected**: M5.5.d.a.a's framing PR was 1383 LOC; M5.5.d.a.b's per-method addition is ~720 LOC including extending host.go for the `RPCError.Data` field. Seam reuse model held: a third method should be ~400–500 LOC, no host.go changes if Data field stays sufficient.
+
+**Reviewer iter 1 caught 5 real issues**: 1 blocker (missing re-export, literal AC2 violation) + 4 important (category enum duplicate, RPCError.Data shape, v4-vs-v7 UUID, code-prefix doubling). None were false positives. Structural issues (3 important) + wire-cleanliness (1 important). Phase 4 contract value high.
+
+**Single-commit fixer**: addressed all 5 issues in one commit; all tests green in iter 3. Confirms reviewer's prescriptions were actionable.
+
+### What Wasted Effort
+**Initial executor delivered v4-UUID handler and RPCError without Data field** — both called out as design pointers in the TASK, not ACs. Executor didn't treat non-AC pointers as blocking. Future TASKs with critical design pointers should promote them to ACs OR add a Phase 3 checklist requiring executor acknowledgment ("addressed: yes / deferred — reason").
+
+### Metrics
+Review iterations: 3 (initial + fixer + re-review); PR-fix iterations: 0 (pending Phase 6 merge); operator interventions outside gates: 0; total wall time from /rdd to merge: pending.
+
