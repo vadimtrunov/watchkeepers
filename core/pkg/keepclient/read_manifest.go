@@ -34,6 +34,11 @@ type ManifestVersion struct {
 	Personality string `json:"personality,omitempty"`
 	// Language is the optional language code (omitempty matches the server).
 	Language string `json:"language,omitempty"`
+	// Model is the optional LLM model identifier the manifest pins to
+	// (omitempty matches the server: empty string is omitted from the wire
+	// response). Capped at 100 Unicode codepoints by the server CHECK
+	// constraint (migration 014); the client mirrors the cap on PUT.
+	Model string `json:"model,omitempty"`
 	// CreatedAt is the row's created_at timestamp (RFC3339 on the wire).
 	CreatedAt string `json:"created_at"`
 }

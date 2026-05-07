@@ -32,6 +32,12 @@ var clientLanguagePattern = regexp.MustCompile(`^[a-z]{2,3}(-[A-Z]{2})?$`)
 // CJK / accented-Latin payload cannot smuggle past a byte-based cap.
 const clientPersonalityMaxRunes = 1024
 
+// manifestModelMaxRunes mirrors the server-side `manifestModelMaxRunes`
+// cap and the SQL `char_length(model) <= 100` CHECK from migration 014.
+// Counted in Unicode codepoints so a non-ASCII payload cannot smuggle
+// past a byte-based cap.
+const manifestModelMaxRunes = 100
+
 // PutManifestVersionRequest is the typed request body for
 // [Client.PutManifestVersion]. Field names and `omitempty` placement mirror
 // the server's `putManifestVersionRequest` shape verbatim (handlers_write.go).
@@ -65,6 +71,11 @@ type PutManifestVersionRequest struct {
 	// uppercase region (e.g. "en", "en-US", "pt-BR", "kab"). Server and
 	// DB CHECK constraint (migration 010) enforce the same regex.
 	Language string `json:"language,omitempty"`
+	// Model is the optional LLM model identifier the manifest pins to.
+	// Capped at 100 Unicode codepoints (utf8.RuneCountInString, not len)
+	// to mirror SQL char_length semantics. Server and DB CHECK constraint
+	// (migration 014) enforce the same cap.
+	Model string `json:"model,omitempty"`
 }
 
 // PutManifestVersionResponse mirrors the server's
@@ -101,6 +112,12 @@ func (c *Client) PutManifestVersion(ctx context.Context, manifestID string, req 
 		return nil, ErrInvalidRequest
 	}
 	if utf8.RuneCountInString(req.Personality) > clientPersonalityMaxRunes {
+		return nil, ErrInvalidRequest
+	}
+	// Model mirrors the server's CHECK ≤ 100 runes (migration 014).
+	// Boundary at exactly 100 is accepted; rune-count semantics so a
+	// non-ASCII payload cannot smuggle past a byte-based cap.
+	if utf8.RuneCountInString(req.Model) > manifestModelMaxRunes {
 		return nil, ErrInvalidRequest
 	}
 	var out PutManifestVersionResponse

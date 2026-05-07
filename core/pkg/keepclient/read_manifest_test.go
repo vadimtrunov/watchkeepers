@@ -2,6 +2,7 @@ package keepclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -301,5 +302,83 @@ func TestGetManifest_ContextCancellation(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("errors.Is(err, context.Canceled) = false; err = %v", err)
+	}
+}
+
+// TestGetManifest_DecodesModel asserts that a server response carrying
+// `model:"claude-sonnet-4-7"` decodes into [ManifestVersion.Model] verbatim
+// (M5.5.b.b.b). The server emits this field since 5371b86; the client
+// merely mirrors the wire shape.
+func TestGetManifest_DecodesModel(t *testing.T) {
+	t.Parallel()
+
+	const wantModel = "claude-sonnet-4-7"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "id":"r","manifest_id":"m","version_no":1,
+            "system_prompt":"sp","tools":null,
+            "authority_matrix":null,"knowledge_sources":null,
+            "model":"`+wantModel+`",
+            "created_at":"2026-05-02T12:00:00Z"
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	mv, err := c.GetManifest(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if mv.Model != wantModel {
+		t.Errorf("Model = %q, want %q", mv.Model, wantModel)
+	}
+}
+
+// TestGetManifest_ModelOmitted_EmptyString asserts that a server response
+// without a `model` key decodes into the zero value (empty string) — symmetric
+// with the omitempty handling on Personality/Language.
+func TestGetManifest_ModelOmitted_EmptyString(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "id":"r","manifest_id":"m","version_no":1,
+            "system_prompt":"","tools":null,
+            "authority_matrix":null,"knowledge_sources":null,
+            "created_at":"2026-05-02T12:00:00Z"
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	mv, err := c.GetManifest(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if mv.Model != "" {
+		t.Errorf("Model = %q, want empty string", mv.Model)
+	}
+}
+
+// TestManifestVersion_MarshalOmitsEmptyModel asserts that marshaling a
+// [ManifestVersion] whose Model is the zero value never emits a `model`
+// key on the wire — the `omitempty` tag must hold.
+func TestManifestVersion_MarshalOmitsEmptyModel(t *testing.T) {
+	t.Parallel()
+
+	mv := ManifestVersion{
+		ID:         "r",
+		ManifestID: "m",
+		VersionNo:  1,
+		CreatedAt:  "2026-05-02T12:00:00Z",
+	}
+	raw, err := json.Marshal(mv)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(raw), `"model"`) {
+		t.Errorf("body included model key; got %s", raw)
 	}
 }

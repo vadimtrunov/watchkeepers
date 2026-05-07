@@ -1782,3 +1782,29 @@ Phase 4 iter 1 nil-arg trap: six nullable args in the handler meant "some arg is
 - Total wall time from Phase 1 to Phase 4 convergence: ~23 min
 
 ---
+
+## 2026-05-07 — M5.5.b.b.b: Extend keepclient.ManifestVersion with Model field + decoder tests
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+
+First-iteration Phase 4 convergence on ~200 LOC client-surface PRs. M5.5.b.b.b mirrors a recently-merged sibling (M5.5.b.b.a server schema), so the contract is already validated upstream. Review found only 2 nits (doc-comment wording, import style); zero behavioural defects. Schema-first decomposition (server → client struct → loader projection) keeps scope crisp per PR.
+
+### What wasted effort
+
+None. Phase 1+2 folded into a single planner tick because the planner enumerated entry files, test references, and sibling context inline; this saved one tick on a straightforward "mirror X just landed" sub-item. Total iterations: planner → executor → reviewer → writer. No retries.
+
+### Suggested skill changes
+
+None. Process scaled well to a small, focused mirror PR.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending — Phase 5b+
+
+---
