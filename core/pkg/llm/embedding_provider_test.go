@@ -136,6 +136,32 @@ func TestFakeEmbeddingProvider_ContextCancelled_ReturnsCtxErr(t *testing.T) {
 	}
 }
 
+// TestFakeEmbeddingProvider_WithEmbedError_TakesPrecedenceOverEmbedFunc verifies
+// the documented option-precedence rule: WithEmbedError short-circuits before
+// WithEmbedFunc is consulted, so the embed function is never invoked when an
+// error is configured. A future refactor that swaps the check order would be
+// caught by this test.
+func TestFakeEmbeddingProvider_WithEmbedError_TakesPrecedenceOverEmbedFunc(t *testing.T) {
+	sentinel := errors.New("embed: precedence sentinel")
+	funcInvoked := false
+
+	p := llm.NewFakeEmbeddingProvider(
+		llm.WithEmbedFunc(func(_ context.Context, _ string) ([]float32, error) {
+			funcInvoked = true
+			return nil, nil
+		}),
+		llm.WithEmbedError(sentinel),
+	)
+
+	_, err := p.Embed(context.Background(), "any query")
+	if !errors.Is(err, sentinel) {
+		t.Errorf("errors.Is(err, sentinel) = false, got %v", err)
+	}
+	if funcInvoked {
+		t.Error("embed func was invoked despite WithEmbedError being set; precedence rule violated")
+	}
+}
+
 // TestEmbeddingProvider_RecallQueryCompatibility is a compile-time check that
 // the []float32 returned by EmbeddingProvider.Embed is assignment-compatible
 // with notebook.RecallQuery.Embedding. No SQLite I/O occurs.

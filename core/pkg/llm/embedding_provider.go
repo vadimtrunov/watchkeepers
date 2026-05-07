@@ -2,7 +2,17 @@ package llm
 
 import (
 	"context"
+
+	"github.com/vadimtrunov/watchkeepers/core/pkg/notebook"
 )
+
+// EmbeddingDim is the required length of every vector returned by
+// [EmbeddingProvider.Embed]. It is re-exported from
+// [github.com/vadimtrunov/watchkeepers/core/pkg/notebook.EmbeddingDim] so that
+// callers within the llm package have a local handle without depending on the
+// notebook package directly. The notebook package remains the single
+// source-of-truth for the numeric value.
+const EmbeddingDim = notebook.EmbeddingDim
 
 // EmbeddingProvider converts a natural-language query string into a dense
 // float32 vector suitable for cosine-similarity search against the notebook
