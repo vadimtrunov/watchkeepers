@@ -107,8 +107,10 @@ func recallResultsToMemories(results []notebook.RecallResult) []RecalledMemory {
 // pipeline outcomes are surfaced via the `Metadata[MetadataKeyRecalledMemoryStatus]`
 // key on the returned request:
 //
-//   - `manifest.NotebookTopK == 0` → status `disabled_topk_zero`; no embed,
-//     no recall, no [WithRecalledMemory] applied.
+//   - `manifest.NotebookTopK <= 0` → status `disabled_topk_zero`; no embed,
+//     no recall, no [WithRecalledMemory] applied. Zero means "disabled by
+//     manifest"; negative values are treated identically (manifest-shape
+//     pathology, not a recall-pipeline failure).
 //   - `supervisor.Lookup(manifest.AgentID)` returns `false` → status
 //     `agent_not_registered`; no embed, no recall.
 //   - `embedder.Embed` returns an error → status `embed_error`; the embed
@@ -118,8 +120,11 @@ func recallResultsToMemories(results []notebook.RecallResult) []RecalledMemory {
 //     error is joined to the helper's returned `error`.
 //   - `db.Recall` returns an empty slice → status `no_matches`; no
 //     [WithRecalledMemory] applied.
-//   - Happy path → status `applied`; results projected to []RecalledMemory
-//     and applied via [WithRecalledMemory].
+//   - Happy path → status `applied`; results projected to []RecalledMemory,
+//     post-filtered by `Score >= manifest.NotebookRelevanceThreshold`, and
+//     applied via [WithRecalledMemory]. When the threshold is 0 (default
+//     unset) every result passes (Score is always >= 0). When all results
+//     are filtered out the status falls to `no_matches`.
 //
 // # Caller options
 //
@@ -198,7 +203,7 @@ func resolveRecalledMemory(
 	embedder EmbeddingProvider,
 	supervisor *runtime.NotebookSupervisor,
 ) (string, RequestOption, error) {
-	if manifest.NotebookTopK == 0 {
+	if manifest.NotebookTopK <= 0 {
 		return RecalledMemoryStatusDisabled, nil, nil
 	}
 
@@ -232,5 +237,23 @@ func resolveRecalledMemory(
 	}
 
 	memories := recallResultsToMemories(results)
+
+	// Post-filter by relevance threshold. Threshold == 0 is a no-op (every
+	// Score is >= 0). Negative thresholds are also no-ops by the same math.
+	threshold := float32(manifest.NotebookRelevanceThreshold)
+	if threshold > 0 {
+		filtered := memories[:0]
+		for _, m := range memories {
+			if m.Score >= threshold {
+				filtered = append(filtered, m)
+			}
+		}
+		memories = filtered
+	}
+
+	if len(memories) == 0 {
+		return RecalledMemoryStatusNoMatches, nil, nil
+	}
+
 	return RecalledMemoryStatusApplied, WithRecalledMemory(memories...), nil
 }
