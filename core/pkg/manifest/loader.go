@@ -69,9 +69,15 @@ type ManifestFetcher interface {
 // [keepclient.ManifestVersion.Model] onto [runtime.Manifest.Model]; the
 // loader does NOT supply a default — empty Model propagates as the empty
 // string and downstream [llm.composeBaseFields] is the gate that rejects
-// it with [llm.ErrInvalidManifest]. AuthorityMatrix, Autonomy, and
-// Metadata are not set by this loader; their wiring lands in M5.5.b.c
-// alongside authority/autonomy enforcement.
+// it with [llm.ErrInvalidManifest]. AuthorityMatrix is decoded from
+// mv.AuthorityMatrix via [decodeAuthorityMatrix]: a JSON object of
+// string→string projects to map[string]string; null/empty jsonb produces
+// a nil map (per runtime.go:107 "Nil is fine"). Autonomy is cast from
+// [keepclient.ManifestVersion.Autonomy] onto
+// [runtime.Manifest.Autonomy] verbatim — empty string propagates as the
+// empty [runtime.AutonomyLevel]; the runtime defaults to
+// [runtime.AutonomySupervised] downstream per runtime.go:97. Metadata
+// is not set by this loader; its wiring lands in a sibling milestone.
 func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (runtime.Manifest, error) {
 	if manifestID == "" {
 		return runtime.Manifest{}, runtime.ErrInvalidManifest
@@ -87,13 +93,20 @@ func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (r
 		return runtime.Manifest{}, err
 	}
 
+	authorityMatrix, err := decodeAuthorityMatrix(mv.AuthorityMatrix)
+	if err != nil {
+		return runtime.Manifest{}, err
+	}
+
 	return runtime.Manifest{
-		AgentID:      mv.ManifestID,
-		SystemPrompt: composeSystemPrompt(mv.SystemPrompt, mv.Personality, mv.Language),
-		Personality:  mv.Personality,
-		Language:     mv.Language,
-		Model:        mv.Model,
-		Toolset:      toolset,
+		AgentID:         mv.ManifestID,
+		SystemPrompt:    composeSystemPrompt(mv.SystemPrompt, mv.Personality, mv.Language),
+		Personality:     mv.Personality,
+		Language:        mv.Language,
+		Model:           mv.Model,
+		Autonomy:        runtime.AutonomyLevel(mv.Autonomy),
+		Toolset:         toolset,
+		AuthorityMatrix: authorityMatrix,
 	}, nil
 }
 
@@ -132,6 +145,35 @@ func decodeToolset(raw json.RawMessage) ([]string, error) {
 		names = append(names, e.Name)
 	}
 	return names, nil
+}
+
+// decodeAuthorityMatrix projects the manifest_version `authority_matrix`
+// jsonb column — a JSON object of string→string — into the portable
+// [runtime.Manifest.AuthorityMatrix] map[string]string the runtime
+// consults at lifecycle / approval gates.
+//
+// Empty or null inputs (nil RawMessage, the JSON literal `null`, the
+// JSON literal `{}`) all return a nil map — runtime.go:105-110 documents
+// "Nil is fine"; an absent or empty authority_matrix on the wire means
+// "no entries" and the runtime treats it as such.
+//
+// Decode failures (malformed JSON, non-object shapes such as arrays,
+// non-string values) are wrapped as
+// `fmt.Errorf("manifest: authority_matrix: %w", err)` so callers can
+// errors.Is the underlying [json.Unmarshal] failure mode (mirrors the
+// `manifest: toolset:` precedent on [decodeToolset]).
+func decodeAuthorityMatrix(raw json.RawMessage) (map[string]string, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("manifest: authority_matrix: %w", err)
+	}
+	if len(m) == 0 {
+		return nil, nil
+	}
+	return m, nil
 }
 
 // composeSystemPrompt is the deterministic templater documented on

@@ -305,3 +305,128 @@ func TestLoadManifest_MalformedToolsRejected(t *testing.T) {
 		t.Errorf("err = %v, want substring %q", err, "manifest: toolset:")
 	}
 }
+
+// TestLoadManifest_ProjectsAuthorityMatrix asserts the M5.5.b.c.c.a happy
+// path (AC1): the loader decodes mv.AuthorityMatrix from
+// `{"deploy":"lead","spawn":"watchmaster"}` into AuthorityMatrix =
+// map[string]string{"deploy":"lead","spawn":"watchmaster"}.
+func TestLoadManifest_ProjectsAuthorityMatrix(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:      "m",
+		SystemPrompt:    "x",
+		AuthorityMatrix: json.RawMessage(`{"deploy":"lead","spawn":"watchmaster"}`),
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	want := map[string]string{"deploy": "lead", "spawn": "watchmaster"}
+	if !reflect.DeepEqual(got.AuthorityMatrix, want) {
+		t.Errorf("AuthorityMatrix = %v, want %v", got.AuthorityMatrix, want)
+	}
+}
+
+// TestLoadManifest_AuthorityMatrixEmptyOrNull_ProjectsNilMap asserts AC1's
+// empty/null branches: a `null` jsonb and an empty `{}` jsonb both yield a
+// nil/empty AuthorityMatrix on runtime.Manifest (per runtime.go:107: "Nil
+// is fine"). Covers the absent-column case (json.RawMessage(`null`)) and
+// the explicit empty-object case (`{}`).
+func TestLoadManifest_AuthorityMatrixEmptyOrNull_ProjectsNilMap(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{name: "null", raw: json.RawMessage(`null`)},
+		{name: "empty-object", raw: json.RawMessage(`{}`)},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeFetcher{response: &keepclient.ManifestVersion{
+				ManifestID:      "m",
+				SystemPrompt:    "x",
+				AuthorityMatrix: tc.raw,
+			}}
+			got, err := LoadManifest(context.Background(), f, "m")
+			if err != nil {
+				t.Fatalf("LoadManifest: %v", err)
+			}
+			if len(got.AuthorityMatrix) != 0 {
+				t.Errorf("AuthorityMatrix = %v, want nil/empty", got.AuthorityMatrix)
+			}
+		})
+	}
+}
+
+// TestLoadManifest_AuthorityMatrixMalformedRejected asserts AC4: a malformed
+// AuthorityMatrix jsonb (here an array shape `[1,2,3]`) returns an error
+// wrapped with the `manifest: authority_matrix:` prefix so callers can
+// match the underlying json.Unmarshal failure mode.
+func TestLoadManifest_AuthorityMatrixMalformedRejected(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:      "m",
+		SystemPrompt:    "x",
+		AuthorityMatrix: json.RawMessage(`[1,2,3]`),
+	}}
+
+	_, err := LoadManifest(context.Background(), f, "m")
+	if err == nil {
+		t.Fatalf("LoadManifest: nil error, want wrapped authority_matrix failure")
+	}
+	if !strings.Contains(err.Error(), "manifest: authority_matrix:") {
+		t.Errorf("err = %v, want substring %q", err, "manifest: authority_matrix:")
+	}
+}
+
+// TestLoadManifest_ProjectsAutonomy asserts the M5.5.b.c.c.a happy path
+// (AC2): a non-empty [keepclient.ManifestVersion.Autonomy] copies verbatim
+// onto [runtime.Manifest.Autonomy] cast to runtime.AutonomyLevel — no
+// transformation, no default substitution.
+func TestLoadManifest_ProjectsAutonomy(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Autonomy:     "autonomous",
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.Autonomy != runtime.AutonomyAutonomous {
+		t.Errorf("Autonomy = %q, want %q", got.Autonomy, runtime.AutonomyAutonomous)
+	}
+}
+
+// TestLoadManifest_AutonomyEmpty_ProjectsVerbatim asserts AC2's empty-string
+// branch: an empty [keepclient.ManifestVersion.Autonomy] propagates as the
+// empty [runtime.AutonomyLevel] — the loader does NOT default. The
+// supervised-default substitution lives in the runtime per runtime.go:97
+// "An empty Autonomy defaults to AutonomySupervised".
+func TestLoadManifest_AutonomyEmpty_ProjectsVerbatim(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Autonomy:     "",
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.Autonomy != runtime.AutonomyLevel("") {
+		t.Errorf("Autonomy = %q, want empty (loader supplies no default)", got.Autonomy)
+	}
+}
