@@ -17,6 +17,7 @@ milestone file based on the closed TASK's roadmap id. At Phase 2 it reads
 | [`lessons/M3.md`](lessons/M3.md)                       | Go core services: eventbus, lifecycle manager, cron, secrets, capability broker, outbox consumer. Includes M3.5.a security follow-ups (`organization_id` plumbing, manifest tenant column, RLS). |
 | [`lessons/M4.md`](lessons/M4.md)                       | Messenger adapter + Slack: Send/Subscribe/CreateApp/InstallApp, dev-workspace bootstrap, human identity mapping.                                                                                 |
 | [`lessons/M5.md`](lessons/M5.md)                       | Runtime + LLM: `AgentRuntime`, `LLMProvider`, TS harness, JSON-RPC stdio framing, tool isolation.                                                                                                |
+| [`lessons/M6.md`](lessons/M6.md)                       | Watchmaster meta-agent: manifest-seed migration pattern, privilege-boundary phrase contract, authority matrix enum reuse.                                                                        |
 | [`lessons/cross-cutting.md`](lessons/cross-cutting.md) | Multi-milestone or process lessons: verification-batch discipline, autonomous-loop behaviour, PR-evidence rules.                                                                                 |
 
 ## How to use this index
