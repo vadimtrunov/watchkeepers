@@ -34,9 +34,12 @@ import type {
 
 /**
  * Constructor options. `apiKey` is REQUIRED — the provider does NOT read
- * `process.env.ANTHROPIC_API_KEY` (M5.7 owns secrets-interface plumbing).
- * `defaultModel` is optional; today every request specifies its own model
- * so the field is reserved for future fallback wiring.
+ * the API-key env var directly; the M5.7.a `EnvSecretSource` adapter in
+ * `harness/src/secrets/env.ts` is the sole production-code site that
+ * names the credential, and the boot path threads the resolved value
+ * through here. `defaultModel` is optional; today every request
+ * specifies its own model so the field is reserved for future fallback
+ * wiring.
  */
 export interface ClaudeCodeProviderOptions {
   readonly apiKey: string;
