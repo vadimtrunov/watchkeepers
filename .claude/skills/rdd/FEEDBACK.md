@@ -2508,3 +2508,38 @@ handoff contract.
 at Phase 1 start, so between-tick loss is recoverable from state cache rather than memory.
 
 ---
+
+## 2026-05-08 — M6.2.a: iter-1 convergence scales read-only tools, 11 consecutive iter-1 streak
+
+**PR**: #101
+**Phases with incidents**: 0
+
+### What worked
+
+M6.2.a closed the first sub-item of M6.2 with iter-1 convergence (11th consecutive iter-1
+convergence streak: M5.6.d → M6.2.a, spanning 3 parent milestones). The design choice to
+gate read-only tools via toolset membership alone (skipping authority_matrix consultation)
+was pre-flagged during Phase 1 design review and accepted by reviewer without rework,
+accelerating Phase 4 closure. Real-fakes-end-to-end test pattern from M6.1.b
+(`TestReportCost_RealKeepersLogWriter_E2E`) proved immediately reusable: real
+`keeperslog.Writer`, fake `LocalKeepClient`, queried back via `LogTail`. No integration
+surprises. Two core commits landed cleanly:
+- feat(harness): list_watchkeepers / report_cost / report_health builtin tools (M6.2.a)
+- feat(spawn,harnessrpc): Watchmaster read-only tools (M6.2.a)
+
+### Metrics
+
+- Review iterations: 1 (Phase 4 iter 1, 5 nits → Follow-up)
+- Consecutive iter-1 convergence streak: 11 (M5.6.d → M6.2.a)
+- PRs in session: 13 (#90–#100 + 2 open), all iter-1
+- Authority matrix consulted: 0 (read-only tools skip it)
+- Test coverage pattern: real writers, fake backends, reusable
+
+### Suggested skill changes
+
+Pre-flagged design choices (data-source mappings, manifest seed extension deferred to
+M6.2.b) accepted without rework. Stream-of-consciousness session yielded 13 PRs in a
+single continuous loop; consider documenting session-checkpoint protocol to capture
+multi-item momentum runs, especially when iter-1 convergence is holding.
+
+---
