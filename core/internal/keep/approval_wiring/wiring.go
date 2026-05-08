@@ -1,4 +1,4 @@
-// approval_wiring.go is the M7.1.b production composition entrypoint
+// Package approvalwiring is the M7.1.b production composition entrypoint
 // for the Slack inbound approval dispatcher. It hoists the
 // keeperslog.Writer + saga.MemorySpawnSagaDAO + saga.Runner +
 // spawn.SpawnKickoffer + approval.Dispatcher composition into a single
@@ -7,14 +7,22 @@
 // the inbound handler — the helper exists today so AC4 pins the
 // composition shape and the M7.1.c–.e items have one place to extend.
 //
-// DEFERRED WIRING (intentional): [composeApprovalDispatcher] is NOT
+// DEFERRED WIRING (intentional): [ComposeApprovalDispatcher] is NOT
 // yet called from any running binary. The inbound HTTP handler that
 // invokes it lands in M7.1.c–.e (Slack interaction endpoint, OAuth
 // surface, runtime calls). This file ships ahead so the kickoffer +
 // saga DAO composition is pinned + smoke-tested before that handler
 // arrives; reviewers reading this code in isolation should NOT expect
-// to find a `composeApprovalDispatcher(...)` call site in M7.1.b.
-package main
+// to find a `ComposeApprovalDispatcher(...)` call site in M7.1.b.
+//
+// Package location note: this helper lives under core/internal/keep/
+// rather than core/cmd/keep/ so the production keep binary's import
+// graph stays free of the cgo-only sqlite-vec chain pulled in by
+// approval → cards → notebook. The Dockerfile builds keep with
+// CGO_ENABLED=0; relocating here keeps that build green until the
+// M7.1.c–.e Slack-bot binary (which can opt in to cgo) takes over the
+// wiring.
+package approvalwiring
 
 import (
 	"context"
@@ -28,7 +36,7 @@ import (
 )
 
 // ApprovalDispatcherDeps is the construction-time bag composed into
-// [composeApprovalDispatcher]. Held in a struct so a future addition
+// [ComposeApprovalDispatcher]. Held in a struct so a future addition
 // (e.g. a Postgres-backed SpawnSagaDAO once M7.2 lands) replaces a
 // single field rather than churning every call-site.
 type ApprovalDispatcherDeps struct {
@@ -55,7 +63,7 @@ type ApprovalDispatcherDeps struct {
 	AgentID string
 }
 
-// composeApprovalDispatcher composes the M7.1.b approval dispatcher
+// ComposeApprovalDispatcher composes the M7.1.b approval dispatcher
 // from the supplied [ApprovalDispatcherDeps]. Returns the dispatcher
 // plus the [*spawn.SpawnKickoffer] it wraps so a smoke test can pin
 // the kickoffer's non-nil presence (AC4).
@@ -70,19 +78,19 @@ type ApprovalDispatcherDeps struct {
 // interaction HTTP handler when that handler lands. Today this
 // helper has no production call site by design — see the file
 // docblock's DEFERRED WIRING note. The smoke test in
-// approval_wiring_test.go pins the composition shape until then.
-func composeApprovalDispatcher(deps ApprovalDispatcherDeps) (*approval.Dispatcher, *spawn.SpawnKickoffer, error) {
+// wiring_test.go pins the composition shape until then.
+func ComposeApprovalDispatcher(deps ApprovalDispatcherDeps) (*approval.Dispatcher, *spawn.SpawnKickoffer, error) {
 	if deps.KeepClient == nil {
-		return nil, nil, fmt.Errorf("keep: composeApprovalDispatcher: KeepClient must not be nil")
+		return nil, nil, fmt.Errorf("approvalwiring: ComposeApprovalDispatcher: KeepClient must not be nil")
 	}
 	if deps.PendingApprovalDAO == nil {
-		return nil, nil, fmt.Errorf("keep: composeApprovalDispatcher: PendingApprovalDAO must not be nil")
+		return nil, nil, fmt.Errorf("approvalwiring: ComposeApprovalDispatcher: PendingApprovalDAO must not be nil")
 	}
 	if deps.Replayer == nil {
-		return nil, nil, fmt.Errorf("keep: composeApprovalDispatcher: Replayer must not be nil")
+		return nil, nil, fmt.Errorf("approvalwiring: ComposeApprovalDispatcher: Replayer must not be nil")
 	}
 	if deps.AgentID == "" {
-		return nil, nil, fmt.Errorf("keep: composeApprovalDispatcher: AgentID must not be empty")
+		return nil, nil, fmt.Errorf("approvalwiring: ComposeApprovalDispatcher: AgentID must not be empty")
 	}
 
 	writer := keeperslog.New(deps.KeepClient)
@@ -108,7 +116,7 @@ func composeApprovalDispatcher(deps ApprovalDispatcherDeps) (*approval.Dispatche
 // Replayer; the smoke test only needs a non-nil seam to satisfy the
 // dispatcher's panic-on-nil constructor.
 //
-//nolint:unused // wired via approval_wiring_test.go; the linter does not see test-side composition.
+//nolint:unused // wired via wiring_test.go; the linter does not see test-side composition.
 type nopReplayer struct{}
 
 //nolint:unused // see nopReplayer.

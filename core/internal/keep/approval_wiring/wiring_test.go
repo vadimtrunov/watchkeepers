@@ -1,4 +1,4 @@
-package main
+package approvalwiring
 
 import (
 	"context"
@@ -26,7 +26,7 @@ func (f *fakeLocalKeepClient) LogAppend(_ context.Context, _ keepclient.LogAppen
 // TestComposeApprovalDispatcher_WiresKickoffNonNil pins AC4 + the
 // "Wiring" test plan case: the production composition wires
 // `approval.New` with a non-nil SpawnKickoff. A nil kickoff would
-// panic inside `composeApprovalDispatcher` (the dispatcher's
+// panic inside `ComposeApprovalDispatcher` (the dispatcher's
 // constructor enforces it); this smoke also asserts the helper
 // returns the kickoffer pointer so a future M7.1.c–.e wiring can
 // retrieve it for diagnostic purposes.
@@ -40,9 +40,9 @@ func TestComposeApprovalDispatcher_WiresKickoffNonNil(t *testing.T) {
 		AgentID:            "bot-watchmaster",
 	}
 
-	dispatcher, kickoffer, err := composeApprovalDispatcher(deps)
+	dispatcher, kickoffer, err := ComposeApprovalDispatcher(deps)
 	if err != nil {
-		t.Fatalf("composeApprovalDispatcher: %v", err)
+		t.Fatalf("ComposeApprovalDispatcher: %v", err)
 	}
 	if dispatcher == nil {
 		t.Fatal("dispatcher = nil, want non-nil")
@@ -78,12 +78,12 @@ func TestComposeApprovalDispatcher_RejectsNilDeps(t *testing.T) {
 			t.Parallel()
 			deps := good
 			mutate(&deps)
-			d, k, err := composeApprovalDispatcher(deps)
+			d, k, err := ComposeApprovalDispatcher(deps)
 			if err == nil {
-				t.Fatalf("composeApprovalDispatcher: err = nil, want non-nil for %q", name)
+				t.Fatalf("ComposeApprovalDispatcher: err = nil, want non-nil for %q", name)
 			}
 			if d != nil || k != nil {
-				t.Errorf("composeApprovalDispatcher: returned non-nil values on error path for %q", name)
+				t.Errorf("ComposeApprovalDispatcher: returned non-nil values on error path for %q", name)
 			}
 		})
 	}
