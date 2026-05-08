@@ -2373,3 +2373,39 @@ unnecessary — state inspection suffices.
 - Total wall time from /rdd to merge: pending Phase 7a
 
 ---
+
+## 2026-05-08 — M5.7.a: Cross-language secrets seam + grep-invariant CI
+
+**PR**: pending — Phase 5b
+**Phases with incidents**: 3, 4
+
+### What worked
+
+Fifth consecutive iter-1 convergence (M5.6.d, M5.6.e.a, M5.6.e.b, M5.6.f,
+M5.7.a). The pre-flagging-deviations pattern reproducibly reduces friction:
+executor surfaces defensible deviations BEFORE committing (helper export,
+WARN reword, doc-comment scrub); reviewer accepts rationale without fix demand.
+When each deviation has a documented rationale, the reviewer's role shifts from
+"demand reworks" to "verify rationale" — this is the steady state.
+
+### What wasted effort
+
+Orphan checkbox on M5.5: it sat `[ ]` while all M5.5.* children were `[x]`
+for several iterations. Surfaced only when the orchestrator scanned for the
+M5.7 lookup. The housekeeping cascade pickup rule (Hard rule 7) allows this
+toggle to ride along on M5.7.a's writer pass.
+
+### Suggested skill changes
+
+Detect orphan-parent state at run start: writer agent (or orchestrator pre-Phase-1
+scan) should detect `[ ]` parent with all `[x]` children and auto-add the orphan
+toggle to the next writer pass. Currently relies on operator notice.
+
+### Metrics
+
+- Review iterations: 1 (Phase 4 iter 1)
+- PR-fix iterations: 0 (zero blocker/important; nits deferred)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending Phase 7a
+
+---

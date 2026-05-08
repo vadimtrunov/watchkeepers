@@ -316,7 +316,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [x] **M5.4** **Sandbox guardrails** — per-tool resource limits (wall-clock, CPU time, memory ceiling, output-byte cap) enforced by Go core via process controls and isolate options.
   - [x] **M5.4.a** Sandbox guardrails — wall-clock timeout + output-byte cap (Go-side timer + wrapped stdout/stderr readers, no syscalls)
   - [x] **M5.4.b** Sandbox guardrails — CPU-time + memory-ceiling rlimits (platform-specific setrlimit via SysProcAttr, build-tagged sandbox_linux.go / sandbox_darwin.go)
-- [ ] **M5.5** **Manifest-driven boot + Notebook integration** — harness calls `keepclient.GetManifest(agent_id)` on boot, composes `personality`/`language` into the effective system prompt via a templater, applies toolset ACLs / model / autonomy, opens its per-agent SQLite Notebook, auto-recalls top-K relevant entries each turn (configurable K + relevance threshold), and exposes `Remember` as a built-in tool.
+- [x] **M5.5** **Manifest-driven boot + Notebook integration** — harness calls `keepclient.GetManifest(agent_id)` on boot, composes `personality`/`language` into the effective system prompt via a templater, applies toolset ACLs / model / autonomy, opens its per-agent SQLite Notebook, auto-recalls top-K relevant entries each turn (configurable K + relevance threshold), and exposes `Remember` as a built-in tool.
   - [x] **M5.5.a** Harness boot fetches Manifest via keepclient and templates personality/language into system prompt
   - [x] **M5.5.b** Apply Manifest toolset ACLs, model selection, and autonomy bounds in harness loop
     - [x] **M5.5.b.a** Decode Manifest toolset jsonb and enforce ACLs at harness InvokeTool gate
@@ -355,7 +355,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
     - [x] **M5.6.e.b** Boot-time superseded-lesson scan in notebook supervisor: flag lessons whose tool_version != current manifest version via MarkNeedsReview
   - [x] **M5.6.f** E2E verification: forced tool error produces lesson + cooling-off injection behavior
 - [ ] **M5.7** **Provider plumbing** — Claude Code credentials flow through the secrets interface (no `ANTHROPIC_API_KEY` references in core); a dummy `FakeProvider` passes the same harness tests as the real provider, proving swap-without-touching-core.
-  - [ ] **M5.7.a** Route Claude Code credentials through secrets.SecretSource and enforce no ANTHROPIC_API_KEY literal in core/ (grep-invariant CI check)
+  - [x] **M5.7.a** Route Claude Code credentials through secrets.SecretSource and enforce no ANTHROPIC_API_KEY literal in core/ (grep-invariant CI check)
   - [ ] **M5.7.b** FakeProvider conformance suite — parameterised TS tests run against both FakeProvider and ClaudeCodeProvider proving swap-without-touching-core
 
 **Artifacts**: Go `runtime/` and `llm/` packages, TS `harness/` package, JSON-RPC contract doc, provider conformance test harness.
