@@ -290,7 +290,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 ---
 
-### M5 — Runtime adapter + Claude Code bridge [ ]
+### M5 — Runtime adapter + Claude Code bridge [x]
 
 **Goal**: Go core can launch and drive a TS agent harness that uses Claude Code under the hood; tools execute in isolation; the LLM provider is swappable without touching core.
 
@@ -354,9 +354,9 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
     - [x] **M5.6.e.a** Project per-tool Version through manifest loader into runtime.Manifest (typed ToolEntry); migrate ACL/Toolset consumers via Names() helper
     - [x] **M5.6.e.b** Boot-time superseded-lesson scan in notebook supervisor: flag lessons whose tool_version != current manifest version via MarkNeedsReview
   - [x] **M5.6.f** E2E verification: forced tool error produces lesson + cooling-off injection behavior
-- [ ] **M5.7** **Provider plumbing** — Claude Code credentials flow through the secrets interface (no `ANTHROPIC_API_KEY` references in core); a dummy `FakeProvider` passes the same harness tests as the real provider, proving swap-without-touching-core.
+- [x] **M5.7** **Provider plumbing** — Claude Code credentials flow through the secrets interface (no `ANTHROPIC_API_KEY` references in core); a dummy `FakeProvider` passes the same harness tests as the real provider, proving swap-without-touching-core.
   - [x] **M5.7.a** Route Claude Code credentials through secrets.SecretSource and enforce no ANTHROPIC_API_KEY literal in core/ (grep-invariant CI check)
-  - [ ] **M5.7.b** FakeProvider conformance suite — parameterised TS tests run against both FakeProvider and ClaudeCodeProvider proving swap-without-touching-core
+  - [x] **M5.7.b** FakeProvider conformance suite — parameterised TS tests run against both FakeProvider and ClaudeCodeProvider proving swap-without-touching-core
 
 **Artifacts**: Go `runtime/` and `llm/` packages, TS `harness/` package, JSON-RPC contract doc, provider conformance test harness.
 
