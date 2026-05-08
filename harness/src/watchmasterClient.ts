@@ -153,3 +153,109 @@ export async function reportHealth(
   const result = await rpc.request("watchmaster.report_health", params as unknown as JsonRpcValue);
   return result as unknown as ReportHealthResult;
 }
+
+// ── propose_spawn ────────────────────────────────────────────────────────────
+
+/**
+ * Parameters for `watchmaster.propose_spawn` (M6.2.b). Mirrors the
+ * Go-side `proposeSpawnParams` decoder
+ * (`core/pkg/harnessrpc/watchmaster_writes.go`) — snake_case names.
+ *
+ * Required: agent_id, system_prompt, approval_token. Optional:
+ * personality, language. The caller is responsible for allocating
+ * `agent_id` (a fresh manifest UUID) before this call lands; the
+ * Go-side tool persists the first manifest_version row carrying the
+ * proposed personality + language.
+ */
+export interface ProposeSpawnParams {
+  readonly agent_id: string;
+  readonly system_prompt: string;
+  readonly personality?: string;
+  readonly language?: string;
+  readonly approval_token: string;
+}
+
+/**
+ * Success response shape for the three M6.2.b manifest-bump methods.
+ * Carries the freshly-inserted manifest_version row UUID + the bumped
+ * version number verbatim from the Go-side `manifestBumpResult`.
+ */
+export interface ManifestBumpResult {
+  readonly manifest_version_id: string;
+  readonly version_no: number;
+}
+
+/**
+ * Call `watchmaster.propose_spawn` on the Go-side host and return the
+ * freshly-inserted manifest_version row id.
+ *
+ * Rejects with {@link RpcRequestError} (from `jsonrpc.ts`) when the
+ * host returns a JSON-RPC error envelope, preserving the wire `code`
+ * so callers can branch on -32005 (ToolUnauthorized) / -32007
+ * (ApprovalRequired) / -32602 (InvalidParams) / -32603 (InternalError)
+ * without string-matching the message.
+ */
+export async function proposeSpawn(
+  rpc: RpcClient,
+  params: ProposeSpawnParams,
+): Promise<ManifestBumpResult> {
+  const result = await rpc.request("watchmaster.propose_spawn", params as unknown as JsonRpcValue);
+  return result as unknown as ManifestBumpResult;
+}
+
+// ── adjust_personality ───────────────────────────────────────────────────────
+
+/**
+ * Parameters for `watchmaster.adjust_personality` (M6.2.b). Mirrors
+ * the Go-side `adjustPersonalityParams` decoder.
+ */
+export interface AdjustPersonalityParams {
+  readonly agent_id: string;
+  readonly new_personality: string;
+  readonly approval_token: string;
+}
+
+/**
+ * Call `watchmaster.adjust_personality` on the Go-side host. The
+ * Go-side tool reads the latest manifest_version for `agent_id`,
+ * copies its fields, overrides Personality, and writes a new version
+ * row.
+ */
+export async function adjustPersonality(
+  rpc: RpcClient,
+  params: AdjustPersonalityParams,
+): Promise<ManifestBumpResult> {
+  const result = await rpc.request(
+    "watchmaster.adjust_personality",
+    params as unknown as JsonRpcValue,
+  );
+  return result as unknown as ManifestBumpResult;
+}
+
+// ── adjust_language ──────────────────────────────────────────────────────────
+
+/**
+ * Parameters for `watchmaster.adjust_language` (M6.2.b). Mirrors
+ * the Go-side `adjustLanguageParams` decoder.
+ */
+export interface AdjustLanguageParams {
+  readonly agent_id: string;
+  readonly new_language: string;
+  readonly approval_token: string;
+}
+
+/**
+ * Call `watchmaster.adjust_language` on the Go-side host. Same shape
+ * as {@link adjustPersonality} but overrides the Language field on
+ * the bumped manifest_version row.
+ */
+export async function adjustLanguage(
+  rpc: RpcClient,
+  params: AdjustLanguageParams,
+): Promise<ManifestBumpResult> {
+  const result = await rpc.request(
+    "watchmaster.adjust_language",
+    params as unknown as JsonRpcValue,
+  );
+  return result as unknown as ManifestBumpResult;
+}
