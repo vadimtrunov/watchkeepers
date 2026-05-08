@@ -2226,3 +2226,29 @@ Phase 3 executor turn cut off mid-sentence on a gofumpt formatting fix; SendMess
 - Total wall time from /rdd to merge: pending (Phase 5b opens PR)
 
 ---
+
+## 2026-05-08 — M5.6.c: Atomic evidence write with keepers-log Append before Embed
+
+**PR**: pending
+**Phases with incidents**: 4 (iterations 1–2)
+
+### What worked
+
+Gate 2 acceptance criteria (8 AC) and test cases (9) were precise enough that Phase 3 executor understood the requirements without clarification. Phase 4's bounded-loop discipline caught the AC2 ordering deviation in iteration 1, surface it to the fixer as "important", and converged in iteration 2 with zero additional blocker/important issues. The `recordingAppender` stub pattern from Phase 3 tests proved reusable in wired_runtime tests without modification.
+
+### What wasted effort
+
+Phase 4 iteration 1 flagged AC2 ordering as "important": the initial implementation deferred `Append` until after `Embed` to preserve backward-compat with M5.6.b's cancelled-ctx test. The test's actual intent (no runtime crash) differs from its implementation (Embed before Append), which meant the deviation was real, not defensive. The executor's deferred-decisions section listed "kept M5.6.b ordering for backward-compat", but did not surface it as a contract deviation upfront. A surface-level read by the reviewer would miss this without opening the diffs. If the executor had promoted the AC2 deviation to the TASK's Progress log as a heads-up, the reviewer's initial round could have triaged it before the fixer loop.
+
+### Suggested skill changes
+
+- Extend `references/agent-briefs/executor.md` §"Mode — build" to require that any AC deviations (especially ordering, atomicity, timing) be promoted to a TASK Progress-log entry as a heads-up bullet, not buried in the deferred-decisions section. Example: "AC2 deviation: kept Embed-before-Append for M5.6.b test backward-compat, but this loses audit rows on ctx cancel. Recommend fixer review."
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: 1 (db427b5 reorder)
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending
+
+---
