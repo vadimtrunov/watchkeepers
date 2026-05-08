@@ -418,6 +418,11 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 **Scope**
 
 - [ ] **M7.1** **Spawn saga (forward path)** — Watchmaster posts the draft Manifest in Slack (Approve/Reject blocks); approval writes an event to Keeper's Log and triggers a core RPC saga that chains: Manifest approval → Slack App create → OAuth install → bot profile set → provision per-agent Notebook file → runtime launch (personality/language applied) → intro message.
+  - [ ] **M7.1.a** Saga skeleton: spawn/ package, state machine, saga-state DAO + migration
+  - [ ] **M7.1.b** Slack interaction handler: approval action → Keeper's Log event → saga kickoff
+  - [ ] **M7.1.c** Slack App provisioning step: create app + OAuth install + bot profile set
+  - [ ] **M7.1.d** Notebook provision step: per-agent Notebook file with personality/language
+  - [ ] **M7.1.e** Runtime launch + intro message step, wiring saga to completion
 - [ ] **M7.2** **Retire saga** — harness `Archive` runs; tarball lands in `ArchiveStore` (LocalFS or S3-compatible); `notebook_archived` event with archive URI logged; Watchkeeper row in Keep marked retired with archive reference.
 - [ ] **M7.3** **Robustness** — saga compensations (install failure rolls back Slack App creation, removes the freshly-provisioned Notebook file, marks Manifest rejected; runtime boot failure tears down the app and **archives** — never deletes — any Notebook data written, flagged for review) plus idempotency keys so retried approvals never double-create apps.
 
