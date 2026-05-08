@@ -2409,3 +2409,34 @@ toggle to the next writer pass. Currently relies on operator notice.
 - Total wall time from /rdd to merge: pending Phase 7a
 
 ---
+
+## 2026-05-08 — M5.7.b: parameterised conformance suite + sixth iter-1 convergence
+
+**PR**: [#98](https://github.com/vadimtrunov/watchkeepers/pull/98) (pending)
+**Phases with incidents**: 0
+
+### What worked
+
+M5.7.b is the **first cross-impl TS conformance suite** in the codebase. Vitest's
+`describe.skipIf` + parameterised `ProviderCase[]` array proved elegant for testing
+both FakeProvider and ClaudeCodeProvider without code duplication. The pattern (shape
+assertions + skip-when-unavailable gating) is immediately reusable for future multi-impl
+interfaces (Slack/Discord messenger, LocalFS/S3 archive).
+
+This is the **sixth consecutive iter-1 convergence** in this loop session (M5.6.d,
+M5.6.e.a, M5.6.e.b, M5.6.f, M5.7.a, M5.7.b). Pre-flagged-deviations + scope discipline
+reproducibly deliver iter-1 convergence on well-scoped TASKs. Worth recording as a
+steady-state metric for future RDD sessions.
+
+### Milestone closure
+
+M5 milestone closes in this PR. 7 sub-items (M5.1–M5.7) plus decompositions = ~30 PRs
+total. The `/loop` session landing M5.6.a → M5.7.b closed M5.6 + M5.7 in one continuous
+run (PRs #90–#98). Productivity datapoint: 9 PRs closing two major milestones in a single
+focused loop.
+
+### Suggested skill changes
+
+Document the TS conformance pattern in `references/patterns.md` as a reusable template
+for multi-impl interface testing (with skip-gating precedent).
+
