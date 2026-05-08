@@ -71,6 +71,15 @@ var ErrSandboxKilled = errors.New("runtime: sandbox killed")
 // Matchable via [errors.Is].
 var ErrSubscriptionClosed = errors.New("runtime: subscription closed")
 
+// ErrEmbedderRequired is returned by [NewToolErrorReflector] when no
+// [llm.EmbeddingProvider] was supplied via [WithEmbedder]. The
+// reflector composes a [notebook.Entry] of category `lesson` and
+// MUST embed it before calling Remember; there is no sane default
+// embedder to fall back to (silently no-op'ing every call would mask
+// the bug). Matches the existing runtime sentinel idioms; matchable
+// via [errors.Is].
+var ErrEmbedderRequired = errors.New("runtime: embedder required")
+
 // ErrUnsupportedPlatform is returned by [SandboxRunner.Run] (M5.4.b)
 // when the caller asked for a non-zero CPU-time or memory-ceiling
 // rlimit on a platform whose `applyRlimits` shim does not implement
