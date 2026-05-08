@@ -11,10 +11,13 @@ import (
 
 // Recall runs a sqlite-vec cosine KNN over `entry_vec`, joins the result back
 // against `entry` to project the regular columns, and applies the
-// "active and not superseded" filter required by AC2:
+// "active, not superseded, and not flagged for review" filter:
 //
 //   - rows with `superseded_by IS NOT NULL` are excluded;
 //   - rows with `active_after > activeAt.UnixMilli()` are excluded;
+//   - rows with `needs_review = 1` are excluded (M5.6.a — review-flagged
+//     rows are hidden from Recall until a human or auto-reflection clears
+//     the flag);
 //   - if [RecallQuery.Category] is non-empty, only rows in that category are
 //     returned.
 //
@@ -73,11 +76,13 @@ func (d *DB) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, error) 
 		JOIN entry e ON e.id = knn.id
 		WHERE e.superseded_by IS NULL
 		  AND e.active_after <= ?
+		  AND e.needs_review = 0
 		  AND (? = '' OR e.category = ?)
 		ORDER BY knn.distance ASC
 	`
 
-	rows, err := d.sql.QueryContext(ctx, sqlText,
+	rows, err := d.sql.QueryContext(
+		ctx, sqlText,
 		queryBlob,
 		topK,
 		activeAtMillis,

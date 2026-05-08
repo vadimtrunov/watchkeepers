@@ -146,7 +146,8 @@ func TestRecall_SkipsSuperseded(t *testing.T) {
 		Content:   "new",
 		Embedding: makeEmbedding(51),
 	})
-	if _, err := db.sql.ExecContext(ctx,
+	if _, err := db.sql.ExecContext(
+		ctx,
 		`UPDATE entry SET superseded_by = ? WHERE id = ?`, newID, oldID,
 	); err != nil {
 		t.Fatalf("update superseded_by: %v", err)
@@ -163,6 +164,145 @@ func TestRecall_SkipsSuperseded(t *testing.T) {
 		if r.ID == oldID {
 			t.Fatalf("superseded row %q surfaced", oldID)
 		}
+	}
+}
+
+// TestRecall_ExcludesNeedsReview pins AC2 of M5.6.a: a row that has been
+// marked as needing review must NOT surface in [DB.Recall] results, alongside
+// the existing superseded / cooling-off exclusions. The fixture seeds four
+// rows whose embeddings cluster around the query vector — superseded,
+// cooling-off, needs_review, and a fourth plain row — and asserts that only
+// the plain row comes back.
+func TestRecall_ExcludesNeedsReview(t *testing.T) {
+	db, ctx, _ := freshDB(t)
+
+	now := time.Now().UnixMilli()
+
+	// Plain row that should be the only Recall hit.
+	plainID := seed(ctx, t, db, Entry{
+		Category:  CategoryLesson,
+		Content:   "plain",
+		Embedding: makeEmbedding(80),
+	})
+
+	// Superseded row: even with a near-by embedding it must be excluded by
+	// the existing `superseded_by IS NOT NULL` predicate.
+	supersederID := seed(ctx, t, db, Entry{
+		Category:  CategoryLesson,
+		Content:   "superseder",
+		Embedding: makeEmbedding(90),
+	})
+	supersededID := seed(ctx, t, db, Entry{
+		Category:  CategoryLesson,
+		Content:   "superseded",
+		Embedding: makeEmbedding(81),
+	})
+	if _, err := db.sql.ExecContext(
+		ctx,
+		`UPDATE entry SET superseded_by = ? WHERE id = ?`, supersederID, supersededID,
+	); err != nil {
+		t.Fatalf("update superseded_by: %v", err)
+	}
+
+	// Cooling-off row: active_after far in the future.
+	coolingID := seed(ctx, t, db, Entry{
+		Category:    CategoryLesson,
+		Content:     "cooling",
+		Embedding:   makeEmbedding(82),
+		ActiveAfter: now + int64(24*time.Hour/time.Millisecond),
+	})
+
+	// Needs-review row: starts plain, gets flagged via MarkNeedsReview.
+	needsReviewID := seed(ctx, t, db, Entry{
+		Category:  CategoryLesson,
+		Content:   "needs review",
+		Embedding: makeEmbedding(83),
+	})
+	if err := db.MarkNeedsReview(ctx, needsReviewID); err != nil {
+		t.Fatalf("MarkNeedsReview: %v", err)
+	}
+
+	got, err := db.Recall(ctx, RecallQuery{
+		Embedding: makeEmbedding(80),
+		TopK:      10,
+	})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+
+	for _, r := range got {
+		if r.ID == supersededID {
+			t.Errorf("superseded row %q surfaced", supersededID)
+		}
+		if r.ID == coolingID {
+			t.Errorf("cooling-off row %q surfaced", coolingID)
+		}
+		if r.ID == needsReviewID {
+			t.Errorf("needs-review row %q surfaced", needsReviewID)
+		}
+	}
+
+	// The plain row must be present; the superseder is also active and may
+	// or may not be in the topK depending on its distance — we don't assert
+	// on it here.
+	var sawPlain bool
+	for _, r := range got {
+		if r.ID == plainID {
+			sawPlain = true
+		}
+	}
+	if !sawPlain {
+		t.Fatalf("plain row %q missing from results: %+v", plainID, got)
+	}
+}
+
+// TestRecall_ClearNeedsReviewRestoresVisibility pins the inverse leg of
+// AC2 + AC3: clearing the flag must restore Recall visibility for the same
+// query that previously matched the entry.
+func TestRecall_ClearNeedsReviewRestoresVisibility(t *testing.T) {
+	db, ctx, _ := freshDB(t)
+
+	id := seed(ctx, t, db, Entry{
+		Category:  CategoryLesson,
+		Content:   "round-trip",
+		Embedding: makeEmbedding(84),
+	})
+	if err := db.MarkNeedsReview(ctx, id); err != nil {
+		t.Fatalf("MarkNeedsReview: %v", err)
+	}
+
+	got, err := db.Recall(ctx, RecallQuery{
+		Embedding: makeEmbedding(84),
+		TopK:      10,
+	})
+	if err != nil {
+		t.Fatalf("Recall (flagged): %v", err)
+	}
+	for _, r := range got {
+		if r.ID == id {
+			t.Fatalf("flagged row %q surfaced", id)
+		}
+	}
+
+	if err := db.ClearNeedsReview(ctx, id); err != nil {
+		t.Fatalf("ClearNeedsReview: %v", err)
+	}
+
+	got, err = db.Recall(ctx, RecallQuery{
+		Embedding: makeEmbedding(84),
+		TopK:      10,
+	})
+	if err != nil {
+		t.Fatalf("Recall (cleared): %v", err)
+	}
+	var sawCleared bool
+	for _, r := range got {
+		if r.ID == id {
+			sawCleared = true
+		}
+	}
+	if !sawCleared {
+		t.Fatalf("cleared row %q missing from results: %+v", id, got)
 	}
 }
 

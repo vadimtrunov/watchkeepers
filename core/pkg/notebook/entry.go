@@ -123,13 +123,23 @@ type RecallResult struct {
 
 // Stats is the aggregate counts returned by [DB.Stats]. `TotalEntries` is the
 // raw row count; `Active` is `superseded_by IS NULL AND active_after <= now`;
-// `Superseded` is `superseded_by IS NOT NULL`. `ByCategory` maps each of the
+// `Superseded` is `superseded_by IS NOT NULL`; `NeedsReview` (M5.6.a) is
+// `needs_review = 1 AND superseded_by IS NULL`. `ByCategory` maps each of the
 // five [categoryEnum] values to the count of *active* entries in that
 // category.
+//
+// `Active` and `NeedsReview` are deliberately overlapping rather than
+// disjoint: a row that has been flagged for review still counts toward
+// `Active` until it is explicitly superseded (the review flag is a
+// pre-supersession signal — visibility is hidden from [DB.Recall] but the
+// row remains "live" from a lifecycle standpoint). Auto-reflection layers
+// that want a "live and not flagged" count can compute `Active -
+// NeedsReview` directly.
 type Stats struct {
 	TotalEntries int
 	Active       int
 	Superseded   int
+	NeedsReview  int
 	ByCategory   map[string]int
 }
 

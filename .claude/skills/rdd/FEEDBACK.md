@@ -2183,3 +2183,24 @@ In `references/agent-briefs/code-reviewer.md`, recommend (as already practiced i
 - Operator interventions outside of gates: 0
 - Total wall time from /rdd to merge: pending
 
+## 2026-05-07 — M5.6.a: Inline-DDL + guarded-ALTER migration for SQLite notebook schema
+
+**PR**: pending
+**Phases with incidents**: 3
+
+### What worked
+Gate 2 produced tight AC/test-plan decomposition (7 AC, 9 test bullets, 8 step plan). Executor opus finished 4 commits in one continuation (no splits). The 7-AC threshold + opus mapping held. Planner's 6-way decomposition of M5.6 yielded an appropriately-scoped first sub-item: 9 files, 780 LOC, well under hard caps.
+
+### What wasted effort
+Phase 3 executor hit a mid-sentence split on a cyclomatic-complexity refactor in a stats helper; SendMessage to the same agent UUID resumed cleanly. Recoverable but worth noting: silent-exit recovery via SendMessage works for partial-progress executor returns, parallel to /loop recovery for Phase-1-through-7 silent exits.
+
+### Suggested skill changes
+Document the SendMessage recovery pattern in `references/executor-briefs.md` under "Resuming partial-progress turns". Currently only /loop recovery is called out.
+
+### Metrics
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from Phase 1 to Phase 4 convergence: 01:45
+
+---
