@@ -16,6 +16,11 @@
     "test": "pnpm -r --if-present test",
     "build": "pnpm -r --if-present build"
   },
+  "pnpm": {
+    "overrides": {
+      "fast-uri": "^3.1.1"
+    }
+  },
   "devDependencies": {
     "@commitlint/cli": "^19.6.0",
     "@commitlint/config-conventional": "^19.6.0",
