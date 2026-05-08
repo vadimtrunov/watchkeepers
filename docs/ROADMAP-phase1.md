@@ -387,7 +387,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [ ] **M6.2** **Toolset** — `list_watchkeepers`, `propose_spawn` (drafts Manifest with `personality`/`language`), `retire_watchkeeper`, `report_cost`, `report_health`, `adjust_personality` / `adjust_language` (both draft a new Manifest version through lead approval), `promote_to_keep(agent_id, notebook_entry_id)` (lead-approved write into Keep as org-scoped knowledge, emits `notebook_promoted_to_keep`).
   - [x] **M6.2.a** Read-only tools: list_watchkeepers, report_cost, report_health (no approval gate; reads watchkeeper table, keepers_log cost rollups, runtime health)
   - [x] **M6.2.b** Manifest-bump tools (lead-approval gated): propose_spawn, adjust_personality, adjust_language — all draft a new manifest_version via PutManifestVersion
-  - [ ] **M6.2.c** retire_watchkeeper (lead-approval gated) — lifecycle flag flip, separated from manifest bumps to keep PR scope tight
+  - [x] **M6.2.c** retire_watchkeeper (lead-approval gated) — lifecycle flag flip, separated from manifest bumps to keep PR scope tight
   - [ ] **M6.2.d** promote_to_keep(agent_id, notebook_entry_id) (lead-approval gated) — read-then-write across notebook→keep boundary, emits notebook_promoted_to_keep event
 - [ ] **M6.3** **Operator surface** — Slack DM conversation with designated admins (Manifest drafts rendered as Slack blocks with Approve/Reject actions) and per-Watchkeeper cost tracker (prompt + completion tokens, daily/weekly rollups persisted in Keep).
 

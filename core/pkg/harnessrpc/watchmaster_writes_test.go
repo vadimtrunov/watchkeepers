@@ -26,24 +26,32 @@ import (
 
 // ── stub WatchmasterWriteClient ─────────────────────────────────────────────
 
-// stubWriteClient records every GetManifest / PutManifestVersion call
-// and returns canned responses (or injected errors). This is a stub of
-// the harnessrpc seam, NOT a mock of the production manifest-bump
-// tools — those have their own real-fakes suite in core/pkg/spawn/.
+// stubWriteClient records every GetManifest / PutManifestVersion /
+// UpdateWatchkeeperStatus call and returns canned responses (or
+// injected errors). This is a stub of the harnessrpc seam, NOT a mock
+// of the production write-side tools — those have their own real-fakes
+// suite in core/pkg/spawn/.
 type stubWriteClient struct {
-	getResp *keepclient.ManifestVersion
-	getErr  error
-	putResp *keepclient.PutManifestVersionResponse
-	putErr  error
+	getResp   *keepclient.ManifestVersion
+	getErr    error
+	putResp   *keepclient.PutManifestVersionResponse
+	putErr    error
+	updateErr error
 
-	mu       sync.Mutex
-	getCalls []string
-	putCalls []stubWriteClientPutCall
+	mu          sync.Mutex
+	getCalls    []string
+	putCalls    []stubWriteClientPutCall
+	updateCalls []stubWriteClientUpdateCall
 }
 
 type stubWriteClientPutCall struct {
 	manifestID string
 	req        keepclient.PutManifestVersionRequest
+}
+
+type stubWriteClientUpdateCall struct {
+	id     string
+	status string
 }
 
 func (s *stubWriteClient) GetManifest(_ context.Context, manifestID string) (*keepclient.ManifestVersion, error) {
@@ -75,6 +83,21 @@ func (s *stubWriteClient) PutManifestVersion(
 		return &keepclient.PutManifestVersionResponse{ID: fmt.Sprintf("mv-%d", idx)}, nil
 	}
 	return s.putResp, nil
+}
+
+func (s *stubWriteClient) UpdateWatchkeeperStatus(_ context.Context, id, status string) error {
+	s.mu.Lock()
+	s.updateCalls = append(s.updateCalls, stubWriteClientUpdateCall{id: id, status: status})
+	s.mu.Unlock()
+	return s.updateErr
+}
+
+func (s *stubWriteClient) recordedUpdate() []stubWriteClientUpdateCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]stubWriteClientUpdateCall, len(s.updateCalls))
+	copy(out, s.updateCalls)
+	return out
 }
 
 func (s *stubWriteClient) recordedPut() []stubWriteClientPutCall {
