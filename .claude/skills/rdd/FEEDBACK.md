@@ -2543,3 +2543,42 @@ single continuous loop; consider documenting session-checkpoint protocol to capt
 multi-item momentum runs, especially when iter-1 convergence is holding.
 
 ---
+
+## 2026-05-08 — M6.2.b: iter-1 convergence scales manifest-bump tools, 12 consecutive iter-1 streak
+
+**PR**: pending
+**Phases with incidents**: 0
+
+### What worked
+
+M6.2.b closed the second sub-item of M6.2 with iter-1 convergence (12th consecutive iter-1
+convergence streak: M5.6.d → M6.2.b, spanning 3 parent milestones). The manifest-bump
+pattern proved symmetric to M6.1.b's slack_app_create: auth gate (authority_matrix) →
+read manifest → audit-requested → write manifest_version → audit-succeeded. Three tools
+(`propose_spawn`, `adjust_personality`, `adjust_language`) share this gate stack without
+per-tool rework. GetManifest pre-emit short-circuit (read before audit row) prevents
+orphaned audit rows for partial-state failures — immediately reusable for M6.2.d's
+promote_to_keep (read notebook, then write Keep). Interface seam parallel:
+`WatchmasterWriteClient` mirrors M6.2.a's `WatchmasterReadClient`, with compile-time
+assertion on `*keepclient.Client`. Three core commits landed cleanly:
+- feat(harness): manifest-bump builtin tools (M6.2.b)
+- feat(harnessrpc): register propose_spawn / adjust_personality / adjust_language methods (M6.2.b)
+- feat(spawn): Watchmaster manifest-bump tools (M6.2.b)
+
+### Metrics
+
+- Review iterations: 1 (Phase 4 iter 1, 0 blockers, 0 important, 5 nits → Follow-up)
+- Consecutive iter-1 convergence streak: 12 (M5.6.d → M6.2.b)
+- PRs in session: 14 (#90–#101 + open), all iter-1
+- Gate stack symmetry: 2/2 write-tool patterns confirmed (M6.1.b slack_app_create, M6.2.b manifest-bump)
+- Test coverage pattern: real manifest operations, seeded Watchmaster manifest, reusable
+
+### Suggested skill changes
+
+Skipping the planner for symmetric tasks (M6.2.b mirrored M6.1.b shape) saved one round
+trip — worth recording when sub-items share a precedent's structure. Pre-flagged design
+choices accepted without rework. Stream-of-consciousness session continues at iter-1
+cadence; 14 PRs landed in single autonomous loop session — consider documenting
+session-checkpoint protocol for multi-item momentum runs.
+
+---
