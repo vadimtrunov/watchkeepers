@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"github.com/vadimtrunov/watchkeepers/core/pkg/keeperslog"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger/slack/cards"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger/slack/inbound"
@@ -105,29 +107,34 @@ func WithAuditAppender(a AuditAppender) Option {
 
 // Dispatcher is the M6.3.b implementation of
 // [inbound.InteractionDispatcher]. Construct via [New]; the zero
-// value is NOT usable (DAO + Replayer are required).
+// value is NOT usable (DAO + Replayer + SpawnKickoff are required).
 //
 // All fields are immutable after construction; the dispatcher is
 // safe for concurrent use across goroutines.
 type Dispatcher struct {
-	dao      spawn.PendingApprovalDAO
-	replayer Replayer
-	audit    AuditAppender
+	dao          spawn.PendingApprovalDAO
+	replayer     Replayer
+	spawnKickoff SpawnKickoff
+	audit        AuditAppender
 }
 
-// New constructs a [Dispatcher] backed by the supplied DAO and
-// Replayer. Both are required; passing a nil dependency panics with
-// a clear message. An audit appender is OPTIONAL — production callers
-// MUST wire one (AC6 mandates emission); the nil fallback exists
-// solely for unit tests that exercise non-audit branches.
-func New(dao spawn.PendingApprovalDAO, replayer Replayer, opts ...Option) *Dispatcher {
+// New constructs a [Dispatcher] backed by the supplied DAO, Replayer,
+// and SpawnKickoff. All three are required; passing a nil dependency
+// panics with a clear message (M6.3.b dependency-required pattern).
+// An audit appender is OPTIONAL — production callers MUST wire one
+// (AC6 mandates emission); the nil fallback exists solely for unit
+// tests that exercise non-audit branches.
+func New(dao spawn.PendingApprovalDAO, replayer Replayer, spawnKickoff SpawnKickoff, opts ...Option) *Dispatcher {
 	if dao == nil {
 		panic("approval: New: DAO must not be nil")
 	}
 	if replayer == nil {
 		panic("approval: New: Replayer must not be nil")
 	}
-	d := &Dispatcher{dao: dao, replayer: replayer}
+	if spawnKickoff == nil {
+		panic("approval: New: SpawnKickoff must not be nil")
+	}
+	d := &Dispatcher{dao: dao, replayer: replayer, spawnKickoff: spawnKickoff}
 	for _, opt := range opts {
 		opt(d)
 	}
@@ -230,6 +237,22 @@ func (d *Dispatcher) DispatchInteraction(ctx context.Context, p inbound.Interact
 		// error class so a downstream consumer can group it.
 		d.appendReplayFailed(ctx, tool, token, err)
 		return fmt.Errorf("approval: dao get after resolve: %w", err)
+	}
+
+	// Branch on tool name (M7.1.b): the `propose_spawn` tool routes
+	// into the spawn-saga kickoff; every other M6.2.x tool stays on
+	// the existing replayer path. The reject branch (handled above)
+	// is unchanged.
+	if row.ToolName == spawn.PendingApprovalToolProposeSpawn {
+		if err := d.spawnKickoff.Kickoff(ctx, uuid.New(), uuid.New(), token); err != nil {
+			// Mirrors the replayer-error policy: emit the failed
+			// audit row and surface the error; do NOT roll back the
+			// DAO transition.
+			d.appendReplayFailed(ctx, tool, token, err)
+			return fmt.Errorf("approval: spawn kickoff: %w", err)
+		}
+		d.appendReplaySucceeded(ctx, tool, token)
+		return nil
 	}
 
 	if err := d.replayer.Replay(ctx, tool, row.ParamsJSON, token); err != nil {
