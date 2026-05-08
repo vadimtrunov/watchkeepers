@@ -53,21 +53,19 @@ const (
 )
 
 // PendingApprovalToolName is the closed-set vocabulary of tool names
-// the approval saga supports in M6.3.b — the four manifest-bump tools
-// from M6.2.b/c (`propose_spawn`, `adjust_personality`,
-// `adjust_language`, `retire_watchkeeper`). Hoisted to constants so a
-// re-key from the harness-side `builtinTools.ts` registry is a one-
-// line change here that the DAO, dispatcher, and renderer pick up via
-// the compiler.
-//
-// `promote_to_keep` (M6.2.d) is intentionally NOT in this list —
-// M6.3.d explicitly owns its diff-preview rendering per the M6.3
-// decomposition.
+// the approval saga supports — the four manifest-bump tools from
+// M6.2.b/c (`propose_spawn`, `adjust_personality`, `adjust_language`,
+// `retire_watchkeeper`) plus the M6.2.d notebook promotion
+// (`promote_to_keep`, surfaced by M6.3.d's diff-preview renderer).
+// Hoisted to constants so a re-key from the harness-side
+// `builtinTools.ts` registry is a one-line change here that the DAO,
+// dispatcher, and renderer pick up via the compiler.
 const (
 	PendingApprovalToolProposeSpawn      = "propose_spawn"
 	PendingApprovalToolAdjustPersonality = "adjust_personality"
 	PendingApprovalToolAdjustLanguage    = "adjust_language"
 	PendingApprovalToolRetireWatchkeeper = "retire_watchkeeper"
+	PendingApprovalToolPromoteToKeep     = "promote_to_keep"
 )
 
 // ErrPendingApprovalNotFound is the typed error [PendingApprovalDAO.Get]

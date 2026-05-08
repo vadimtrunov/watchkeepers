@@ -170,16 +170,18 @@ func DecodeActionID(actionID string) (tool string, token string, err error) {
 	return parts[1], parts[2], nil
 }
 
-// isKnownTool reports whether the tool name is one of the four
-// closed-set values M6.3.b supports. Pinned against the spawn-package
+// isKnownTool reports whether the tool name is one of the closed-set
+// values the approval saga supports. Pinned against the spawn-package
 // constants so a re-key of the harness builtin tool registry surfaces
-// here as a compile error.
+// here as a compile error. M6.3.b ships the four manifest-bump tools;
+// M6.3.d adds `promote_to_keep`.
 func isKnownTool(tool string) bool {
 	switch tool {
 	case spawn.PendingApprovalToolProposeSpawn,
 		spawn.PendingApprovalToolAdjustPersonality,
 		spawn.PendingApprovalToolAdjustLanguage,
-		spawn.PendingApprovalToolRetireWatchkeeper:
+		spawn.PendingApprovalToolRetireWatchkeeper,
+		spawn.PendingApprovalToolPromoteToKeep:
 		return true
 	}
 	return false
