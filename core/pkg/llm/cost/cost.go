@@ -1,5 +1,5 @@
 // cost.go implements [LoggingProvider] — a decorator around [llm.Provider]
-// that emits one `llm_call_completed` keepers_log row per successful LLM
+// that emits one `llm_turn_cost_completed` keepers_log row per successful LLM
 // turn (synchronous Complete or streaming Stream terminating in a
 // MessageStop event). See package godoc (doc.go) for the full contract,
 // payload shape, PII discipline, and logger-error policy.
@@ -17,10 +17,14 @@ import (
 // so a future re-key is a one-line change here that the decorator AND
 // downstream consumers (M6.2.a `report_cost`, M6.3.f rollups) pick up
 // via the compiler.
-const EventTypeLLMCallCompleted = "llm_call_completed"
+//
+// The wire value carries the "llm_turn_cost" prefix so the M6.2.a
+// deployed prefix-based aggregator (defaultReportCostEventTypePrefix =
+// "llm_turn_cost") matches every row this decorator emits.
+const EventTypeLLMCallCompleted = "llm_turn_cost_completed"
 
 // payloadKey* are the closed-set payload keys emitted on every
-// `llm_call_completed` event. Hoisted to constants so a typo in one
+// `llm_turn_cost_completed` event. Hoisted to constants so a typo in one
 // emit site cannot drift from the other; the M6.2.a aggregator (which
 // reads `prompt_tokens` / `completion_tokens`) is shielded by the
 // dual-emit pair.
@@ -74,7 +78,7 @@ type Dependencies struct {
 }
 
 // LoggingProvider is the decorator that wraps an inner [llm.Provider],
-// forwards every method call verbatim, and emits a `llm_call_completed`
+// forwards every method call verbatim, and emits a `llm_turn_cost_completed`
 // keepers_log row per successful turn. Construct via [NewLoggingProvider];
 // the zero value is not usable.
 //
@@ -123,7 +127,7 @@ func NewLoggingProvider(underlying llm.Provider, deps Dependencies) *LoggingProv
 }
 
 // Complete forwards the request to the underlying provider and, on
-// successful return (`err == nil`), emits one `llm_call_completed`
+// successful return (`err == nil`), emits one `llm_turn_cost_completed`
 // keepers_log row carrying the closed-set token-accounting payload.
 // On `err != nil`, the error is forwarded verbatim and NO event is
 // emitted (per AC2: the LLM call did not complete a turn).
@@ -143,7 +147,7 @@ func (p *LoggingProvider) Complete(ctx context.Context, req llm.CompleteRequest)
 // Stream forwards the streaming request to the underlying provider and
 // intercepts the user's [llm.StreamHandler] so the decorator can
 // observe every event. On a [llm.StreamEventKindMessageStop] event the
-// decorator emits one `llm_call_completed` keepers_log row BEFORE
+// decorator emits one `llm_turn_cost_completed` keepers_log row BEFORE
 // forwarding the event to the user's handler (so the audit row is
 // durable even when the user-side handler subsequently panics or
 // returns an error). See doc.go § "Stream interception".
@@ -186,7 +190,7 @@ func (p *LoggingProvider) ReportCost(ctx context.Context, runtimeID string, usag
 	return p.inner.ReportCost(ctx, runtimeID, usage)
 }
 
-// emit composes the closed-set `llm_call_completed` payload and forwards
+// emit composes the closed-set `llm_turn_cost_completed` payload and forwards
 // it to the [Appender]. The Appender failure is intentionally swallowed
 // — the LLM call must complete from the caller's perspective even when
 // the keepers_log write fails (per AC7 / doc.go § "Logger-error policy").

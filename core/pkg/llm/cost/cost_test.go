@@ -434,6 +434,16 @@ func TestLoggingProvider_PIIGuard_NoBodyOrSystemPromptOrToolArgs(t *testing.T) {
 	}
 }
 
+// ── M6.2.a prefix alignment regression (pinned by review comment cost.go:20) ─
+
+func TestEventType_HasReportCostPrefix(t *testing.T) {
+	const want = "llm_turn_cost"
+	if !strings.HasPrefix(cost.EventTypeLLMCallCompleted, want) {
+		t.Fatalf("event_type %q must start with %q so M6.2.a ReportCost aggregates it",
+			cost.EventTypeLLMCallCompleted, want)
+	}
+}
+
 // ── nil-arg construction guards ─────────────────────────────────────────────
 
 func TestNewLoggingProvider_NilUnderlying_Panics(t *testing.T) {

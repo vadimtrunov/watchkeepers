@@ -5,7 +5,7 @@
 // the underlying provider returns. On every successful turn (synchronous
 // [llm.Provider.Complete] or streaming [llm.Provider.Stream] terminating
 // in a [llm.StreamEventKindMessageStop] event), the decorator emits one
-// `llm_call_completed` keepers_log row carrying the closed-set token
+// `llm_turn_cost_completed` keepers_log row carrying the closed-set token
 // accounting payload. Downstream cost rollups (M6.3.f) and the M6.2.a
 // `report_cost` Watchmaster read tool consume these rows.
 //
