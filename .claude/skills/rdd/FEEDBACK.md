@@ -2665,3 +2665,52 @@ milestone families can reuse. Session continuity across 4 sub-items without fixe
 dispatch is rare; worth capturing momentum-run protocol in OMC reference.
 
 ---
+## 2026-05-08 — M6.3.a: iter-0 convergence + executor resume pattern validates uncommitted state
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: Phase 3 (executor cut off mid-Step-3, resume pattern successful)
+
+### What worked
+
+M6.3.a achieved iter-0 convergence (15th consecutive iter-0 or iter-1 streak). The
+scaffolding task established a reusable webhook pattern (signature verify + dispatcher
+skeleton). Executor correctly identified the HMAC-over-raw-body semantic and constant-time
+comparison as critical for security. When first executor was cut off mid-Step-3 with
+3 uncommitted files, second executor with explicit "resume + validate" brief inspected
+the partial state, confirmed code compilation + test pass, committed Steps 3-5 cleanly
+(9a759ea). Recovery via explicit resume-context brief WORKS — critical for handling
+cut-offs in high-context tasks.
+
+### What wasted effort
+
+Phase 3 executor cut-off (mid-Step-3) required a second dispatch. Second executor had
+explicit resume context and succeeded immediately. Cost: 1 dispatch overhead. Worth it:
+validates that resume pattern is reliable for future long tasks.
+
+### Metrics
+
+- Review iterations: 0 (Phase 4 iter 0, fully clean diff, nits deferred to follow-up)
+- Consecutive iter-0/1 convergence streak: 15 (M5.6.d → M6.3.a)
+- PRs in session: 17 (#90–#104), all iter-0 or iter-1
+- Design choices pre-flagged: 4/4 accepted (HMAC pattern, raw-body re-supply, size cap, constant-time equal)
+- Fixer dispatch: 0
+
+### Suggested orchestrator patterns
+
+**Executor cut-off recovery via explicit resume brief**: When orchestrator inspects git
+state on Phase 3 resume and finds uncommitted files from prior executor, the new brief
+should include "inspect + validate + commit the partial state" rather than "start fresh."
+Pattern: orchestrator reads `.go` files for syntax errors or lint issues, then briefs
+"resume from Step N with the uncommitted files at X, Y, Z — validate they compile, tests
+pass, then commit and continue." This adds ~2 min validation but eliminates re-work.
+
+**Scaffolding tests exceed LOC soft cap proportionally**: M6.3.a (1738 LOC) exceeds the
+1000-LOC soft cap but handler_test.go alone is 617 LOC (13 test cases: happy paths +
+negative paths + audit trails + regression guards). By Hard rule 6 ("both files AND LOC
+must exceed"), no reject. Pattern: scaffolding TASKs with comprehensive test coverage
+(signature verify + replay guard + body-size + JSON malformed + audit chains) naturally
+push against the 1000-LOC cap. Consider carving detailed scaffolding tests into a
+follow-up TASK in future similar cases (e.g., "M6.3.a-tests: add edge cases for rate-limit
+placeholder").
+
+---
