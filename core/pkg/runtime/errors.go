@@ -80,6 +80,16 @@ var ErrSubscriptionClosed = errors.New("runtime: subscription closed")
 // via [errors.Is].
 var ErrEmbedderRequired = errors.New("runtime: embedder required")
 
+// ErrAgentNotOpened is returned by [NotebookSupervisor.BootCheck] when
+// the supplied `agentID` does not have a live [notebook.DB] handle in
+// the supervisor's registry. Callers reach BootCheck during a runtime
+// boot path that expects the per-agent notebook to have been Opened
+// already; a missing entry is a wiring bug, not a transient error.
+// Distinct from [ErrRuntimeNotFound] / [ErrTerminated] which describe
+// the agent runtime session lifecycle — BootCheck operates one layer
+// below, on the per-agent SQLite handle. Matchable via [errors.Is].
+var ErrAgentNotOpened = errors.New("runtime: agent notebook not opened")
+
 // ErrUnsupportedPlatform is returned by [SandboxRunner.Run] (M5.4.b)
 // when the caller asked for a non-zero CPU-time or memory-ceiling
 // rlimit on a platform whose `applyRlimits` shim does not implement

@@ -2295,3 +2295,42 @@ Suggest cementing the deferred-deviation-surfacing pattern as a hard rule in the
 - Total wall time from /rdd to merge: pending
 
 ---
+
+## 2026-05-08 — M5.6.e.b: Boot-time superseded-lesson scan
+
+**PR**: pending — Phase 5b
+**Phases with incidents**: 3
+
+### What worked
+
+Gate 2 captured the AC4 deviation (`WithFlagLogger` vs `WithLogger`) proactively.
+The executor's TASK Progress-log pre-documented the shadowing risk and rationale,
+so the code-reviewer accepted it without escalation. The pre-flagged deviation
+pattern from M5.6.d lesson (documenting non-conformances in TASK Progress-log
+early) continues to pay off: zero review friction on a legitimate API choice.
+
+### What wasted effort
+
+Phase 3 silent-exit (executor agent stopped mid-turn without sending a final
+message). Orchestrator recovered by reading git state directly and running
+tests/lint manually, verifying all ACs were satisfied. The recovery worked
+because the executor's commits were coherent and test suite green — silent-exit
+is recoverable when the workspace is left in a clean state. No re-prompting was
+needed; state inspection from disk sufficed.
+
+### Suggested skill changes
+
+Add a "silent-exit recovery via direct state inspection" idiom to
+`references/agent-briefs/executor.md` §"Mode — build" as an alternative to
+SendMessage when the agent leaves the workspace in a clean state. Pattern:
+(1) check git log for new commits, (2) run tests/lint, (3) if all green, infer
+the agent completed its work; no need to wait for a final message.
+
+### Metrics
+
+- Review iterations: 1 (converged immediately)
+- PR-fix iterations: 0 (no blocker/important; Follow-up nits deferred)
+- Operator interventions outside of gates: 1 (phase 3 silent-exit recovery)
+- Total wall time from /rdd to merge: pending Phase 7a
+
+---
