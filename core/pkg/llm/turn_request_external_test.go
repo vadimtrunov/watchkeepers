@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/notebook"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/runtime"
@@ -366,5 +367,243 @@ func TestBuildTurnRequest_NilEmbedder_FailSoft(t *testing.T) {
 	}
 	if got := req.Metadata[MetadataKeyRecalledMemoryStatus]; got != RecalledMemoryStatusEmbedError {
 		t.Errorf("Metadata = %q, want %q", got, RecalledMemoryStatusEmbedError)
+	}
+}
+
+// turnHourCoolingOff returns a unix epoch millisecond timestamp 1 hour in
+// the future, used by the M5.6.d cooling-off fixture entries to push their
+// active_after past `time.Now()` so [notebook.DB.Recall] excludes them.
+func turnHourCoolingOff() int64 {
+	return time.Now().Add(1 * time.Hour).UnixMilli()
+}
+
+// insertTurnEntry seeds the agent's notebook with a single entry. The
+// caller controls all fields including ActiveAfter and (post-Remember) the
+// needs_review flag. Returns the entry id so the caller can flip
+// needs_review or supersede it. The embedding is the deterministic vector
+// used by [insertOneTurnEntry] so [FakeEmbeddingProvider] / [Recall]
+// behaviour is identical across all M5.6.d fixture variants.
+func insertTurnEntry(t *testing.T, db *notebook.DB, content string, activeAfter int64) string {
+	t.Helper()
+	emb := make([]float32, notebook.EmbeddingDim)
+	for i := range emb {
+		emb[i] = 1.5
+	}
+	id, err := db.Remember(testCtx(), notebook.Entry{
+		Category:    notebook.CategoryLesson,
+		Subject:     content,
+		Content:     content,
+		Embedding:   emb,
+		ActiveAfter: activeAfter,
+	})
+	if err != nil {
+		t.Fatalf("Remember(%q): %v", content, err)
+	}
+	return id
+}
+
+// TestBuildTurnRequest_CoolingOffAndNeedsReview_GatedAtAssemblyLayer pins
+// AC1 of M5.6.d: the cooling-off and needs_review predicates already
+// applied at the SQL layer (M5.6.a) hold end-to-end through
+// [BuildTurnRequest] into the assembled [CompleteRequest].System block.
+// Seeds three entries — plain, cooling-off, needs_review — and asserts
+// that ONLY the plain entry's content surfaces in the System slot.
+func TestBuildTurnRequest_CoolingOffAndNeedsReview_GatedAtAssemblyLayer(t *testing.T) {
+	pinTurnDataDir(t)
+	sup, db := openTurnSupervisor(t)
+
+	insertTurnEntry(t, db, "plain-entry", 0)
+	insertTurnEntry(t, db, "cooling-off-entry", turnHourCoolingOff())
+	needsReviewID := insertTurnEntry(t, db, "needs-review-entry", 0)
+	if err := db.MarkNeedsReview(testCtx(), needsReviewID); err != nil {
+		t.Fatalf("MarkNeedsReview: %v", err)
+	}
+
+	req, err := BuildTurnRequest(testCtx(), turnValidManifest(), "q", NewFakeEmbeddingProvider(), sup)
+	if err != nil {
+		t.Fatalf("BuildTurnRequest: %v", err)
+	}
+	if got := req.Metadata[MetadataKeyRecalledMemoryStatus]; got != RecalledMemoryStatusApplied {
+		t.Errorf("Metadata[%q] = %q, want %q", MetadataKeyRecalledMemoryStatus, got, RecalledMemoryStatusApplied)
+	}
+	if !strings.Contains(req.System, "plain-entry") {
+		t.Errorf("System missing plain entry; System = %q", req.System)
+	}
+	if strings.Contains(req.System, "cooling-off-entry") {
+		t.Errorf("System contains cooling-off entry; System = %q", req.System)
+	}
+	if strings.Contains(req.System, "needs-review-entry") {
+		t.Errorf("System contains needs-review entry; System = %q", req.System)
+	}
+}
+
+// insertSupersededTurnEntry seeds a superseder + a superseded entry whose
+// `superseded_by` references the superseder id. The superseder lands first
+// to satisfy the foreign-key REFERENCES on the superseded row. Returns the
+// superseder id so the caller can assert which entry surfaces in Recall.
+func insertSupersededTurnEntry(t *testing.T, db *notebook.DB, supersederContent, supersededContent string) (supersederID string) {
+	t.Helper()
+	emb := make([]float32, notebook.EmbeddingDim)
+	for i := range emb {
+		emb[i] = 1.5
+	}
+	supersederID, err := db.Remember(testCtx(), notebook.Entry{
+		Category:  notebook.CategoryLesson,
+		Subject:   supersederContent,
+		Content:   supersederContent,
+		Embedding: emb,
+	})
+	if err != nil {
+		t.Fatalf("Remember(superseder): %v", err)
+	}
+	if _, err := db.Remember(testCtx(), notebook.Entry{
+		Category:     notebook.CategoryLesson,
+		Subject:      supersededContent,
+		Content:      supersededContent,
+		Embedding:    emb,
+		SupersededBy: &supersederID,
+	}); err != nil {
+		t.Fatalf("Remember(superseded): %v", err)
+	}
+	return supersederID
+}
+
+// TestBuildTurnRequest_SupersededExcluded_AtAssemblyLayer pins AC2: a
+// superseded entry — already filtered by [DB.Recall]'s
+// `superseded_by IS NOT NULL` predicate — also stays out of the assembled
+// CompleteRequest. The exclusion is a different class than cooling-off /
+// needs_review, so the diagnostic counters do not count it.
+func TestBuildTurnRequest_SupersededExcluded_AtAssemblyLayer(t *testing.T) {
+	pinTurnDataDir(t)
+	sup, db := openTurnSupervisor(t)
+
+	insertSupersededTurnEntry(t, db, "superseder-entry", "superseded-entry")
+
+	req, err := BuildTurnRequest(testCtx(), turnValidManifest(), "q", NewFakeEmbeddingProvider(), sup)
+	if err != nil {
+		t.Fatalf("BuildTurnRequest: %v", err)
+	}
+	if got := req.Metadata[MetadataKeyRecalledMemoryStatus]; got != RecalledMemoryStatusApplied {
+		t.Errorf("Metadata = %q, want %q", got, RecalledMemoryStatusApplied)
+	}
+	if strings.Contains(req.System, "superseded-entry") {
+		t.Errorf("System contains superseded entry; System = %q", req.System)
+	}
+	if !strings.Contains(req.System, "superseder-entry") {
+		t.Errorf("System missing superseder entry; System = %q", req.System)
+	}
+	// Superseded rows are NOT counted by either filter counter.
+	if _, ok := req.Metadata[MetadataKeyCoolingOffFiltered]; ok {
+		t.Errorf("Metadata contains %q for a superseded-only fixture", MetadataKeyCoolingOffFiltered)
+	}
+	if _, ok := req.Metadata[MetadataKeyNeedsReviewFiltered]; ok {
+		t.Errorf("Metadata contains %q for a superseded-only fixture", MetadataKeyNeedsReviewFiltered)
+	}
+}
+
+// TestBuildTurnRequest_FilterCountsMetadata_Populated pins AC5: the
+// 4-entry fixture (plain × 2, cooling-off × 1, needs_review × 1) yields
+// MetadataKeyCoolingOffFiltered == "1" and MetadataKeyNeedsReviewFiltered
+// == "1" alongside an applied recall.
+func TestBuildTurnRequest_FilterCountsMetadata_Populated(t *testing.T) {
+	pinTurnDataDir(t)
+	sup, db := openTurnSupervisor(t)
+
+	insertTurnEntry(t, db, "plain-1", 0)
+	insertTurnEntry(t, db, "plain-2", 0)
+	insertTurnEntry(t, db, "cooling-1", turnHourCoolingOff())
+	needsReviewID := insertTurnEntry(t, db, "needs-review-1", 0)
+	if err := db.MarkNeedsReview(testCtx(), needsReviewID); err != nil {
+		t.Fatalf("MarkNeedsReview: %v", err)
+	}
+
+	req, err := BuildTurnRequest(testCtx(), turnValidManifest(), "q", NewFakeEmbeddingProvider(), sup)
+	if err != nil {
+		t.Fatalf("BuildTurnRequest: %v", err)
+	}
+	if got := req.Metadata[MetadataKeyRecalledMemoryStatus]; got != RecalledMemoryStatusApplied {
+		t.Errorf("Metadata = %q, want %q", got, RecalledMemoryStatusApplied)
+	}
+	if got := req.Metadata[MetadataKeyCoolingOffFiltered]; got != "1" {
+		t.Errorf("Metadata[%q] = %q, want \"1\"", MetadataKeyCoolingOffFiltered, got)
+	}
+	if got := req.Metadata[MetadataKeyNeedsReviewFiltered]; got != "1" {
+		t.Errorf("Metadata[%q] = %q, want \"1\"", MetadataKeyNeedsReviewFiltered, got)
+	}
+	if !strings.Contains(req.System, "plain-1") || !strings.Contains(req.System, "plain-2") {
+		t.Errorf("System missing one of the plain entries; System = %q", req.System)
+	}
+}
+
+// TestBuildTurnRequest_FilterCountsMetadata_AbsentWhenZero pins AC6: a
+// fixture with no excluded rows leaves both counter keys absent from the
+// metadata map (no zero-valued keys).
+func TestBuildTurnRequest_FilterCountsMetadata_AbsentWhenZero(t *testing.T) {
+	pinTurnDataDir(t)
+	sup, db := openTurnSupervisor(t)
+
+	insertTurnEntry(t, db, "lone-plain", 0)
+
+	req, err := BuildTurnRequest(testCtx(), turnValidManifest(), "q", NewFakeEmbeddingProvider(), sup)
+	if err != nil {
+		t.Fatalf("BuildTurnRequest: %v", err)
+	}
+	if got := req.Metadata[MetadataKeyRecalledMemoryStatus]; got != RecalledMemoryStatusApplied {
+		t.Errorf("Metadata = %q, want %q", got, RecalledMemoryStatusApplied)
+	}
+	if _, ok := req.Metadata[MetadataKeyCoolingOffFiltered]; ok {
+		t.Errorf("Metadata contains %q on a zero-filtered fixture", MetadataKeyCoolingOffFiltered)
+	}
+	if _, ok := req.Metadata[MetadataKeyNeedsReviewFiltered]; ok {
+		t.Errorf("Metadata contains %q on a zero-filtered fixture", MetadataKeyNeedsReviewFiltered)
+	}
+}
+
+// TestBuildTurnRequest_NoMatchesPath_FilterCountsAbsent pins the AC6
+// edge: an empty notebook yields status `no_matches` AND no filter
+// counter keys (zero filtered, zero matches).
+func TestBuildTurnRequest_NoMatchesPath_FilterCountsAbsent(t *testing.T) {
+	pinTurnDataDir(t)
+	sup, _ := openTurnSupervisor(t)
+	// No entries at all.
+
+	req, err := BuildTurnRequest(testCtx(), turnValidManifest(), "q", NewFakeEmbeddingProvider(), sup)
+	if err != nil {
+		t.Fatalf("BuildTurnRequest: %v", err)
+	}
+	if got := req.Metadata[MetadataKeyRecalledMemoryStatus]; got != RecalledMemoryStatusNoMatches {
+		t.Errorf("Metadata = %q, want %q", got, RecalledMemoryStatusNoMatches)
+	}
+	if _, ok := req.Metadata[MetadataKeyCoolingOffFiltered]; ok {
+		t.Errorf("Metadata contains %q on no_matches path", MetadataKeyCoolingOffFiltered)
+	}
+	if _, ok := req.Metadata[MetadataKeyNeedsReviewFiltered]; ok {
+		t.Errorf("Metadata contains %q on no_matches path", MetadataKeyNeedsReviewFiltered)
+	}
+}
+
+// TestBuildTurnRequest_OnlyCoolingOff_NoMatchesButCounterSet pins the
+// mixed-edge bullet from the test plan: a fixture with ONLY a
+// cooling-off entry yields status `no_matches` (Recall returns nothing),
+// AND the cooling-off counter IS set (the helper still observed an
+// excluded row even though no row was injected).
+func TestBuildTurnRequest_OnlyCoolingOff_NoMatchesButCounterSet(t *testing.T) {
+	pinTurnDataDir(t)
+	sup, db := openTurnSupervisor(t)
+
+	insertTurnEntry(t, db, "cooling-only", turnHourCoolingOff())
+
+	req, err := BuildTurnRequest(testCtx(), turnValidManifest(), "q", NewFakeEmbeddingProvider(), sup)
+	if err != nil {
+		t.Fatalf("BuildTurnRequest: %v", err)
+	}
+	if got := req.Metadata[MetadataKeyRecalledMemoryStatus]; got != RecalledMemoryStatusNoMatches {
+		t.Errorf("Metadata = %q, want %q", got, RecalledMemoryStatusNoMatches)
+	}
+	if got := req.Metadata[MetadataKeyCoolingOffFiltered]; got != "1" {
+		t.Errorf("Metadata[%q] = %q, want \"1\"", MetadataKeyCoolingOffFiltered, got)
+	}
+	if _, ok := req.Metadata[MetadataKeyNeedsReviewFiltered]; ok {
+		t.Errorf("Metadata contains %q with zero needs-review rows", MetadataKeyNeedsReviewFiltered)
 	}
 }
