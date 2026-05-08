@@ -2880,3 +2880,33 @@ planner should grep consumer's vocab BEFORE pinning TASK literal. Saves one fixe
 - Second M6.3.x TASK requiring fixer (M6.3.b was iter-0; M6.3.c iter-0; M6.3.d iter-0; M6.3.e iter-1→2)
 
 ---
+
+## 2026-05-08 — M6.3.f: cost-rollups endpoint (last sub-item in M6 milestone close)
+
+### What went right
+
+Planner brief explicitly grepped M6.3.e's payload envelope structure (`core/pkg/llm/cost/cost.go`) BEFORE pinning the TASK SQL path
+(`payload->'data'->>'input_tokens'`), reusing the M6.3.e lesson directly. Zero vocabulary defects in executor's three commits. Code-reviewer iter-1
+surfaced critical RLS test defect: test asserted only "empty response on zero rows" (tautology that passes even if handler skipped RLS
+propagation). Fixer added explicit claim-value assertion (`runner.LastClaim.Scope == requestScope`). Iter-2 verified BY READING THE FIXER
+DIFF (per orchestrator brief), confirmed `if x != want { t.Errorf }` = standard Go assertion. Single-commit fixer, iter-2 converged 0/0/0.
+
+### What wasted effort
+
+Phase 4 iter-1: RLS test-defect slipped through executor. Pattern reinforced: when a test claims to verify an auth boundary, the test must
+assert the boundary VALUE reaches the seam (not just the response shape). Otherwise integration bugs hide until runtime. Updated code-reviewer
+brief.
+
+### Suggested skill changes
+
+- Update `references/code-reviewer.md` **RLS/auth boundary section**: when a handler test uses a fake `scopedRunner`, require explicit assertion
+  that `runner.LastClaim.Scope` (or equivalent boundary value) matches the request claim, not just that the response shape is correct.
+
+### Metrics
+
+- Review iterations: 1→2 (iter-1: 1 critical RLS test defect; iter-2: 0/0/0 converged)
+- Code LOC: 1133 (over soft cap 1000; hard rule 6: ≤1000 AND ≤20 files—both must exceed, only LOC exceeded); files 4 (handler + test + keepclient read + test)
+- Fixer commits: 1 (RLS test assertion pin)
+- Milestone close: M6.3.f is last leaf in M6.3 → closes M6.3 + M6 (12 sub-items total: M6.1.a/b, M6.2.a/b/c/d, M6.3.a/b/c/d/e/f)
+
+---

@@ -118,6 +118,7 @@ func NewRouterWithRunner(v auth.Verifier, runner *FakeScopedRunner) http.Handler
 		mux.Handle("POST /v1/search", authed(handleSearch(runner)))
 		mux.Handle("GET /v1/manifests/{manifest_id}", authed(handleGetManifest(runner)))
 		mux.Handle("GET /v1/keepers-log", authed(handleLogTail(runner)))
+		mux.Handle("GET /v1/cost-rollups", authed(handleCostRollups(runner)))
 		mux.Handle("POST /v1/knowledge-chunks", authed(handleStore(runner)))
 		mux.Handle("POST /v1/keepers-log", authed(handleLogAppend(runner)))
 		mux.Handle("PUT /v1/manifests/{manifest_id}/versions", authed(handlePutManifestVersion(runner)))

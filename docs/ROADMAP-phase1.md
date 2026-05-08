@@ -375,7 +375,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 ---
 
-### M6 — Watchmaster (meta-agent) [ ]
+### M6 — Watchmaster (meta-agent) [x]
 
 **Goal**: First concrete Watchkeeper — the orchestrator humans talk to.
 
@@ -389,13 +389,13 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M6.2.b** Manifest-bump tools (lead-approval gated): propose_spawn, adjust_personality, adjust_language — all draft a new manifest_version via PutManifestVersion
   - [x] **M6.2.c** retire_watchkeeper (lead-approval gated) — lifecycle flag flip, separated from manifest bumps to keep PR scope tight
   - [x] **M6.2.d** promote_to_keep(agent_id, notebook_entry_id) (lead-approval gated) — read-then-write across notebook→keep boundary, emits notebook_promoted_to_keep event
-- [ ] **M6.3** **Operator surface** — Slack DM conversation with designated admins (Manifest drafts rendered as Slack blocks with Approve/Reject actions) and per-Watchkeeper cost tracker (prompt + completion tokens, daily/weekly rollups persisted in Keep).
+- [x] **M6.3** **Operator surface** — Slack DM conversation with designated admins (Manifest drafts rendered as Slack blocks with Approve/Reject actions) and per-Watchkeeper cost tracker (prompt + completion tokens, daily/weekly rollups persisted in Keep).
   - [x] **M6.3.a** Slack inbound webhook scaffolding (Events API + Interactivity) — request signature verification, dispatch skeleton, no business logic
   - [x] **M6.3.b** Manifest-draft approval card renderer + pending-approval DAO — Slack blocks for `propose_spawn` / `adjust_personality` / `adjust_language` / `retire_watchkeeper`, Approve/Reject button handler that resolves approval tokens
   - [x] **M6.3.c** DM intent router wiring read-only + manifest-bump tools — parses "what's running?", "propose Coordinator for backend team", etc., dispatches to existing M6.2 toolset
   - [x] **M6.3.d** promote_to_keep diff-preview renderer for approval cards — extends M6.3.b's renderer with notebook-entry diff
   - [x] **M6.3.e** Per-Watchkeeper token spend recording on LLM calls — `keepers_log` event emitted per call with prompt + completion tokens, agent_id, model
-  - [ ] **M6.3.f** Daily/weekly cost rollups persisted in Keep — aggregation tables / queries, optional CLI/Slack surface
+  - [x] **M6.3.f** Daily/weekly cost rollups persisted in Keep — aggregation tables / queries, optional CLI/Slack surface
 
 **Artifacts**: Watchmaster manifest file, toolset TS implementations, Slack interaction flow.
 
