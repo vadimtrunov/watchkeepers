@@ -2334,3 +2334,42 @@ the agent completed its work; no need to wait for a final message.
 - Total wall time from /rdd to merge: pending Phase 7a
 
 ---
+## 2026-05-08 — M5.6.f: End-of-feature integration test
+
+**PR**: pending — Phase 5b
+**Phases with incidents**: 3, 4
+
+### What worked
+
+The bounded-loop discipline held steady across the 6-PR M5.6 feature. M5.6.a
+→ M5.6.f converged at ≤ 2 review iterations each. M5.6.f followed the same
+pattern: Phase 4 iter 2 converged with 0 blockers, 0 important, 0 new nits.
+Pre-flagging-deviation (from M5.6.d lesson) continues to reduce friction —
+executor documented AC5 (cooling-off counter literal `== 1`) in TASK
+Progress-log before code review, so reviewer accepted it without escalation.
+
+### What wasted effort
+
+Phase 3 silent-exit (executor stopped mid-turn). Orchestrator recovered by
+inspecting git state + running tests manually, verifying all ACs green.
+Recovery was clean because executor left the workspace coherent. This is
+the second silent-exit in M5.6 (also happened in M5.6.e.b Phase 3);
+direct-state-inspection recovery is reproducibly effective. Worth recording:
+when the workspace is clean and tests pass, SendMessage re-prompting is
+unnecessary — state inspection suffices.
+
+### Suggested skill changes
+
+- Document "silent-exit recovery via direct state inspection" as a recovery
+  pattern in `references/agent-briefs/executor.md` §Build mode, with the
+  heuristic: if git log shows new commits and test suite is green, infer
+  executor completed its work; no SendMessage needed.
+
+### Metrics
+
+- Review iterations: 1 (converged immediately, Phase 4 iter 2)
+- PR-fix iterations: 0 (zero blocker/important; nits deferred)
+- Operator interventions outside of gates: 1 (Phase 3 silent-exit recovery)
+- Total wall time from /rdd to merge: pending Phase 7a
+
+---
