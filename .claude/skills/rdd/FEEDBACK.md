@@ -2474,3 +2474,37 @@ behavior remains stable across milestone boundaries.
 - Document direct-state-inspection recovery in `.claude/skills/rdd/RECOVERY.md` or
   equivalent, with evidence-collection checklist (.omc/state contents, test logs,
   git status).
+
+---
+
+## 2026-05-08 — M6.1.b: iter-1 convergence closes M6.1 parent; privilege-RPC + wire-auth patterns lock seams
+
+**PR**: pending
+**Phases with incidents**: 0
+
+### What worked
+
+M6.1.b closed the M6.1 parent with iter-1 convergence (9th straight iter-1; M5.6.d
+through M6.1.b). The privilege-boundary-as-RPC-seam pattern (core owns credentials,
+agent calls tool, harnessrpc routes to core RPC) emerged cleanly from the scope and
+is immediately reusable for M6.2's `propose_spawn`, M6.3's `adjust_personality`, and
+M7.1's spawn saga. Wire-level `agent_id` rejection via `.strict()` zod proved
+effective for blocking audit-spoofing attacks. Approval-token opacity as a forward-compat
+seam (non-empty validation today, signature verification in M6.3) creates a clean
+handoff contract.
+
+### Metrics
+
+- Review iterations: 1 (Phase 4 iter 1)
+- Consecutive iter-1 convergence streak: 9 (M5.6.d → M6.1.b)
+- Parent cascade: M6.1.b closes M6.1 (both children complete)
+- Operator interventions outside gates: 0
+
+### Suggested skill changes
+
+**TASK file persistence**: TASK-*.md was lost between /loop ticks during session today
+(gitignored, not preserved across state transitions). Orchestrator recovered from memory
++ git branch inspection. Suggested fix: checkpoint TASK file to `.omc/state/last-task.md`
+at Phase 1 start, so between-tick loss is recoverable from state cache rather than memory.
+
+---

@@ -28,8 +28,11 @@
  * the standard {@link MethodError} → JSON-RPC error path.
  */
 
+import { z } from "zod";
+
 import { type RpcClient } from "./jsonrpc.js";
 import { rememberEntry, type RememberEntryParams } from "./notebookClient.js";
+import { createSlackApp, type SlackAppCreateParams } from "./slackClient.js";
 import type { JsonRpcValue } from "./types.js";
 
 /**
@@ -44,6 +47,23 @@ export class BuiltinAgentIDMissing extends Error {
   public constructor(toolName: string) {
     super(`builtin tool ${toolName} requires an agentID but the manifest has not set one`);
     this.name = "BuiltinAgentIDMissing";
+  }
+}
+
+/**
+ * Typed error a built-in handler throws when the wire-level `input`
+ * fails the handler's local zod schema (e.g. missing
+ * `approval_token` for `slack_app_create`). The dispatcher in
+ * `invokeTool.ts` lets it propagate; callers see a generic
+ * {@link ToolErrorCode.ToolExecutionError} with the zod issue message
+ * attached. Carrying a dedicated class lets future dispatch wiring
+ * (M6.2) tell "shape mismatch" apart from "remote RPC error" without
+ * string-matching, and keeps the registry signature stable.
+ */
+export class BuiltinInvalidInput extends Error {
+  public constructor(toolName: string, message: string) {
+    super(`builtin tool ${toolName}: invalid input: ${message}`);
+    this.name = "BuiltinInvalidInput";
   }
 }
 
@@ -96,12 +116,79 @@ const rememberHandler: BuiltinHandler = async (rpc, agentID, input) => {
 };
 
 /**
+ * Zod schema for the `slack_app_create` builtin tool input. Mirrors
+ * the wire shape the Go-side handler decodes
+ * (`slackAppCreateParams` in `core/pkg/harnessrpc/slack_app_create.go`)
+ * — snake_case field names, required `app_name` + `approval_token`
+ * + `scopes` array of strings, optional `app_description`.
+ *
+ * The `agent_id` field is NOT in the schema because the dispatcher
+ * supplies it from the active manifest (the same way the `remember`
+ * builtin does). A wire-level `agent_id` would let a tool caller
+ * spoof the audit row's `agent_id` field, defeating the M6.1.b
+ * privileged-action audit contract.
+ *
+ * `.strict()` so a future protocol field on the wire surfaces as a
+ * validation error rather than being silently dropped — matches the
+ * conservative posture of {@link CapabilityDeclarationSchema} and
+ * {@link ToolInputSpec}.
+ */
+const SlackAppCreateInputSchema = z
+  .object({
+    app_name: z.string().min(1, "app_name must be a non-empty string"),
+    app_description: z.string().optional(),
+    scopes: z.array(z.string()).default([]),
+    approval_token: z.string().min(1, "approval_token must be a non-empty string"),
+  })
+  .strict();
+
+/**
+ * `slack_app_create` built-in (M6.1.b) — forwards to the Go-side
+ * `slack.app_create` method via {@link createSlackApp}. Throws
+ * {@link BuiltinAgentIDMissing} when the manifest never delivered an
+ * `agentID`; throws {@link BuiltinInvalidInput} on a local zod-shape
+ * mismatch BEFORE any outbound RPC. Downstream Go-side validation
+ * (claim authority, secrets read, audit chain) surfaces malformed
+ * payloads as JSON-RPC ToolUnauthorized / ApprovalRequired /
+ * InvalidParams / InternalError per the M6.1.b sentinel mapping.
+ */
+const slackAppCreateHandler: BuiltinHandler = async (rpc, agentID, input) => {
+  if (agentID === undefined) {
+    throw new BuiltinAgentIDMissing("slack_app_create");
+  }
+  const parsed = SlackAppCreateInputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new BuiltinInvalidInput(
+      "slack_app_create",
+      parsed.error.issues[0]?.message ?? parsed.error.message,
+    );
+  }
+  // The dispatcher injects the manifest-provided `agent_id`; the
+  // wire-level input MUST NOT carry it. See SlackAppCreateInputSchema
+  // docblock for the audit-spoofing rationale.
+  const params: SlackAppCreateParams = {
+    agent_id: agentID,
+    app_name: parsed.data.app_name,
+    ...(parsed.data.app_description === undefined
+      ? {}
+      : { app_description: parsed.data.app_description }),
+    scopes: parsed.data.scopes,
+    approval_token: parsed.data.approval_token,
+  };
+  const result = await createSlackApp(rpc, params);
+  return result as unknown as JsonRpcValue;
+};
+
+/**
  * Read-only registry of built-in tools. Indexed by the wire-level
  * `tool.name` from `invokeTool.params.tool`. Adding a new built-in is
  * a single-line edit; no dispatch-branch change is needed.
  */
 export const builtinHandlers: ReadonlyMap<string, BuiltinHandler> = new Map<string, BuiltinHandler>(
-  [["remember", rememberHandler]],
+  [
+    ["remember", rememberHandler],
+    ["slack_app_create", slackAppCreateHandler],
+  ],
 );
 
 /**

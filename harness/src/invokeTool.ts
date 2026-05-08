@@ -24,7 +24,7 @@ import ivm from "isolated-vm";
 
 import { BuiltinAgentIDMissing, getBuiltinHandler } from "./builtinTools.js";
 import { CapabilityDeclarationSchema, type CapabilityDeclaration } from "./capabilities.js";
-import { type RpcClient } from "./jsonrpc.js";
+import { RpcRequestError, type RpcClient } from "./jsonrpc.js";
 import { getActiveAgentID, getActiveToolset } from "./manifest.js";
 import { MethodError } from "./methods.js";
 import { JsonRpcErrorCode, type JsonRpcErrorCodeValue, type JsonRpcValue } from "./types.js";
@@ -310,6 +310,15 @@ async function runBuiltinTool(
       throw toolError(ToolErrorCode.ToolUnauthorized, err.message);
     }
     if (err instanceof MethodError) throw err;
+    // Preserve the Go-side error code on a {@link RpcRequestError}
+    // (e.g. -32007 ApprovalRequired from the M6.1.b sentinel mapping)
+    // so a TS caller can branch on the wire code without string-matching.
+    // Without this, the catch-all below would flatten every Go-side
+    // error to ToolExecutionError and the M6.1.b approval gate would
+    // be indistinguishable from a generic adapter failure.
+    if (err instanceof RpcRequestError) {
+      throw new MethodError(err.code as JsonRpcErrorCodeValue, err.message, err.data);
+    }
     throw toolError(
       ToolErrorCode.ToolExecutionError,
       err instanceof Error ? err.message : String(err),
