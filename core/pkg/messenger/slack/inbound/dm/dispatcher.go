@@ -35,6 +35,7 @@ const (
 	reasonDAOInsertError = "dao_insert_error"
 	reasonOutboundError  = "outbound_error"
 	reasonRenderError    = "render_error"
+	reasonTokenMintError = "token_mint_error"
 )
 
 // payload key vocabulary on the audit rows. Snake_case, hoisted so
@@ -189,7 +190,7 @@ type Dispatcher struct {
 	outbound  Outbound
 	audit     AuditAppender
 	claim     spawn.Claim
-	tokenMint func() string
+	tokenMint func() (string, error)
 }
 
 // Compile-time assertion: [*Dispatcher] satisfies
@@ -222,7 +223,7 @@ func WithClaim(c spawn.Claim) Option {
 
 // WithTokenMint overrides the approval-token generator. Defaults to
 // UUID v7. Tests pin a deterministic generator for assertions.
-func WithTokenMint(fn func() string) Option {
+func WithTokenMint(fn func() (string, error)) Option {
 	return func(d *Dispatcher) {
 		if fn != nil {
 			d.tokenMint = fn
@@ -351,11 +352,17 @@ func (d *Dispatcher) handleReadOnly(ctx context.Context, channelID string, in in
 	return nil
 }
 
-// handlePropose drives the propose-spawn branch: invoke the proposer,
-// persist the pending row, render the approval card, post the DM,
-// emit the closing audit row.
+// handlePropose drives the propose-spawn branch: mint token, invoke the
+// proposer, render the approval card (before any DAO write), persist the
+// pending row, post the DM, emit the closing audit row.
 func (d *Dispatcher) handlePropose(ctx context.Context, channelID string, parsed intent.Result) error {
-	token := d.tokenMint()
+	token, err := d.tokenMint()
+	if err != nil {
+		d.appendFailed(ctx, channelID, string(intent.IntentProposeSpawn), reasonTokenMintError, err)
+		_ = d.outbound.Post(ctx, channelID, nil, apologyText())
+		return fmt.Errorf("dm: token mint: %w", err)
+	}
+
 	in := ProposeSpawnRequest{Team: parsed.Team, Role: parsed.Role, Claim: d.claim}
 
 	resp, err := d.proposer.Invoke(ctx, in)
@@ -369,20 +376,22 @@ func (d *Dispatcher) handlePropose(ctx context.Context, channelID string, parsed
 	// rendered action_id round-trips through the M6.3.b dispatcher.
 	resp.CardInput.ApprovalToken = token
 
-	if err := d.dao.Insert(ctx, token, spawn.PendingApprovalToolProposeSpawn, resp.ParamsJSON); err != nil {
-		d.appendFailed(ctx, channelID, string(intent.IntentProposeSpawn), reasonDAOInsertError, err)
-		_ = d.outbound.Post(ctx, channelID, nil, apologyText())
-		return fmt.Errorf("dm: dao insert: %w", err)
-	}
-
+	// Render BEFORE the DAO insert: if the card cannot be rendered
+	// (empty actionID) we never persist an orphaned pending row.
 	blocks, actionID := cards.RenderProposeSpawn(resp.CardInput)
 	if actionID == "" {
 		// Should not happen — invoker contract requires non-empty
 		// AgentID. Emit failed audit + apology so the operator notices.
-		err := errors.New("empty card render")
-		d.appendFailed(ctx, channelID, string(intent.IntentProposeSpawn), reasonRenderError, err)
+		renderErr := errors.New("empty card render")
+		d.appendFailed(ctx, channelID, string(intent.IntentProposeSpawn), reasonRenderError, renderErr)
 		_ = d.outbound.Post(ctx, channelID, nil, apologyText())
-		return fmt.Errorf("dm: render: %w", err)
+		return fmt.Errorf("dm: render: %w", renderErr)
+	}
+
+	if err := d.dao.Insert(ctx, token, spawn.PendingApprovalToolProposeSpawn, resp.ParamsJSON); err != nil {
+		d.appendFailed(ctx, channelID, string(intent.IntentProposeSpawn), reasonDAOInsertError, err)
+		_ = d.outbound.Post(ctx, channelID, nil, apologyText())
+		return fmt.Errorf("dm: dao insert: %w", err)
 	}
 
 	if err := d.outbound.Post(ctx, channelID, blocks, "Approval required for new Watchkeeper spawn"); err != nil {
@@ -413,15 +422,15 @@ func apologyText() string {
 }
 
 // defaultTokenMint mints a fresh UUID v7 string for every
-// propose-spawn approval. Falls back to a synthetic prefix when the
-// uuid package errors (extremely rare; the call has no real failure
-// mode in v7) so the dispatcher never panics on token allocation.
-func defaultTokenMint() string {
+// propose-spawn approval. Returns an error on the (extremely rare)
+// uuid.NewV7 failure rather than falling back to a literal string,
+// which would cause silent token collisions on concurrent failures.
+func defaultTokenMint() (string, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
-		return "tok-error"
+		return "", fmt.Errorf("token mint: uuid.NewV7: %w", err)
 	}
-	return id.String()
+	return id.String(), nil
 }
 
 // ── audit-row builders ───────────────────────────────────────────────

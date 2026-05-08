@@ -167,7 +167,7 @@ func newHarness(t *testing.T) *harness {
 		outbound,
 		dm.WithAuditAppender(w),
 		dm.WithClaim(spawn.Claim{OrganizationID: "org-1", AgentID: "wm-1"}),
-		dm.WithTokenMint(func() string { return tok }),
+		dm.WithTokenMint(func() (string, error) { return tok, nil }),
 	)
 	return h
 }
@@ -571,6 +571,108 @@ func TestDispatch_NonMessageEvent(t *testing.T) {
 	}
 	if rows := h.keepers.appended(); len(rows) != 0 {
 		t.Errorf("audit rows = %d, want 0", len(rows))
+	}
+}
+
+// TestDispatch_Propose_RenderError pins that a card-render failure (empty
+// actionID) leaves 0 DAO rows: the pending row must NOT be inserted when
+// the card cannot be rendered.
+func TestDispatch_Propose_RenderError(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	// AgentID is intentionally empty so RenderProposeSpawn returns an
+	// empty actionID, triggering the render-error branch.
+	h.proposer.resp = dm.ProposeSpawnResponse{
+		CardInput:  cards.ProposeSpawnCardInput{AgentID: ""},
+		ParamsJSON: []byte(`{}`),
+	}
+
+	err := h.d.DispatchEvent(context.Background(), dmEvent("propose a Coordinator for the backend team"))
+	if err == nil {
+		t.Fatal("DispatchEvent returned nil, want non-nil")
+	}
+
+	want := []string{"slack_dm_received", "slack_dm_failed"}
+	if got := h.keepers.eventTypes(); !equalStrings(got, want) {
+		t.Fatalf("event chain = %v, want %v", got, want)
+	}
+	failed := string(h.keepers.appended()[1].Payload)
+	if !strings.Contains(failed, `"reason":"render_error"`) {
+		t.Errorf("failed payload missing render_error: %s", failed)
+	}
+
+	// The invariant: no DAO row persisted when render fails.
+	_, daoErr := h.dao.Get(context.Background(), h.tokenSeen)
+	if daoErr == nil {
+		t.Error("DAO row exists after render-error branch — orphaned pending row")
+	}
+
+	posts := h.outbound.recorded()
+	if len(posts) != 1 {
+		t.Fatalf("outbound posts = %d, want 1 (apology)", len(posts))
+	}
+	if !strings.Contains(posts[0].FallbackText, "couldn't complete") {
+		t.Errorf("apology text = %q", posts[0].FallbackText)
+	}
+}
+
+// TestDispatch_Propose_TokenMintError pins that a token-mint failure
+// results in 2 audits (received + failed with reason=token_mint_error),
+// 0 DAO rows, 0 proposer calls, and an apology DM.
+func TestDispatch_Propose_TokenMintError(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryPendingApprovalDAO(nil)
+	read := &fakeReadDisp{}
+	proposer := &fakeProposer{}
+	outbound := &fakeOutbound{}
+	fkc := &fakeKeepClient{}
+	w := keeperslog.New(fkc)
+
+	mintErr := errors.New("uuid entropy failure")
+	d := dm.New(
+		intent.NewParser(),
+		read,
+		proposer,
+		dao,
+		outbound,
+		dm.WithAuditAppender(w),
+		dm.WithClaim(spawn.Claim{OrganizationID: "org-1", AgentID: "wm-1"}),
+		dm.WithTokenMint(func() (string, error) { return "", mintErr }),
+	)
+
+	err := d.DispatchEvent(context.Background(), dmEvent("propose a Coordinator for the backend team"))
+	if err == nil {
+		t.Fatal("DispatchEvent returned nil, want non-nil")
+	}
+
+	want := []string{"slack_dm_received", "slack_dm_failed"}
+	if got := fkc.eventTypes(); !equalStrings(got, want) {
+		t.Fatalf("event chain = %v, want %v", got, want)
+	}
+	failed := string(fkc.appended()[1].Payload)
+	if !strings.Contains(failed, `"reason":"token_mint_error"`) {
+		t.Errorf("failed payload missing token_mint_error: %s", failed)
+	}
+
+	// 0 DAO rows: Get on any token must return not-found.
+	if _, daoErr := dao.Get(context.Background(), "tok-any"); daoErr == nil {
+		t.Error("DAO row exists after token-mint-error branch — unexpected pending row")
+	}
+
+	// 0 proposer calls.
+	if calls := proposer.recorded(); len(calls) != 0 {
+		t.Errorf("proposer calls = %d, want 0", len(calls))
+	}
+
+	// Apology DM posted.
+	posts := outbound.recorded()
+	if len(posts) != 1 {
+		t.Fatalf("outbound posts = %d, want 1 (apology)", len(posts))
+	}
+	if !strings.Contains(posts[0].FallbackText, "couldn't complete") {
+		t.Errorf("apology text = %q", posts[0].FallbackText)
 	}
 }
 
