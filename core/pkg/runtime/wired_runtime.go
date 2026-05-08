@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/vadimtrunov/watchkeepers/core/pkg/keeperslog"
 )
 
 // WiredRuntimeOption configures a [WiredRuntime] at construction time.
@@ -58,6 +60,30 @@ func WithAgentID(agentID string) WiredRuntimeOption {
 	}
 }
 
+// WithKeepersLogWriter wires a [*keeperslog.Writer] onto the returned
+// [*WiredRuntime] (M5.6.c). When set alongside [WithToolErrorReflector],
+// [NewWiredRuntime] threads the writer into the reflector via
+// [WithKeepersLog] so every reflected tool-error first emits a
+// `lesson_learned` keepers_log row and lands the resulting event id
+// on the lesson Entry's evidence_log_ref column.
+//
+// Order independence: callers may pass [WithKeepersLogWriter] before
+// or after [WithToolErrorReflector]; [NewWiredRuntime] applies the
+// keepers-log decoration after all options have been processed so
+// either ordering yields the same wiring.
+//
+// A nil writer is a no-op so callers can always pass through whatever
+// they have — mirrors the [WithToolErrorReflector] / [WithLogger]
+// no-op-on-nil idiom. Without a configured reflector the option is
+// also a silent no-op (there is no reflector to decorate).
+func WithKeepersLogWriter(w *keeperslog.Writer) WiredRuntimeOption {
+	return func(wr *WiredRuntime) {
+		if w != nil {
+			wr.keepersLog = w
+		}
+	}
+}
+
 // WiredRuntime is a thin decorator over an [AgentRuntime] that adds
 // the M5.6.b auto-reflection hook to the [AgentRuntime.InvokeTool]
 // error path. It satisfies [AgentRuntime] itself and forwards the
@@ -76,18 +102,28 @@ func WithAgentID(agentID string) WiredRuntimeOption {
 // underlying [AgentRuntime] is. The decorator itself holds only
 // immutable configuration after [NewWiredRuntime] returns.
 type WiredRuntime struct {
-	inner     AgentRuntime
-	reflector *ToolErrorReflector
-	logger    *slog.Logger
-	agentID   string
+	inner      AgentRuntime
+	reflector  *ToolErrorReflector
+	logger     *slog.Logger
+	agentID    string
+	keepersLog *keeperslog.Writer
 }
 
 // NewWiredRuntime returns a [*WiredRuntime] decorating `inner`. Pass
-// options ([WithToolErrorReflector], [WithLogger], [WithAgentID]) to
-// configure the M5.6.b auto-reflection seam. Without any options the
-// returned WiredRuntime is a transparent forwarder — callers SHOULD
-// drop the wrapper rather than carry a no-op decorator, but doing so
-// is not enforced.
+// options ([WithToolErrorReflector], [WithLogger], [WithAgentID],
+// [WithKeepersLogWriter]) to configure the M5.6.b/M5.6.c
+// auto-reflection seam. Without any options the returned WiredRuntime
+// is a transparent forwarder — callers SHOULD drop the wrapper rather
+// than carry a no-op decorator, but doing so is not enforced.
+//
+// Keepers-log decoration (M5.6.c): when both [WithToolErrorReflector]
+// and [WithKeepersLogWriter] are supplied, the constructor applies
+// [WithKeepersLog] to the reflector after all options have been
+// processed. The writer is also forwarded as the reflector's
+// diagnostic logger via [WithReflectorLogger] so Append-failure
+// entries land on the same sink as the wiring's reflector-failure
+// entries. Order independence: option order does not matter; the
+// keepers-log decoration always runs last.
 //
 // Panics on a nil `inner`; matches the panic discipline of
 // [keeperslog.New], [lifecycle.New], and [NewToolErrorReflector].
@@ -101,6 +137,10 @@ func NewWiredRuntime(inner AgentRuntime, opts ...WiredRuntimeOption) *WiredRunti
 	}
 	for _, opt := range opts {
 		opt(w)
+	}
+	if w.reflector != nil && w.keepersLog != nil {
+		WithKeepersLog(w.keepersLog)(w.reflector)
+		WithReflectorLogger(w.logger)(w.reflector)
 	}
 	return w
 }

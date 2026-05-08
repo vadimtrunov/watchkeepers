@@ -3,9 +3,12 @@ package runtime_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/vadimtrunov/watchkeepers/core/pkg/keepclient"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/keeperslog"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/llm"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/notebook"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/runtime"
@@ -325,4 +328,139 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// recordingKeepClient is the [keeperslog.LocalKeepClient] stub the
+// M5.6.c wiring tests use to assert WithKeepersLogWriter plumbing.
+// Records every LogAppend request into a slice exposed via a getter
+// under a mutex; mirrors the keeperslog package-internal
+// fakeKeepClient pattern documented in
+// core/pkg/keeperslog/fake_keepclient_test.go (which is _test.go-only
+// and not importable from this external test package).
+type recordingKeepClient struct {
+	resp *keepclient.LogAppendResponse
+	err  error
+
+	mu    sync.Mutex
+	calls []keepclient.LogAppendRequest
+}
+
+// LogAppend records the request and returns the configured response /
+// error. Captures the request value (not pointer) so subsequent
+// assertions cannot race a still-mutating caller.
+func (r *recordingKeepClient) LogAppend(_ context.Context, req keepclient.LogAppendRequest) (*keepclient.LogAppendResponse, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, req)
+	r.mu.Unlock()
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.resp != nil {
+		return r.resp, nil
+	}
+	return &keepclient.LogAppendResponse{ID: "wired-fake-log-id"}, nil
+}
+
+// callCount returns the total number of recorded LogAppend calls.
+func (r *recordingKeepClient) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
+}
+
+// recordedCalls returns a defensive copy of the recorded request slice.
+func (r *recordingKeepClient) recordedCalls() []keepclient.LogAppendRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]keepclient.LogAppendRequest, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
+// TestWiredRuntime_InvokeTool_KeepersLogWriter_AppendsExactlyOnce
+// (AC5 wiring): a WiredRuntime constructed with WithKeepersLogWriter
+// triggers exactly one keeperslog.Writer.Append per InvokeTool error.
+// Asserted via the recordingKeepClient's call count. The original
+// tool error reaches the caller unchanged.
+func TestWiredRuntime_InvokeTool_KeepersLogWriter_AppendsExactlyOnce(t *testing.T) {
+	// no t.Parallel: t.Setenv inside setupWiredHarness.
+	h := setupWiredHarness(t, errToolBoom)
+
+	keep := &recordingKeepClient{resp: &keepclient.LogAppendResponse{ID: "wired-event-id-001"}}
+	writer := keeperslog.New(keep)
+
+	wired := runtime.NewWiredRuntime(
+		h.fake,
+		runtime.WithToolErrorReflector(h.reflector),
+		runtime.WithAgentID(reflectorAgentID),
+		runtime.WithKeepersLogWriter(writer),
+	)
+
+	_, err := wired.InvokeTool(context.Background(), h.rt.ID(), runtime.ToolCall{
+		Name:        "sandbox.exec",
+		ToolVersion: "v3.4.5",
+		Arguments:   map[string]any{"cmd": "ls"},
+	})
+	if !errors.Is(err, errToolBoom) {
+		t.Fatalf("InvokeTool err = %v, want errors.Is errToolBoom", err)
+	}
+	if got := keep.callCount(); got != 1 {
+		t.Fatalf("LogAppend call count = %d, want exactly 1", got)
+	}
+	calls := keep.recordedCalls()
+	if calls[0].EventType != "lesson_learned" {
+		t.Errorf("EventType = %q, want %q", calls[0].EventType, "lesson_learned")
+	}
+
+	// Lesson row was written and carries the keeperslog event id.
+	res := recallAllLessons(t, h.db, time.Now().Add(48*time.Hour))
+	if len(res) != 1 {
+		t.Fatalf("Recall result count = %d, want 1", len(res))
+	}
+	if res[0].EvidenceLogRef == nil || *res[0].EvidenceLogRef != "wired-event-id-001" {
+		t.Errorf("EvidenceLogRef = %v, want pointer to %q (wired event id)", res[0].EvidenceLogRef, "wired-event-id-001")
+	}
+}
+
+// TestWiredRuntime_InvokeTool_NoKeepersLogWriter_NoAppend
+// (AC5 regression guard): without WithKeepersLogWriter, no LogAppend
+// is invoked. Pinned with a recordingKeepClient that fails the test
+// if it is ever called via a separate, never-wired writer instance.
+func TestWiredRuntime_InvokeTool_NoKeepersLogWriter_NoAppend(t *testing.T) {
+	// no t.Parallel: t.Setenv inside setupWiredHarness.
+	h := setupWiredHarness(t, errToolBoom)
+
+	// Construct a writer + recording client but DELIBERATELY do NOT
+	// pass WithKeepersLogWriter. The recordingKeepClient must record
+	// zero calls since the wiring never threads it through.
+	keep := &recordingKeepClient{resp: &keepclient.LogAppendResponse{ID: "should-not-be-used"}}
+	_ = keeperslog.New(keep)
+
+	wired := runtime.NewWiredRuntime(
+		h.fake,
+		runtime.WithToolErrorReflector(h.reflector),
+		runtime.WithAgentID(reflectorAgentID),
+	)
+
+	_, err := wired.InvokeTool(context.Background(), h.rt.ID(), runtime.ToolCall{
+		Name:        "sandbox.exec",
+		ToolVersion: "v0",
+		Arguments:   map[string]any{"cmd": "ls"},
+	})
+	if !errors.Is(err, errToolBoom) {
+		t.Fatalf("InvokeTool err = %v, want errors.Is errToolBoom", err)
+	}
+	if got := keep.callCount(); got != 0 {
+		t.Errorf("LogAppend call count = %d, want 0 (writer never wired in)", got)
+	}
+
+	// And the lesson row's EvidenceLogRef falls back to the default
+	// logRefFunc — empty (NULL) per M5.6.b semantics.
+	res := recallAllLessons(t, h.db, time.Now().Add(48*time.Hour))
+	if len(res) != 1 {
+		t.Fatalf("Recall result count = %d, want 1", len(res))
+	}
+	if res[0].EvidenceLogRef != nil && *res[0].EvidenceLogRef != "" {
+		t.Errorf("EvidenceLogRef = %v, want NULL/empty (no writer wired)", res[0].EvidenceLogRef)
+	}
 }
