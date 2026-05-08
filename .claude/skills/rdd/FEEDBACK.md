@@ -2762,3 +2762,45 @@ handling in card body (no raw tokens, truncate + opaque action_id); (c) PII guar
 (enumerate all param-struct field names to check, not just sentinel values). Prevents iter-1
 rework on security/error-handling details.
 
+---
+
+## 2026-05-08 — M6.3.c: DM intent router wiring (read-only + manifest-bump tools) + iter-1→iter-2 cycle + cut-off-resume pattern validated
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: Phase 3 (cut-off mid-Step 4, resumed), Phase 4 iter 1 (2 important, fixer dispatch)
+
+### What worked
+
+M6.3.c cut off mid-execution (Phase 3 Step 4 outbound), resumed executor with continuation brief,
+verified uncommitted files + compile + tests, committed Step 4 cleanly. Second cut-off-resume in
+this session (M6.3.a was the first) — the resume executor brief that explicitly inspects-or-rewrites
+uncommitted files WORKS. Pattern stable enough to promote to orchestrator playbook.
+
+Phase 4 iter 1 surfaced 2 importants (render-before-DAO insert reordering, tokenMint silent fallback
+with literal "tok-error" collision risk) + 5 nits. Fixer dispatch fixed both importants + 2 nits in
+one commit (`d3ffcc8`). Iter 2 converged 0/0/0. Second consecutive iter-1→iter-2 cycle (M6.3.b had
+the same pattern): structurally novel TASKs (cross-package interfaces, new audit-event families, new
+state-machine invariants) reliably trigger 1 fixer round. The 16-PR iter-0/1 streak (broken at M6.3.b)
+is the M6.2.x norm; M6.3.x has its own slightly higher iter cost.
+
+### What wasted effort
+
+Replayer wiring deferred to follow-up AGAIN (second defer in M6.3.b → M6.3.c). M6.3.b filed as an open
+question; M6.3.c was supposed to ride it along but deferred because Step 4 alone pushed LOC to 1729 past
+soft cap (1000). Suggests Replayer wiring is BIGGER than "1-line glue" — deserves a dedicated TASK
+(M6.3.c.x or M6.3.c.y) rather than continuing ride-along deferrals. Same for Postgres-backed DAO adapter.
+
+LOC overage trend in M6.3.x: M6.3.a 1738, M6.3.b 2266, M6.3.c 1729 — three consecutive over soft cap.
+Files within target (≤14 of 20 both times). Pattern: scaffolding TASKs with 4+ negative-branch tests +
+audit-order regressions + PII guards reliably push test LOC well past 1000. Hard rule 6 (both must
+exceed for reject) keeps these passing, but recurring overage signals cap is mis-calibrated for test
+discipline this milestone enforces. Consider raising soft cap to 1500 OR splitting scaffolding sub-items
+further.
+
+### Metrics
+
+- Review iterations: 2 (Phase 4 iter 0 → 2 important → fixer dispatch → iter 2 converged 0/0/0)
+- Cut-off-resume cycles: 1 (Phase 3 mid-Step 4 → resumed, verified, committed)
+- Code LOC: 1729 (over soft cap 1000); files 7 ≤ target 12 (file count OK)
+- Consecutive structurally-novel iter-1 cycles: 2 (M6.3.b, M6.3.c both had 1 fixer round)
+
