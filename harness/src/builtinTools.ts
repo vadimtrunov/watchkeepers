@@ -34,6 +34,14 @@ import { type RpcClient } from "./jsonrpc.js";
 import { rememberEntry, type RememberEntryParams } from "./notebookClient.js";
 import { createSlackApp, type SlackAppCreateParams } from "./slackClient.js";
 import type { JsonRpcValue } from "./types.js";
+import {
+  listWatchkeepers,
+  reportCost,
+  reportHealth,
+  type ListWatchkeepersParams,
+  type ReportCostParams,
+  type ReportHealthParams,
+} from "./watchmasterClient.js";
 
 /**
  * Typed error a built-in handler throws when the call requires an
@@ -180,6 +188,132 @@ const slackAppCreateHandler: BuiltinHandler = async (rpc, agentID, input) => {
 };
 
 /**
+ * Zod schema for the `list_watchkeepers` builtin tool input (M6.2.a).
+ * Mirrors the Go-side `listWatchkeepersParams` decoder
+ * (`core/pkg/harnessrpc/watchmaster_readonly.go`) — both fields
+ * optional, snake_case names. `.strict()` rejects unknown wire fields
+ * for the same reason {@link SlackAppCreateInputSchema} does.
+ *
+ * Unlike the M6.1.b `slack_app_create` schema, this one carries NO
+ * `agent_id` injection from the manifest: `agent_id` is not part of
+ * the request shape. The Go-side claim resolver handles tenant
+ * scoping; the harness ACL gate (M5.5.b.a) handles toolset
+ * authorisation. The list_watchkeepers tool reads tenant-wide.
+ */
+const ListWatchkeepersInputSchema = z
+  .object({
+    status: z.string().optional(),
+    limit: z.number().int().min(0).optional(),
+  })
+  .strict();
+
+/**
+ * `list_watchkeepers` built-in (M6.2.a) — forwards to the Go-side
+ * `watchmaster.list_watchkeepers` method via {@link listWatchkeepers}.
+ * Throws {@link BuiltinAgentIDMissing} when the manifest never set an
+ * `agentID` (the read-only tools still require an authenticated
+ * caller — the deny-by-default M5.5.b.a posture). Throws
+ * {@link BuiltinInvalidInput} on a local zod-shape mismatch BEFORE
+ * any outbound RPC.
+ */
+const listWatchkeepersHandler: BuiltinHandler = async (rpc, agentID, input) => {
+  if (agentID === undefined) {
+    throw new BuiltinAgentIDMissing("list_watchkeepers");
+  }
+  // Empty input is valid — both schema fields are optional.
+  const parsed = ListWatchkeepersInputSchema.safeParse(input ?? {});
+  if (!parsed.success) {
+    throw new BuiltinInvalidInput(
+      "list_watchkeepers",
+      parsed.error.issues[0]?.message ?? parsed.error.message,
+    );
+  }
+  const params: ListWatchkeepersParams = {
+    ...(parsed.data.status === undefined ? {} : { status: parsed.data.status }),
+    ...(parsed.data.limit === undefined ? {} : { limit: parsed.data.limit }),
+  };
+  const result = await listWatchkeepers(rpc, params);
+  return result as unknown as JsonRpcValue;
+};
+
+/**
+ * Zod schema for the `report_cost` builtin tool input (M6.2.a). Every
+ * field is optional; the Go-side defaults handle the unset case.
+ *
+ * The `agent_id` field IS in this schema (unlike `slack_app_create`)
+ * because it is the TARGET-narrowing field, not the calling agent's
+ * identity. The calling agent's identity is handled out-of-band by
+ * the Go-side claim resolver and the harness ACL gate.
+ */
+const ReportCostInputSchema = z
+  .object({
+    agent_id: z.string().optional(),
+    event_type_prefix: z.string().optional(),
+    limit: z.number().int().min(0).optional(),
+  })
+  .strict();
+
+/**
+ * `report_cost` built-in (M6.2.a) — forwards to the Go-side
+ * `watchmaster.report_cost` method via {@link reportCost}. Throws
+ * {@link BuiltinAgentIDMissing} on a missing manifest agent;
+ * {@link BuiltinInvalidInput} on a zod-shape mismatch.
+ */
+const reportCostHandler: BuiltinHandler = async (rpc, agentID, input) => {
+  if (agentID === undefined) {
+    throw new BuiltinAgentIDMissing("report_cost");
+  }
+  const parsed = ReportCostInputSchema.safeParse(input ?? {});
+  if (!parsed.success) {
+    throw new BuiltinInvalidInput(
+      "report_cost",
+      parsed.error.issues[0]?.message ?? parsed.error.message,
+    );
+  }
+  const params: ReportCostParams = {
+    ...(parsed.data.agent_id === undefined ? {} : { agent_id: parsed.data.agent_id }),
+    ...(parsed.data.event_type_prefix === undefined
+      ? {}
+      : { event_type_prefix: parsed.data.event_type_prefix }),
+    ...(parsed.data.limit === undefined ? {} : { limit: parsed.data.limit }),
+  };
+  const result = await reportCost(rpc, params);
+  return result as unknown as JsonRpcValue;
+};
+
+/**
+ * Zod schema for the `report_health` builtin tool input (M6.2.a).
+ * The single `agent_id` field is optional — empty means "org-wide
+ * aggregation".
+ */
+const ReportHealthInputSchema = z
+  .object({
+    agent_id: z.string().optional(),
+  })
+  .strict();
+
+/**
+ * `report_health` built-in (M6.2.a) — forwards to the Go-side
+ * `watchmaster.report_health` method via {@link reportHealth}.
+ */
+const reportHealthHandler: BuiltinHandler = async (rpc, agentID, input) => {
+  if (agentID === undefined) {
+    throw new BuiltinAgentIDMissing("report_health");
+  }
+  const parsed = ReportHealthInputSchema.safeParse(input ?? {});
+  if (!parsed.success) {
+    throw new BuiltinInvalidInput(
+      "report_health",
+      parsed.error.issues[0]?.message ?? parsed.error.message,
+    );
+  }
+  const params: ReportHealthParams =
+    parsed.data.agent_id === undefined ? {} : { agent_id: parsed.data.agent_id };
+  const result = await reportHealth(rpc, params);
+  return result as unknown as JsonRpcValue;
+};
+
+/**
  * Read-only registry of built-in tools. Indexed by the wire-level
  * `tool.name` from `invokeTool.params.tool`. Adding a new built-in is
  * a single-line edit; no dispatch-branch change is needed.
@@ -188,6 +322,9 @@ export const builtinHandlers: ReadonlyMap<string, BuiltinHandler> = new Map<stri
   [
     ["remember", rememberHandler],
     ["slack_app_create", slackAppCreateHandler],
+    ["list_watchkeepers", listWatchkeepersHandler],
+    ["report_cost", reportCostHandler],
+    ["report_health", reportHealthHandler],
   ],
 );
 
