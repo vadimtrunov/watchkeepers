@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/notebook"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/runtime"
@@ -15,6 +16,45 @@ import (
 // bag downstream match the same key without hard-coding the string at every
 // site.
 const MetadataKeyRecalledMemoryStatus = "recalled_memory_status"
+
+// MetadataKeyCoolingOffFiltered is the reserved [CompleteRequest.Metadata]
+// key [BuildTurnRequest] populates with the count of notebook entries
+// excluded from this turn's recall by the cooling-off
+// (`active_after > now`) predicate. The value is a base-10 integer string
+// (e.g. "1", "3"); callers parse it with [strconv.Atoi].
+//
+// The key is set ONLY when the count is strictly positive — a zero count
+// yields no key in the metadata map, mirroring the
+// [MetadataKeyNeedsReviewFiltered] semantics. This avoids polluting the
+// metadata bag with zero-valued entries on the common no-filter path.
+//
+// The counter source is M5.6.d's [notebook.DB.RecallFilterCounts] which
+// runs a cheap second `SELECT COUNT(*)` after the main recall succeeds;
+// failures of the counter helper are swallowed (best-effort) so the turn
+// continues without the diagnostic key — see the [BuildTurnRequest]
+// fail-soft matrix.
+const MetadataKeyCoolingOffFiltered = "cooling_off_filtered"
+
+// MetadataKeyNeedsReviewFiltered is the reserved [CompleteRequest.Metadata]
+// key [BuildTurnRequest] populates with the count of notebook entries
+// excluded from this turn's recall by the needs_review = 1 predicate
+// (M5.6.a). Same string-encoded-int + zero-suppression semantics as
+// [MetadataKeyCoolingOffFiltered].
+const MetadataKeyNeedsReviewFiltered = "needs_review_filtered"
+
+// recallFilterCountsFn is the package-private seam through which
+// [BuildTurnRequest] invokes the M5.6.d filter-counts helper. Production
+// resolves to [(*notebook.DB).RecallFilterCounts]; tests swap in a stub
+// to inject failures (the negative test plan bullet "counter query
+// fails"). Callers MUST NOT mutate this from non-test code.
+//
+// The seam is a function variable rather than a full interface because
+// the counter helper is a single-method dependency with a stable
+// signature; an interface would add type machinery without enabling
+// additional substitutability.
+var recallFilterCountsFn = func(ctx context.Context, db *notebook.DB, q notebook.RecallQuery) (int, int, error) {
+	return db.RecallFilterCounts(ctx, q)
+}
 
 // RecalledMemoryStatus* constants discriminate the six recall-pipeline
 // outcomes [BuildTurnRequest] surfaces via [MetadataKeyRecalledMemoryStatus]
@@ -154,7 +194,7 @@ func BuildTurnRequest(
 		return nil, err
 	}
 
-	status, memOpt, recallErr := resolveRecalledMemory(ctx, manifest, query, embedder, supervisor)
+	resolution := resolveRecalledMemory(ctx, manifest, query, embedder, supervisor)
 
 	// Build the base request with the recalled-memory option applied first
 	// so caller `opts` can override (caller-last-wins). Use a synthetic
@@ -163,8 +203,8 @@ func BuildTurnRequest(
 	msgs := []Message{{Role: RoleUser, Content: query}}
 
 	allOpts := make([]RequestOption, 0, 1+len(opts))
-	if memOpt != nil {
-		allOpts = append(allOpts, memOpt)
+	if resolution.option != nil {
+		allOpts = append(allOpts, resolution.option)
 	}
 	allOpts = append(allOpts, opts...)
 
@@ -182,58 +222,118 @@ func BuildTurnRequest(
 	if req.Metadata == nil {
 		req.Metadata = make(map[string]string, 1)
 	}
-	req.Metadata[MetadataKeyRecalledMemoryStatus] = status
+	req.Metadata[MetadataKeyRecalledMemoryStatus] = resolution.status
 
-	return &req, recallErr
+	// M5.6.d diagnostic counters: surface the number of rows the
+	// SQL-level cooling-off / needs_review predicates excluded from this
+	// turn's recall. Only set keys with strictly-positive counts so a
+	// zero-filtered turn produces no metadata noise (AC3 / AC6). Counter
+	// helper failures are silently swallowed (best-effort) — the recall
+	// itself succeeded, so the turn must continue without the diagnostic.
+	if resolution.coolingOffFiltered > 0 {
+		req.Metadata[MetadataKeyCoolingOffFiltered] = strconv.Itoa(resolution.coolingOffFiltered)
+	}
+	if resolution.needsReviewFiltered > 0 {
+		req.Metadata[MetadataKeyNeedsReviewFiltered] = strconv.Itoa(resolution.needsReviewFiltered)
+	}
+
+	return &req, resolution.err
 }
 
-// resolveRecalledMemory walks the fail-soft matrix and returns:
+// recalledMemoryResolution bundles the four outputs of
+// [resolveRecalledMemory]: the metadata status string, the
+// [RequestOption] to apply (nil unless status == "applied"), the joined
+// error to surface to strict-mode callers, and the M5.6.d diagnostic
+// counters returned by the filter-counts helper. The struct keeps
+// [BuildTurnRequest] linear without exploding the helper's return
+// arity.
+type recalledMemoryResolution struct {
+	status              string
+	option              RequestOption
+	err                 error
+	coolingOffFiltered  int
+	needsReviewFiltered int
+}
+
+// resolveRecalledMemory walks the fail-soft matrix and returns a
+// [recalledMemoryResolution] capturing the metadata status, the
+// [RequestOption] to apply (nil unless status == "applied"), the joined
+// error to surface to strict-mode callers (nil except for embed_error /
+// recall_error), and the M5.6.d diagnostic filter counts. The filter
+// counts are populated ONLY when a recall actually executed (status
+// `applied` or `no_matches`); short-circuit branches (`disabled_topk_zero`,
+// `agent_not_registered`, `embed_error`, `recall_error`) leave them at
+// their zero values so the caller's "set key only when > 0" rule
+// naturally suppresses them.
 //
-//   - the [MetadataKeyRecalledMemoryStatus] string the helper will stamp,
-//   - the [RequestOption] to apply (nil unless status == "applied"),
-//   - the joined error to surface to strict-mode callers (nil except for
-//     embed_error / recall_error).
+// Filter-counts helper failures are silently swallowed: the recall
+// itself succeeded so the turn proceeds; only the diagnostic counters
+// are skipped. Mirrors the best-effort observer idiom from M5.6.b/c
+// where a side-channel telemetry failure must not regress the primary
+// outcome.
 //
-// The function is internal to the helper; its signature is shaped to keep
-// [BuildTurnRequest] linear and readable.
+// The function is internal to the helper; its signature is shaped to
+// keep [BuildTurnRequest] linear and readable.
 func resolveRecalledMemory(
 	ctx context.Context,
 	manifest runtime.Manifest,
 	query string,
 	embedder EmbeddingProvider,
 	supervisor *runtime.NotebookSupervisor,
-) (string, RequestOption, error) {
+) recalledMemoryResolution {
 	if manifest.NotebookTopK <= 0 {
-		return RecalledMemoryStatusDisabled, nil, nil
+		return recalledMemoryResolution{status: RecalledMemoryStatusDisabled}
 	}
 
 	if supervisor == nil {
-		return RecalledMemoryStatusAgentNotRegistered, nil, nil
+		return recalledMemoryResolution{status: RecalledMemoryStatusAgentNotRegistered}
 	}
 	db, ok := supervisor.Lookup(manifest.AgentID)
 	if !ok {
-		return RecalledMemoryStatusAgentNotRegistered, nil, nil
+		return recalledMemoryResolution{status: RecalledMemoryStatusAgentNotRegistered}
 	}
 
 	if embedder == nil {
-		return RecalledMemoryStatusEmbedError, nil, errors.Join(fmt.Errorf("llm: BuildTurnRequest: nil embedder"))
+		return recalledMemoryResolution{
+			status: RecalledMemoryStatusEmbedError,
+			err:    errors.Join(fmt.Errorf("llm: BuildTurnRequest: nil embedder")),
+		}
 	}
 
 	vec, err := embedder.Embed(ctx, query)
 	if err != nil {
-		return RecalledMemoryStatusEmbedError, nil, errors.Join(fmt.Errorf("llm: embed query: %w", err))
+		return recalledMemoryResolution{
+			status: RecalledMemoryStatusEmbedError,
+			err:    errors.Join(fmt.Errorf("llm: embed query: %w", err)),
+		}
 	}
 
-	results, err := db.Recall(ctx, notebook.RecallQuery{
+	recallQuery := notebook.RecallQuery{
 		Embedding: vec,
 		TopK:      manifest.NotebookTopK,
-	})
+	}
+	results, err := db.Recall(ctx, recallQuery)
 	if err != nil {
-		return RecalledMemoryStatusRecallError, nil, errors.Join(fmt.Errorf("llm: notebook recall: %w", err))
+		return recalledMemoryResolution{
+			status: RecalledMemoryStatusRecallError,
+			err:    errors.Join(fmt.Errorf("llm: notebook recall: %w", err)),
+		}
 	}
 
+	// Filter counts are computed once for any path where a recall
+	// executed (success or empty results). The seam allows tests to
+	// inject a sentinel failure; production resolves to
+	// [(*notebook.DB).RecallFilterCounts]. Errors are best-effort: log
+	// nothing (no logger threaded through this layer) and leave the
+	// counts at zero so the metadata keys stay absent.
+	coolingOff, needsReview, _ := recallFilterCountsFn(ctx, db, recallQuery)
+
 	if len(results) == 0 {
-		return RecalledMemoryStatusNoMatches, nil, nil
+		return recalledMemoryResolution{
+			status:              RecalledMemoryStatusNoMatches,
+			coolingOffFiltered:  coolingOff,
+			needsReviewFiltered: needsReview,
+		}
 	}
 
 	memories := recallResultsToMemories(results)
@@ -252,8 +352,17 @@ func resolveRecalledMemory(
 	}
 
 	if len(memories) == 0 {
-		return RecalledMemoryStatusNoMatches, nil, nil
+		return recalledMemoryResolution{
+			status:              RecalledMemoryStatusNoMatches,
+			coolingOffFiltered:  coolingOff,
+			needsReviewFiltered: needsReview,
+		}
 	}
 
-	return RecalledMemoryStatusApplied, WithRecalledMemory(memories...), nil
+	return recalledMemoryResolution{
+		status:              RecalledMemoryStatusApplied,
+		option:              WithRecalledMemory(memories...),
+		coolingOffFiltered:  coolingOff,
+		needsReviewFiltered: needsReview,
+	}
 }

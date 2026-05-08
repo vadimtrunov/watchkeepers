@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/notebook"
@@ -117,4 +119,44 @@ func TestBuildTurnRequest_CallerOptsApplyLast(t *testing.T) {
 	if got := req.Metadata[MetadataKeyRecalledMemoryStatus]; got != RecalledMemoryStatusApplied {
 		t.Errorf("Metadata = %q, want %q", got, RecalledMemoryStatusApplied)
 	}
+}
+
+// TestBuildTurnRequest_FilterCountsFailure_BestEffort pins the M5.6.d
+// negative test plan bullet: when the filter-counts helper returns an
+// error, [BuildTurnRequest] still returns the recalled memory it has,
+// status stays `applied`, and neither metadata key is populated. The
+// fault is injected via the package-private [recallFilterCountsFn] seam
+// — production sets it to [(*notebook.DB).RecallFilterCounts]; the test
+// swaps in a stub returning a sentinel error and restores the original
+// after the case completes.
+func TestBuildTurnRequest_FilterCountsFailure_BestEffort(t *testing.T) {
+	pinTurnDataDir(t)
+	sup, db := openTurnSupervisor(t)
+	insertOneTurnEntry(t, db)
+
+	sentinel := errors.New("filter-counts: simulated failure")
+	original := recallFilterCountsFn
+	recallFilterCountsFn = func(_ context.Context, _ *notebook.DB, _ notebook.RecallQuery) (int, int, error) {
+		return 0, 0, sentinel
+	}
+	t.Cleanup(func() { recallFilterCountsFn = original })
+
+	req, err := BuildTurnRequest(testCtx(), turnValidManifest(), "q", NewFakeEmbeddingProvider(), sup)
+	if err != nil {
+		t.Fatalf("BuildTurnRequest returned err = %v on filter-counts failure; want nil (best-effort)", err)
+	}
+	if req == nil {
+		t.Fatal("request is nil despite best-effort contract")
+	}
+	if got := req.Metadata[MetadataKeyRecalledMemoryStatus]; got != RecalledMemoryStatusApplied {
+		t.Errorf("Metadata = %q, want %q (filter-counts failure must not regress recall status)", got, RecalledMemoryStatusApplied)
+	}
+	if _, ok := req.Metadata[MetadataKeyCoolingOffFiltered]; ok {
+		t.Errorf("Metadata contains %q despite filter-counts failure", MetadataKeyCoolingOffFiltered)
+	}
+	if _, ok := req.Metadata[MetadataKeyNeedsReviewFiltered]; ok {
+		t.Errorf("Metadata contains %q despite filter-counts failure", MetadataKeyNeedsReviewFiltered)
+	}
+	// db is referenced indirectly via supervisor; suppress unused warning.
+	_ = db
 }
