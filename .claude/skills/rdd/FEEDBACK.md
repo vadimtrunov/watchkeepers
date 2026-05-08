@@ -2204,3 +2204,25 @@ Document the SendMessage recovery pattern in `references/executor-briefs.md` und
 - Total wall time from Phase 1 to Phase 4 convergence: 01:45
 
 ---
+## 2026-05-08 — M5.6.b: Auto-reflect on tool error
+
+**PR**: pending
+**Phases with incidents**: 4
+
+### What worked
+Gate 2 flushed out the full AC+test matrix upfront, preventing mid-implementation scope creep. The bounded-loop discipline (executor iter 1 → review iter 1 → fixer iter 1 → review iter 2 → fixer iter 2 → review iter 3 converged) caught a scope violation that would have shipped if not for the fresh review pass after each fixer commit.
+
+### What wasted effort
+Phase 3 executor turn cut off mid-sentence on a gofumpt formatting fix; SendMessage to the same agent UUID resumed cleanly (same recovery as M5.6.a). Phase 4 iter 1 fixer silently bundled unrelated M5.5.d.b harnessrpc/* hunks into the commit, discovered by reviewer iter 2. The iter-1 commit message advertised only the two intended fixes and did not disclose the harnessrpc edits—scope creep was invisible until diffed.
+
+### Suggested skill changes
+- Extend `references/agent-briefs/executor.md` §"Mode — fixer" with a hard rule: "List every touched file in the commit message body; reviewer asserts the list matches the comments-to-fix list before approving." This makes scope creep auditable via `git show --stat` without diffing.
+- Confirm that bounded-loop discipline (fresh review after every fixer commit) is non-negotiable, even when prior iterations converged quickly. Scope violations like M5.5.d.b hunks would have shipped without iter 2.
+
+### Metrics
+- Review iterations: 3
+- PR-fix iterations: 2
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending (Phase 5b opens PR)
+
+---

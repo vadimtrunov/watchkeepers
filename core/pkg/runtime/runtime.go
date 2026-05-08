@@ -215,6 +215,19 @@ type ToolCall struct {
 	// signature requires arguments.
 	Arguments map[string]any
 
+	// ToolVersion is the optional manifest-projected version string
+	// (e.g. "v1.2.3") of the tool the runtime is invoking. Populated
+	// by version-aware callers (the M5.5 manifest loader). The
+	// runtime forwards it verbatim to the auto-reflection layer
+	// ([ToolErrorReflector.Reflect]) so a learned `lesson` row can be
+	// scoped to the version that produced the failure — Recall queries
+	// at boot-time supersession check (M5.6.e) compare against the
+	// active manifest's version. Empty is fine; the reflector stores
+	// SQL NULL when this field is empty so version-unaware callers
+	// produce version-less rows that still surface in unfiltered
+	// recalls.
+	ToolVersion string
+
 	// Metadata carries runtime-specific extensions (call id, parent
 	// turn id, supervisor approval ack, …). The runtime consumes
 	// only the keys it recognises. Nil is fine.
