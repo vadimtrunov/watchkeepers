@@ -2714,3 +2714,51 @@ follow-up TASK in future similar cases (e.g., "M6.3.a-tests: add edge cases for 
 placeholder").
 
 ---
+
+---
+
+## 2026-05-08 — M6.3.b: iter-1 fixer dispatch from structurally novel task with 3 importants, converged iter-2 at 0/0/0
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: Phase 4 iter 1 (3 important, fixer dispatch)
+
+### What worked
+
+M6.3.b achieved iter-1 convergence via fixer (iter 0 had 3 important issues, iter 1 fixed all
+cleanly, iter 2 converged 0/0/0). Executor correctly identified the DAO pattern (in-memory +
+Postgres-deferred) and the replayer seam (narrow 1-method interface for tool re-invocation).
+When reviewer surfaced button-value reason vocabulary, PII guard field-name gaps, and raw
+token rendering as the 3 importants, fixer executed cleanly: new ErrInvalidButtonValue sentinel
++ reasonInvalidButtonValue, extended PII check (leakFieldNames for all 5 param-struct fields),
+and tokenPrefix truncation (tok-<first-6-chars>…) on all 4 renderers. 16 consecutive iter-0/1
+convergence streak ended here; expecting 1 fixer round for structurally novel TASKs is normal.
+
+### What wasted effort
+
+Iter-1 had 3 importants that could have been pre-prevented with tighter execution discipline:
+(1) button-value reason should be separate from action_id-shape error — executor should have
+pre-flagged the 2-error-path divergence; (2) PII guard test was AC8-literal but omitted field
+NAMES — test should enumerate all known param-struct fields; (3) raw token in card body is a
+security surface — executor should have pre-flagged token truncation at renderer spec time. All
+3 fixable in one commit. Cost: 1 fixer dispatch. Mitigation: when TASK involves a structurally
+novel handler (cross-package seam + DAO pattern), executor should pre-flag error-path breakdown
+and token-handling rules explicitly in brief.
+
+### Metrics
+
+- Review iterations: 1 (Phase 4 iter 0 → 3 important → fixer dispatch → iter 2 converged 0/0/0)
+- Consecutive iter-0/1 convergence streak: 16 (M5.6.d → M6.3.b, broken by fixer dispatch)
+- PRs in session: 17 (#90–#105), 16 iter-0 + 1 iter-1 fixer
+- Design choices pre-flagged: 4/4 accepted (no rework)
+- Fixer dispatch: 1 (3 importants fixed in one commit)
+- Code LOC: 2266 (production 673 без комментариев); exceeds 1000 soft cap due to test-case density
+
+### Suggested executor brief improvements
+
+When executor encounters a novel DAO + replayer seam pattern (first approval handler for
+Watchmaster), brief should explicitly call out: (a) error-path taxonomy (DecodeActionID
+malformed vs. buttonValue malformed are separate failure modes, separate sentinels); (b) token
+handling in card body (no raw tokens, truncate + opaque action_id); (c) PII guard scope
+(enumerate all param-struct field names to check, not just sentinel values). Prevents iter-1
+rework on security/error-handling details.
+
