@@ -41,12 +41,14 @@ import {
   proposeSpawn,
   reportCost,
   reportHealth,
+  retireWatchkeeper,
   type AdjustLanguageParams,
   type AdjustPersonalityParams,
   type ListWatchkeepersParams,
   type ProposeSpawnParams,
   type ReportCostParams,
   type ReportHealthParams,
+  type RetireWatchkeeperParams,
 } from "./watchmasterClient.js";
 
 /**
@@ -450,6 +452,55 @@ const adjustLanguageHandler: BuiltinHandler = async (rpc, agentID, input) => {
 };
 
 /**
+ * Zod schema for the `retire_watchkeeper` builtin tool input (M6.2.c).
+ * Mirrors the Go-side `retireWatchkeeperParams` decoder
+ * (`core/pkg/harnessrpc/retire_watchkeeper.go`) — snake_case names,
+ * required `agent_id` + `approval_token`. `.strict()` rejects unknown
+ * wire fields for the same reason {@link SlackAppCreateInputSchema}
+ * does.
+ *
+ * The `agent_id` field IS in the schema because it is the TARGET
+ * watchkeeper row id — the watchkeeper to retire — NOT the calling
+ * agent's identity. The calling agent's identity is handled out-of-band
+ * by the Go-side claim resolver and the harness ACL gate.
+ */
+const RetireWatchkeeperInputSchema = z
+  .object({
+    agent_id: z.string().min(1, "agent_id must be a non-empty string"),
+    approval_token: z.string().min(1, "approval_token must be a non-empty string"),
+  })
+  .strict();
+
+/**
+ * `retire_watchkeeper` built-in (M6.2.c) — forwards to the Go-side
+ * `watchmaster.retire_watchkeeper` method via {@link retireWatchkeeper}.
+ * Throws {@link BuiltinAgentIDMissing} when the manifest never set an
+ * `agentID` (the deny-by-default M5.5.b.a posture). Throws
+ * {@link BuiltinInvalidInput} on a local zod-shape mismatch BEFORE
+ * any outbound RPC.
+ */
+const retireWatchkeeperHandler: BuiltinHandler = async (rpc, agentID, input) => {
+  if (agentID === undefined) {
+    throw new BuiltinAgentIDMissing("retire_watchkeeper");
+  }
+  const parsed = RetireWatchkeeperInputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new BuiltinInvalidInput(
+      "retire_watchkeeper",
+      parsed.error.issues[0]?.message ?? parsed.error.message,
+    );
+  }
+  const params: RetireWatchkeeperParams = {
+    agent_id: parsed.data.agent_id,
+    approval_token: parsed.data.approval_token,
+  };
+  const result = await retireWatchkeeper(rpc, params);
+  // RetireWatchkeeperResult is `Record<string, never>` (an empty object
+  // envelope); already assignable to JsonRpcValue without a cast.
+  return result;
+};
+
+/**
  * Read-only registry of built-in tools. Indexed by the wire-level
  * `tool.name` from `invokeTool.params.tool`. Adding a new built-in is
  * a single-line edit; no dispatch-branch change is needed.
@@ -464,6 +515,7 @@ export const builtinHandlers: ReadonlyMap<string, BuiltinHandler> = new Map<stri
     ["propose_spawn", proposeSpawnHandler],
     ["adjust_personality", adjustPersonalityHandler],
     ["adjust_language", adjustLanguageHandler],
+    ["retire_watchkeeper", retireWatchkeeperHandler],
   ],
 );
 

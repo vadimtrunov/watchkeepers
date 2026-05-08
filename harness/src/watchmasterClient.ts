@@ -259,3 +259,51 @@ export async function adjustLanguage(
   );
   return result as unknown as ManifestBumpResult;
 }
+
+// ── retire_watchkeeper ───────────────────────────────────────────────────────
+
+/**
+ * Parameters for `watchmaster.retire_watchkeeper` (M6.2.c). Mirrors
+ * the Go-side `retireWatchkeeperParams` decoder
+ * (`core/pkg/harnessrpc/retire_watchkeeper.go`) — snake_case names.
+ *
+ * Required: agent_id (the watchkeeper row id, NOT the manifest UUID),
+ * approval_token. Unlike the M6.2.b manifest-bump methods, retire
+ * does not carry any manifest fields — it is a status-row mutation
+ * that flips the watchkeeper from `active` to `retired` via the keep
+ * server's PATCH /v1/watchkeepers/{id}/status endpoint.
+ */
+export interface RetireWatchkeeperParams {
+  readonly agent_id: string;
+  readonly approval_token: string;
+}
+
+/**
+ * Empty success envelope returned by `watchmaster.retire_watchkeeper`.
+ * Retire has no return value (the keep server has already mutated the
+ * row by the time the response lands); the empty object exists only
+ * so a TS caller receives a typed envelope rather than `null`.
+ */
+export type RetireWatchkeeperResult = Record<string, never>;
+
+/**
+ * Call `watchmaster.retire_watchkeeper` on the Go-side host and flip
+ * the watchkeeper's status row from `active` to `retired`.
+ *
+ * Rejects with {@link RpcRequestError} (from `jsonrpc.ts`) when the
+ * host returns a JSON-RPC error envelope, preserving the wire `code`
+ * so callers can branch on -32005 (ToolUnauthorized) / -32007
+ * (ApprovalRequired) / -32602 (InvalidParams) / -32603 (InternalError —
+ * typically a state-transition rejection from the keep server) without
+ * string-matching the message.
+ */
+export async function retireWatchkeeper(
+  rpc: RpcClient,
+  params: RetireWatchkeeperParams,
+): Promise<RetireWatchkeeperResult> {
+  const result = await rpc.request(
+    "watchmaster.retire_watchkeeper",
+    params as unknown as JsonRpcValue,
+  );
+  return result as unknown as RetireWatchkeeperResult;
+}
