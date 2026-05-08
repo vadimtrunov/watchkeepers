@@ -88,7 +88,9 @@ const (
 // M6.2.b manifest-bump tools (propose_spawn / adjust_personality /
 // adjust_language). The third method (UpdateWatchkeeperStatus) backs
 // the M6.2.c retire_watchkeeper tool — a status-row mutation, not a
-// manifest_version write.
+// manifest_version write. The fourth method (Store) backs the M6.2.d
+// promote_to_keep tool — inserts a fresh `knowledge_chunk` row from a
+// notebook proposal.
 type WatchmasterWriteClient interface {
 	GetManifest(ctx context.Context, manifestID string) (*keepclient.ManifestVersion, error)
 	PutManifestVersion(
@@ -97,6 +99,7 @@ type WatchmasterWriteClient interface {
 		req keepclient.PutManifestVersionRequest,
 	) (*keepclient.PutManifestVersionResponse, error)
 	UpdateWatchkeeperStatus(ctx context.Context, id, status string) error
+	Store(ctx context.Context, req keepclient.StoreRequest) (*keepclient.StoreResponse, error)
 }
 
 // Compile-time assertion: every [*keepclient.Client] satisfies

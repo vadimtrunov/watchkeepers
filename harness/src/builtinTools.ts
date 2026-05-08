@@ -38,6 +38,7 @@ import {
   adjustLanguage,
   adjustPersonality,
   listWatchkeepers,
+  promoteToKeep,
   proposeSpawn,
   reportCost,
   reportHealth,
@@ -45,6 +46,7 @@ import {
   type AdjustLanguageParams,
   type AdjustPersonalityParams,
   type ListWatchkeepersParams,
+  type PromoteToKeepParams,
   type ProposeSpawnParams,
   type ReportCostParams,
   type ReportHealthParams,
@@ -501,6 +503,62 @@ const retireWatchkeeperHandler: BuiltinHandler = async (rpc, agentID, input) => 
 };
 
 /**
+ * Zod schema for the `promote_to_keep` builtin tool input (M6.2.d).
+ * Mirrors the Go-side `promoteToKeepParams` decoder
+ * (`core/pkg/harnessrpc/promote_to_keep.go`) — snake_case names,
+ * required `agent_id` + `notebook_entry_id` + `approval_token`.
+ * `.strict()` rejects unknown wire fields for the same reason
+ * {@link SlackAppCreateInputSchema} does.
+ *
+ * The `agent_id` field IS in the schema because it is the calling
+ * agent's id (the source notebook owner) — NOT the manifest UUID,
+ * NOT a target watchkeeper. The Go-side handler picks the request's
+ * `agent_id` for the audit row when present and falls back to the
+ * claim's `AgentID` otherwise (`pickAgentForBump`).
+ */
+const PromoteToKeepInputSchema = z
+  .object({
+    agent_id: z.string().min(1, "agent_id must be a non-empty string"),
+    notebook_entry_id: z.string().min(1, "notebook_entry_id must be a non-empty string"),
+    approval_token: z.string().min(1, "approval_token must be a non-empty string"),
+  })
+  .strict();
+
+/**
+ * `promote_to_keep` built-in (M6.2.d) — forwards to the Go-side
+ * `watchmaster.promote_to_keep` method via {@link promoteToKeep}.
+ * Throws {@link BuiltinAgentIDMissing} when the manifest never set an
+ * `agentID` (the deny-by-default M5.5.b.a posture). Throws
+ * {@link BuiltinInvalidInput} on a local zod-shape mismatch BEFORE
+ * any outbound RPC.
+ *
+ * The Go-side handler lifts the referenced notebook entry into a
+ * fresh `watchkeeper.knowledge_chunk` row via the keep server's
+ * POST /v1/knowledge-chunks endpoint. On a notebook-entry-missing
+ * the wire surfaces -32011 (ToolNotFound); a TS caller branches on
+ * the wire `code` without string-matching.
+ */
+const promoteToKeepHandler: BuiltinHandler = async (rpc, agentID, input) => {
+  if (agentID === undefined) {
+    throw new BuiltinAgentIDMissing("promote_to_keep");
+  }
+  const parsed = PromoteToKeepInputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new BuiltinInvalidInput(
+      "promote_to_keep",
+      parsed.error.issues[0]?.message ?? parsed.error.message,
+    );
+  }
+  const params: PromoteToKeepParams = {
+    agent_id: parsed.data.agent_id,
+    notebook_entry_id: parsed.data.notebook_entry_id,
+    approval_token: parsed.data.approval_token,
+  };
+  const result = await promoteToKeep(rpc, params);
+  return result as unknown as JsonRpcValue;
+};
+
+/**
  * Read-only registry of built-in tools. Indexed by the wire-level
  * `tool.name` from `invokeTool.params.tool`. Adding a new built-in is
  * a single-line edit; no dispatch-branch change is needed.
@@ -516,6 +574,7 @@ export const builtinHandlers: ReadonlyMap<string, BuiltinHandler> = new Map<stri
     ["adjust_personality", adjustPersonalityHandler],
     ["adjust_language", adjustLanguageHandler],
     ["retire_watchkeeper", retireWatchkeeperHandler],
+    ["promote_to_keep", promoteToKeepHandler],
   ],
 );
 

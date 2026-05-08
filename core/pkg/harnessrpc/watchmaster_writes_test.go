@@ -37,11 +37,14 @@ type stubWriteClient struct {
 	putResp   *keepclient.PutManifestVersionResponse
 	putErr    error
 	updateErr error
+	storeResp *keepclient.StoreResponse
+	storeErr  error
 
 	mu          sync.Mutex
 	getCalls    []string
 	putCalls    []stubWriteClientPutCall
 	updateCalls []stubWriteClientUpdateCall
+	storeCalls  []keepclient.StoreRequest
 }
 
 type stubWriteClientPutCall struct {
@@ -90,6 +93,28 @@ func (s *stubWriteClient) UpdateWatchkeeperStatus(_ context.Context, id, status 
 	s.updateCalls = append(s.updateCalls, stubWriteClientUpdateCall{id: id, status: status})
 	s.mu.Unlock()
 	return s.updateErr
+}
+
+func (s *stubWriteClient) Store(_ context.Context, req keepclient.StoreRequest) (*keepclient.StoreResponse, error) {
+	s.mu.Lock()
+	s.storeCalls = append(s.storeCalls, req)
+	idx := len(s.storeCalls)
+	s.mu.Unlock()
+	if s.storeErr != nil {
+		return nil, s.storeErr
+	}
+	if s.storeResp == nil {
+		return &keepclient.StoreResponse{ID: fmt.Sprintf("chunk-%d", idx)}, nil
+	}
+	return s.storeResp, nil
+}
+
+func (s *stubWriteClient) recordedStore() []keepclient.StoreRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]keepclient.StoreRequest, len(s.storeCalls))
+	copy(out, s.storeCalls)
+	return out
 }
 
 func (s *stubWriteClient) recordedUpdate() []stubWriteClientUpdateCall {

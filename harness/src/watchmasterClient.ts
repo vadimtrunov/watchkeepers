@@ -260,6 +260,64 @@ export async function adjustLanguage(
   return result as unknown as ManifestBumpResult;
 }
 
+// ── promote_to_keep ──────────────────────────────────────────────────────────
+
+/**
+ * Parameters for `watchmaster.promote_to_keep` (M6.2.d). Mirrors
+ * the Go-side `promoteToKeepParams` decoder
+ * (`core/pkg/harnessrpc/promote_to_keep.go`) — snake_case names.
+ *
+ * Required: agent_id (the calling agent's id, used as the audit row's
+ * `agent_id` and the source notebook owner), notebook_entry_id (the
+ * UUID v7 of the source `entry` row), approval_token. Unlike the
+ * M6.2.b manifest-bump methods, promote_to_keep does not carry any
+ * manifest fields — it is a read-then-write across the notebook→keep
+ * boundary that lifts a single notebook entry into
+ * `watchkeeper.knowledge_chunk` via the keep server's
+ * POST /v1/knowledge-chunks endpoint.
+ */
+export interface PromoteToKeepParams {
+  readonly agent_id: string;
+  readonly notebook_entry_id: string;
+  readonly approval_token: string;
+}
+
+/**
+ * Success response shape for `watchmaster.promote_to_keep`. Carries
+ * the keep-server-assigned `chunk_id` plus the notebook-side
+ * `proposal_id` and source `notebook_entry_id` echoed back from the
+ * request so a TS caller can correlate the audit chain without a
+ * re-read.
+ */
+export interface PromoteToKeepResult {
+  readonly chunk_id: string;
+  readonly proposal_id: string;
+  readonly notebook_entry_id: string;
+}
+
+/**
+ * Call `watchmaster.promote_to_keep` on the Go-side host and lift the
+ * referenced notebook entry into a fresh `watchkeeper.knowledge_chunk`
+ * row.
+ *
+ * Rejects with {@link RpcRequestError} (from `jsonrpc.ts`) when the
+ * host returns a JSON-RPC error envelope, preserving the wire `code`
+ * so callers can branch on -32005 (ToolUnauthorized) / -32007
+ * (ApprovalRequired) / -32011 (ToolNotFound — notebook entry missing) /
+ * -32602 (InvalidParams) / -32603 (InternalError) without
+ * string-matching the message.
+ */
+export async function promoteToKeep(
+  rpc: RpcClient,
+  params: PromoteToKeepParams,
+): Promise<PromoteToKeepResult> {
+  const result = await rpc.request(
+    "watchmaster.promote_to_keep",
+    params as unknown as JsonRpcValue,
+  );
+  return result as unknown as PromoteToKeepResult;
+}
+
 // ── retire_watchkeeper ───────────────────────────────────────────────────────
 
 /**
