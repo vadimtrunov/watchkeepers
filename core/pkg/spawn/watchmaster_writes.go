@@ -74,7 +74,7 @@ const (
 )
 
 // WatchmasterWriteClient is the minimal subset of the keepclient surface
-// the M6.2.b manifest-bump tools consume. Defined as an interface in
+// the Watchmaster write-side tools consume. Defined as an interface in
 // this package so tests can substitute a hand-rolled fake without
 // standing up an HTTP server, and so production code never imports the
 // concrete `*keepclient.Client` type at all (mirrors the
@@ -83,6 +83,12 @@ const (
 //
 // `*keepclient.Client` satisfies this interface as-is; the compile-time
 // assertion lives below.
+//
+// The first two methods (GetManifest, PutManifestVersion) back the
+// M6.2.b manifest-bump tools (propose_spawn / adjust_personality /
+// adjust_language). The third method (UpdateWatchkeeperStatus) backs
+// the M6.2.c retire_watchkeeper tool — a status-row mutation, not a
+// manifest_version write.
 type WatchmasterWriteClient interface {
 	GetManifest(ctx context.Context, manifestID string) (*keepclient.ManifestVersion, error)
 	PutManifestVersion(
@@ -90,6 +96,7 @@ type WatchmasterWriteClient interface {
 		manifestID string,
 		req keepclient.PutManifestVersionRequest,
 	) (*keepclient.PutManifestVersionResponse, error)
+	UpdateWatchkeeperStatus(ctx context.Context, id, status string) error
 }
 
 // Compile-time assertion: every [*keepclient.Client] satisfies

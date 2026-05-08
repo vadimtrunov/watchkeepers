@@ -15,25 +15,33 @@ import (
 
 // ── real fakes (M5.6 / M6.1.b discipline — no mocks of the unit under test) ──
 
-// fakeWriteClient records every GetManifest / PutManifestVersion call
-// and returns canned responses (or injected errors). Mirrors the
-// M6.1.b fakeSlackAdapter / M6.2.a fakeReadClient shape — hand-rolled,
-// no mocking lib, captures inputs by value so subsequent assertions
-// cannot race a still-mutating caller.
+// fakeWriteClient records every GetManifest / PutManifestVersion /
+// UpdateWatchkeeperStatus call and returns canned responses (or
+// injected errors). Mirrors the M6.1.b fakeSlackAdapter / M6.2.a
+// fakeReadClient shape — hand-rolled, no mocking lib, captures inputs
+// by value so subsequent assertions cannot race a still-mutating
+// caller.
 type fakeWriteClient struct {
-	getResp *keepclient.ManifestVersion
-	getErr  error
-	putResp *keepclient.PutManifestVersionResponse
-	putErr  error
+	getResp   *keepclient.ManifestVersion
+	getErr    error
+	putResp   *keepclient.PutManifestVersionResponse
+	putErr    error
+	updateErr error
 
-	mu       sync.Mutex
-	getCalls []string
-	putCalls []fakeWriteClientPutCall
+	mu          sync.Mutex
+	getCalls    []string
+	putCalls    []fakeWriteClientPutCall
+	updateCalls []fakeWriteClientUpdateCall
 }
 
 type fakeWriteClientPutCall struct {
 	manifestID string
 	req        keepclient.PutManifestVersionRequest
+}
+
+type fakeWriteClientUpdateCall struct {
+	id     string
+	status string
 }
 
 func (f *fakeWriteClient) GetManifest(_ context.Context, manifestID string) (*keepclient.ManifestVersion, error) {
@@ -65,6 +73,21 @@ func (f *fakeWriteClient) PutManifestVersion(
 		return &keepclient.PutManifestVersionResponse{ID: fmt.Sprintf("mv-%d", idx)}, nil
 	}
 	return f.putResp, nil
+}
+
+func (f *fakeWriteClient) UpdateWatchkeeperStatus(_ context.Context, id, status string) error {
+	f.mu.Lock()
+	f.updateCalls = append(f.updateCalls, fakeWriteClientUpdateCall{id: id, status: status})
+	f.mu.Unlock()
+	return f.updateErr
+}
+
+func (f *fakeWriteClient) recordedUpdate() []fakeWriteClientUpdateCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]fakeWriteClientUpdateCall, len(f.updateCalls))
+	copy(out, f.updateCalls)
+	return out
 }
 
 func (f *fakeWriteClient) recordedGet() []string {
