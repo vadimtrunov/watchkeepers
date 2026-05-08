@@ -96,11 +96,22 @@ type Manifest struct {
 	// An empty Autonomy defaults to [AutonomySupervised].
 	Autonomy AutonomyLevel
 
-	// Toolset is the set of tool names the agent is permitted to call
-	// via [AgentRuntime.InvokeTool]. The runtime MUST reject calls for
-	// names outside this set with [ErrToolUnauthorized] before
-	// touching the tool. An empty / nil Toolset means "no tools".
-	Toolset []string
+	// Toolset is the set of tools the agent is permitted to call via
+	// [AgentRuntime.InvokeTool], carrying both names and (optionally)
+	// per-tool versions projected from the manifest_version.tools
+	// jsonb. The runtime MUST reject calls for names outside this set
+	// with [ErrToolUnauthorized] before touching the tool. An empty /
+	// nil Toolset means "no tools".
+	//
+	// Consumers that historically required `[]string` (the M5.5.b.a
+	// ACL gate, the LLM `tools` request projection, every test fixture
+	// that iterates the field) call [Toolset.Names] to recover the
+	// prior shape; version-aware callers (M5.6.e.b boot-time
+	// superseded-lesson scan) iterate the slice directly to read each
+	// [ToolEntry.Version]. The field type migrated from `[]string` to
+	// [Toolset] in M5.6.e.a; no behavioural change beyond the new
+	// Version surface.
+	Toolset Toolset
 
 	// AuthorityMatrix is the projection of the manifest's
 	// authority_matrix the runtime consults at lifecycle / approval

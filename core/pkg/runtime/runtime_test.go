@@ -19,7 +19,7 @@ func validManifest() Manifest {
 		Personality:  "concise",
 		Language:     "en",
 		Autonomy:     AutonomySupervised,
-		Toolset:      []string{"echo", "remember"},
+		Toolset:      Toolset{{Name: "echo"}, {Name: "remember"}},
 		AuthorityMatrix: map[string]string{
 			"send_message": "self",
 		},

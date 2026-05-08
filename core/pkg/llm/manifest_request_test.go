@@ -18,7 +18,7 @@ func validManifest() runtime.Manifest {
 		Language:        "en-US",
 		Model:           "claude-sonnet-4",
 		Autonomy:        runtime.AutonomySupervised,
-		Toolset:         []string{"echo"},
+		Toolset:         runtime.Toolset{{Name: "echo"}},
 		AuthorityMatrix: map[string]string{"approve_tools": "leader"},
 		Metadata:        map[string]string{"persona_id": "p-42"},
 	}

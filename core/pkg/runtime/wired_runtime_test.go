@@ -42,8 +42,11 @@ func (f *fakeAgentRuntime) Start(_ context.Context, manifest runtime.Manifest, _
 	if manifest.AgentID == "" || manifest.SystemPrompt == "" || manifest.Model == "" {
 		return nil, runtime.ErrInvalidManifest
 	}
-	f.toolset = make(map[string]struct{}, len(manifest.Toolset))
-	for _, name := range manifest.Toolset {
+	// M5.6.e.a: Toolset migrated from []string to []ToolEntry; project
+	// via .Names() to preserve the ACL map's existing key shape.
+	names := manifest.Toolset.Names()
+	f.toolset = make(map[string]struct{}, len(names))
+	for _, name := range names {
 		f.toolset[name] = struct{}{}
 	}
 	f.startedID = runtime.ID("fake-wired-runtime-1")
@@ -135,7 +138,7 @@ func setupWiredHarness(t *testing.T, fakeInvokeErr error) *wiredHarness {
 		AgentID:      reflectorAgentID,
 		SystemPrompt: "test system prompt",
 		Model:        "claude-sonnet-4",
-		Toolset:      []string{"sandbox.exec", "shell.run"},
+		Toolset:      runtime.Toolset{{Name: "sandbox.exec"}, {Name: "shell.run"}},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)

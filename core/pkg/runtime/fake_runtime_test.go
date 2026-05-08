@@ -102,9 +102,13 @@ func (f *FakeRuntime) Start(_ context.Context, manifest Manifest, opts ...StartO
 
 	f.idSeq++
 	id := ID(fmt.Sprintf("fake-runtime-%d", f.idSeq))
-	toolset := make(map[string]struct{}, len(manifest.Toolset))
-	for _, t := range manifest.Toolset {
-		toolset[t] = struct{}{}
+	// M5.6.e.a: Toolset migrated from []string to []ToolEntry; the ACL
+	// gate keys on Name only, so project via .Names() to preserve the
+	// existing map shape and lookup semantics.
+	names := manifest.Toolset.Names()
+	toolset := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		toolset[n] = struct{}{}
 	}
 	f.sessions[id] = &fakeSession{manifest: manifest, toolset: toolset}
 	return &fakeRuntimeHandle{id: id}, nil

@@ -2,12 +2,13 @@
 // [keepclient.ManifestVersion] into a portable [runtime.Manifest]. This
 // sub-package covers the personality/language slice (template Personality
 // and Language into SystemPrompt; forward AgentID verbatim), the toolset
-// slice (decode the `tools` jsonb column into the Toolset []string the
-// runtime ACL consults at InvokeTool time, M5.5.b.a), the AuthorityMatrix
-// projection (M5.5.b.c.c.a), the Autonomy projection (M5.5.b.c.c.a), and
-// the notebook recall tunables NotebookTopK / NotebookRelevanceThreshold
-// (M5.5.c.b). Notebook open and the Remember built-in tool live in sibling
-// milestones (M5.5.c.c, M5.5.d) and do NOT belong here.
+// slice (decode the `tools` jsonb column into the [runtime.Toolset] the
+// runtime ACL consults at InvokeTool time, M5.5.b.a; per-tool versions
+// project alongside names per M5.6.e.a), the AuthorityMatrix projection
+// (M5.5.b.c.c.a), the Autonomy projection (M5.5.b.c.c.a), and the notebook
+// recall tunables NotebookTopK / NotebookRelevanceThreshold (M5.5.c.b).
+// Notebook open and the Remember built-in tool live in sibling milestones
+// (M5.5.c.c, M5.5.d) and do NOT belong here.
 package manifest
 
 import (
@@ -64,9 +65,10 @@ type ManifestFetcher interface {
 // [keepclient.ErrNotFound]).
 //
 // Toolset is decoded from mv.Tools via [decodeToolset]: a JSON array of
-// `{"name": string}` entries projects to []string of names; null/empty
-// arrays produce a nil Toolset (the deny-all default per
-// runtime.go:99-103). Model is copied verbatim from
+// `{"name": string, "version": string}` entries (version OPTIONAL)
+// projects to a [runtime.Toolset] carrying both fields per
+// [runtime.ToolEntry]; null/empty arrays produce a nil Toolset (the
+// deny-all default per runtime.go:99-103). Model is copied verbatim from
 // [keepclient.ManifestVersion.Model] onto [runtime.Manifest.Model]; the
 // loader does NOT supply a default — empty Model propagates as the empty
 // string and downstream [llm.composeBaseFields] is the gate that rejects
@@ -117,25 +119,30 @@ func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (r
 }
 
 // decodeToolset projects the manifest_version `tools` jsonb column —
-// a JSON array of `{"name": string, ...}` objects — into the portable
-// [runtime.Manifest.Toolset] []string of just the names. Versioning
-// and capability metadata on each entry are intentionally ignored
-// here; their wiring lands in M5.5.b.b/c.
+// a JSON array of `{"name": string, "version": string, ...}` objects —
+// into the portable [runtime.Toolset]. Per-entry `version` is OPTIONAL:
+// legacy rows predating M5.6.e.a omit the field and decode with an
+// empty [runtime.ToolEntry.Version]. Capability metadata on each entry
+// is still intentionally ignored here; its wiring lands in M5.5.b.b/c.
 //
 // Empty or null inputs (nil RawMessage, the JSON literal `null`, the
 // JSON literal `[]`) all return a nil slice — runtime.go:99-103
 // documents "An empty / nil Toolset means 'no tools'", which is the
 // deny-all default the harness ACL gate enforces (M5.5.b.a AC6).
 //
-// Decode failures (malformed JSON, non-string `name`, missing `name`)
-// are wrapped as `fmt.Errorf("manifest: toolset: %w", err)` so callers
-// can errors.Is the underlying [json.Unmarshal] failure mode.
-func decodeToolset(raw json.RawMessage) ([]string, error) {
+// Decode failures (malformed JSON, non-string `name`, missing/empty
+// `name`, non-string `version`) are wrapped as
+// `fmt.Errorf("manifest: toolset: %w", err)` (or the entry-N empty-
+// name sentinel format) so callers can errors.Is the underlying
+// [json.Unmarshal] failure mode. M5.6.e.a adds the non-string-version
+// failure mode; legacy entries without `version` still decode cleanly.
+func decodeToolset(raw json.RawMessage) (runtime.Toolset, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil
 	}
 	var entries []struct {
-		Name string `json:"name"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
 	}
 	if err := json.Unmarshal(raw, &entries); err != nil {
 		return nil, fmt.Errorf("manifest: toolset: %w", err)
@@ -143,14 +150,14 @@ func decodeToolset(raw json.RawMessage) ([]string, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
-	names := make([]string, 0, len(entries))
+	out := make(runtime.Toolset, 0, len(entries))
 	for i, e := range entries {
 		if e.Name == "" {
 			return nil, fmt.Errorf("manifest: toolset: entry %d has empty name", i)
 		}
-		names = append(names, e.Name)
+		out = append(out, runtime.ToolEntry{Name: e.Name, Version: e.Version})
 	}
-	return names, nil
+	return out, nil
 }
 
 // decodeAuthorityMatrix projects the manifest_version `authority_matrix`
