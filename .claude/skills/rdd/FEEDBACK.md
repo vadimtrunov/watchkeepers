@@ -2273,3 +2273,25 @@ None — Phase 4 converged at iteration 1.
 - Total wall time from Phase 3 start to Phase 4 convergence: est. 02:15 (executor + 1-iter review)
 
 ---
+
+## 2026-05-08 — M5.6.e.a: Typed-slice migration with backward-compat helper
+
+**PR**: pending — Phase 5b
+**Phases with incidents**: none
+
+### What worked
+The pattern from M5.6.c (pre-flagging deviations in the TASK Progress-log) continues to deliver. Phase 4 converged at iteration 1 with zero findings — this is the second consecutive TASK where Phase 4 converged cleanly at iter 1 (M5.6.d also did). The pre-flagged deviation surfacing kept the review loop tight.
+
+### What wasted effort
+None. Both Phase 3 commits (`1b878da`, `c8d189d`) stayed within stated scope as verified via `git show --stat` per-commit. The executor brief and pre-flagging discipline paid off again.
+
+### Suggested skill changes
+Suggest cementing the deferred-deviation-surfacing pattern as a hard rule in the next executor brief (was soft suggestion in M5.6.c, but two consecutive iter-1 convergences prove it works).
+
+### Metrics
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending
+
+---

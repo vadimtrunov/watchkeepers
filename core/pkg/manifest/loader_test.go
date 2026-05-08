@@ -222,7 +222,8 @@ func TestLoadManifest_ModelEmptyString_ProjectsVerbatim(t *testing.T) {
 
 // TestLoadManifest_DecodesToolsetNames asserts the M5.5.b.a happy path
 // (AC1): the loader decodes mv.Tools from `[{"name":"echo"},{"name":"sum"}]`
-// into Toolset = ["echo", "sum"].
+// into a Toolset of two ToolEntry rows whose Names() projection equals
+// ["echo", "sum"]. Both rows carry empty Version (legacy shape).
 func TestLoadManifest_DecodesToolsetNames(t *testing.T) {
 	t.Parallel()
 
@@ -236,9 +237,13 @@ func TestLoadManifest_DecodesToolsetNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadManifest: %v", err)
 	}
-	want := []string{"echo", "sum"}
-	if !reflect.DeepEqual(got.Toolset, want) {
-		t.Errorf("Toolset = %v, want %v", got.Toolset, want)
+	wantNames := []string{"echo", "sum"}
+	if !reflect.DeepEqual(got.Toolset.Names(), wantNames) {
+		t.Errorf("Toolset.Names() = %v, want %v", got.Toolset.Names(), wantNames)
+	}
+	wantEntries := runtime.Toolset{{Name: "echo"}, {Name: "sum"}}
+	if !reflect.DeepEqual(got.Toolset, wantEntries) {
+		t.Errorf("Toolset = %v, want %v (legacy entries decode with empty Version)", got.Toolset, wantEntries)
 	}
 }
 
@@ -303,6 +308,158 @@ func TestLoadManifest_MalformedToolsRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "manifest: toolset:") {
 		t.Errorf("err = %v, want substring %q", err, "manifest: toolset:")
+	}
+}
+
+// TestLoadManifest_DecodesToolsetWithVersions asserts M5.6.e.a AC3: the
+// loader decodes mv.Tools from `[{"name":"echo","version":"v1.0.0"}]`
+// into a Toolset whose entry carries both Name and Version. Names()
+// still yields ["echo"] for the M5.5.b.a ACL gate path.
+func TestLoadManifest_DecodesToolsetWithVersions(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`[{"name":"echo","version":"v1.0.0"}]`),
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	want := runtime.Toolset{{Name: "echo", Version: "v1.0.0"}}
+	if !reflect.DeepEqual(got.Toolset, want) {
+		t.Errorf("Toolset = %v, want %v", got.Toolset, want)
+	}
+	if !reflect.DeepEqual(got.Toolset.Names(), []string{"echo"}) {
+		t.Errorf("Toolset.Names() = %v, want [\"echo\"]", got.Toolset.Names())
+	}
+}
+
+// TestLoadManifest_DecodesToolsetMixedNamesAndVersions asserts M5.6.e.a
+// AC3 + AC5: a mixed array with a versioned entry and a legacy
+// (version-less) entry decodes into the matching ToolEntry pair, the
+// legacy entry's Version is empty, and Names() preserves the manifest's
+// declaration order.
+func TestLoadManifest_DecodesToolsetMixedNamesAndVersions(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`[{"name":"a","version":"v1.0"},{"name":"b"}]`),
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	want := runtime.Toolset{
+		{Name: "a", Version: "v1.0"},
+		{Name: "b"}, // legacy entry, empty Version
+	}
+	if !reflect.DeepEqual(got.Toolset, want) {
+		t.Errorf("Toolset = %v, want %v", got.Toolset, want)
+	}
+	if !reflect.DeepEqual(got.Toolset.Names(), []string{"a", "b"}) {
+		t.Errorf("Toolset.Names() = %v, want [\"a\",\"b\"] (order preserved)", got.Toolset.Names())
+	}
+}
+
+// TestLoadManifest_DecodesToolsetLegacyNameOnly_HasEmptyVersion asserts
+// M5.6.e.a AC5: a single legacy entry without a `version` field decodes
+// successfully and the projected ToolEntry carries an empty Version.
+// This is the backward-compatibility regression guard for pre-M5.6.e.a
+// manifest_version.tools rows.
+func TestLoadManifest_DecodesToolsetLegacyNameOnly_HasEmptyVersion(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`[{"name":"echo"}]`),
+	}}
+
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(got.Toolset) != 1 {
+		t.Fatalf("Toolset len = %d, want 1", len(got.Toolset))
+	}
+	if got.Toolset[0].Name != "echo" {
+		t.Errorf("Toolset[0].Name = %q, want %q", got.Toolset[0].Name, "echo")
+	}
+	if got.Toolset[0].Version != "" {
+		t.Errorf("Toolset[0].Version = %q, want empty (legacy entries have no version)", got.Toolset[0].Version)
+	}
+}
+
+// TestLoadManifest_RejectsToolsetNonStringVersion asserts M5.6.e.a AC3
+// new failure mode: a `version` field that is not a string (here `42`)
+// returns an error wrapped with the `manifest: toolset:` prefix so
+// callers can errors.Is the underlying json.Unmarshal failure.
+func TestLoadManifest_RejectsToolsetNonStringVersion(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`[{"name":"x","version":42}]`),
+	}}
+
+	_, err := LoadManifest(context.Background(), f, "m")
+	if err == nil {
+		t.Fatalf("LoadManifest: nil error, want wrapped non-string-version failure")
+	}
+	if !strings.Contains(err.Error(), "manifest: toolset:") {
+		t.Errorf("err = %v, want substring %q", err, "manifest: toolset:")
+	}
+}
+
+// TestLoadManifest_RejectsToolsetEmptyName asserts the existing AC3
+// negative still applies after the M5.6.e.a type migration: an entry
+// with an empty `name` returns the deterministic
+// `manifest: toolset: entry N has empty name` sentinel.
+func TestLoadManifest_RejectsToolsetEmptyName(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`[{"name":""}]`),
+	}}
+
+	_, err := LoadManifest(context.Background(), f, "m")
+	if err == nil {
+		t.Fatalf("LoadManifest: nil error, want empty-name rejection")
+	}
+	if !strings.Contains(err.Error(), "manifest: toolset: entry 0 has empty name") {
+		t.Errorf("err = %v, want substring %q", err, "manifest: toolset: entry 0 has empty name")
+	}
+}
+
+// TestLoadManifest_RejectsToolsetMissingName asserts that an entry
+// supplying only a `version` (no `name`) is treated identically to an
+// empty-name entry per the M5.6.e.a contract — name is required, and
+// json.Unmarshal leaves a missing-key field as the zero value, which
+// the loader rejects via the same `entry N has empty name` path.
+func TestLoadManifest_RejectsToolsetMissingName(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+		Tools:        json.RawMessage(`[{"version":"v1.0"}]`),
+	}}
+
+	_, err := LoadManifest(context.Background(), f, "m")
+	if err == nil {
+		t.Fatalf("LoadManifest: nil error, want missing-name rejection")
+	}
+	if !strings.Contains(err.Error(), "manifest: toolset: entry 0 has empty name") {
+		t.Errorf("err = %v, want substring %q", err, "manifest: toolset: entry 0 has empty name")
 	}
 }
 
@@ -481,8 +638,8 @@ func TestLoadManifest_ProjectsRememberInToolset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadManifest: %v", err)
 	}
-	if len(got.Toolset) != 1 || got.Toolset[0] != "remember" {
-		t.Errorf("Toolset = %v, want [\"remember\"]", got.Toolset)
+	if len(got.Toolset) != 1 || got.Toolset[0].Name != "remember" {
+		t.Errorf("Toolset = %v, want [{Name:\"remember\"}]", got.Toolset)
 	}
 }
 
