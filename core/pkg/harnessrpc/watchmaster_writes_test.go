@@ -92,6 +92,14 @@ func (s *stubWriteClient) UpdateWatchkeeperStatus(_ context.Context, id, status 
 	return s.updateErr
 }
 
+func (s *stubWriteClient) recordedUpdate() []stubWriteClientUpdateCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]stubWriteClientUpdateCall, len(s.updateCalls))
+	copy(out, s.updateCalls)
+	return out
+}
+
 func (s *stubWriteClient) recordedPut() []stubWriteClientPutCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
