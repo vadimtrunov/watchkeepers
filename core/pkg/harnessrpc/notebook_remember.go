@@ -25,12 +25,23 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/vadimtrunov/watchkeepers/core/pkg/llm"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/notebook"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/runtime"
 )
+
+// validCategories is the closed set of allowed notebook entry categories,
+// duplicated here from notebook.categoryEnum (which is unexported) so the
+// handler can return -32602 InvalidParams before wasting an Embed call on
+// an entry that would fail notebook.validate anyway.
+// Source of truth: core/pkg/notebook/entry.go categoryEnum.
+var validCategories = map[string]struct{}{
+	notebook.CategoryLesson:           {},
+	notebook.CategoryPreference:       {},
+	notebook.CategoryObservation:      {},
+	notebook.CategoryPendingTask:      {},
+	notebook.CategoryRelationshipNote: {},
+}
 
 // rememberParams is the wire shape decoded from the `notebook.remember` params
 // field. All four fields are required; the handler validates them before any
@@ -76,11 +87,22 @@ func NewNotebookRememberHandler(supervisor *runtime.NotebookSupervisor, embedder
 		if p.Category == "" {
 			return nil, NewRPCError(ErrCodeInvalidParams, "notebook.remember: category is required")
 		}
+		// Validate category against the closed enum before any side-effectful
+		// work. Unknown but non-empty category would fail inside
+		// notebook.Remember as -32603 internal error instead of the
+		// semantically-correct -32602 invalid params.
+		// Source of truth: core/pkg/notebook/entry.go categoryEnum.
+		if _, ok := validCategories[p.Category]; !ok {
+			return nil, NewRPCError(ErrCodeInvalidParams,
+				fmt.Sprintf("notebook.remember: category must be one of: lesson, preference, observation, pending_task, relationship_note; got %q", p.Category))
+		}
 
 		// Lookup the per-agent notebook DB.
 		db, ok := supervisor.Lookup(p.AgentID)
 		if !ok {
-			return nil, fmt.Errorf("internal error: agent not registered: %s", p.AgentID)
+			return nil, NewRPCErrorData(ErrCodeInternalError,
+				fmt.Sprintf("notebook.remember: agent not registered: %s", p.AgentID),
+				map[string]any{"kind": "agent_not_registered"})
 		}
 
 		// Build the embed input: "subject: content" when subject non-empty.
@@ -92,15 +114,15 @@ func NewNotebookRememberHandler(supervisor *runtime.NotebookSupervisor, embedder
 		// Compute the embedding.
 		embedding, err := embedder.Embed(ctx, embedInput)
 		if err != nil {
-			return nil, fmt.Errorf("internal error: embed failed: %w", err)
+			return nil, NewRPCErrorData(ErrCodeInternalError,
+				fmt.Sprintf("notebook.remember: embed failed: %v", err),
+				map[string]any{"kind": "embed_failed"})
 		}
 
-		// Build the entry. ID is pre-generated so the caller gets it back in
-		// the response; Remember will preserve it (it only auto-generates when
-		// Entry.ID is empty).
-		entryID := uuid.NewString()
+		// Build the entry. Leave ID empty so notebook.Remember auto-generates
+		// a UUID v7 (time-ordered). Pre-generating a v4 here would mix id
+		// formats and defeat v7's sort-by-id property.
 		entry := notebook.Entry{
-			ID:        entryID,
 			Category:  p.Category,
 			Subject:   p.Subject,
 			Content:   p.Content,
@@ -108,10 +130,12 @@ func NewNotebookRememberHandler(supervisor *runtime.NotebookSupervisor, embedder
 			Embedding: embedding,
 		}
 
-		// Persist.
+		// Persist and get the auto-generated v7 id back from Remember.
 		id, err := db.Remember(ctx, entry)
 		if err != nil {
-			return nil, fmt.Errorf("internal error: remember failed: %w", err)
+			return nil, NewRPCErrorData(ErrCodeInternalError,
+				fmt.Sprintf("notebook.remember: remember failed: %v", err),
+				map[string]any{"kind": "remember_failed"})
 		}
 
 		return rememberResult{ID: id}, nil

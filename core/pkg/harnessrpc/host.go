@@ -33,10 +33,16 @@ import (
 // [ErrCodeInternalError] (-32603). The [Host] dispatcher checks for this type
 // via [errors.As] before falling back to the generic -32603 mapping.
 //
-// Use [NewRPCError] to construct one; callers can match with [errors.As].
+// The optional [Data] field carries structured metadata (e.g.
+// `map[string]any{"kind": "agent_not_registered"}`) that M5.5.d.b's
+// builtin-tool dispatcher can use to classify failures without
+// string-matching the message.
+//
+// Use [NewRPCError] or [NewRPCErrorData] to construct; callers match with [errors.As].
 type RPCError struct {
 	Code    int
 	Message string
+	Data    any
 }
 
 func (e *RPCError) Error() string {
@@ -48,6 +54,14 @@ func (e *RPCError) Error() string {
 // NewRPCError(ErrCodeInvalidParams, "...").
 func NewRPCError(code int, message string) *RPCError {
 	return &RPCError{Code: code, Message: message}
+}
+
+// NewRPCErrorData constructs an [RPCError] with the given code, message, and
+// structured data payload. Use this when downstream consumers (e.g.
+// M5.5.d.b's builtin-tool dispatcher) need to classify failures by kind
+// without string-matching the message.
+func NewRPCErrorData(code int, message string, data any) *RPCError {
+	return &RPCError{Code: code, Message: message, Data: data}
 }
 
 // ErrCodeInvalidParams is the JSON-RPC 2.0 error code for a request whose
@@ -214,11 +228,19 @@ func (h *Host) dispatchOne(ctx context.Context, line []byte) ([]byte, bool) {
 	result, handlerErr := handler(ctx, params)
 	if handlerErr != nil {
 		code := ErrCodeInternalError
+		msg := handlerErr.Error()
+		var data any
 		var rpcErr *RPCError
 		if errors.As(handlerErr, &rpcErr) {
 			code = rpcErr.Code
+			// Use rpcErr.Message directly so the wire message does not embed
+			// the "rpc error <code>: " prefix that RPCError.Error() adds for
+			// logging purposes (Important 3 — code must not appear twice on
+			// the wire).
+			msg = rpcErr.Message
+			data = rpcErr.Data
 		}
-		encoded, _ := json.Marshal(buildErrorResponse(id, code, handlerErr.Error()))
+		encoded, _ := json.Marshal(buildErrorResponseData(id, code, msg, data))
 		return encoded, true
 	}
 
@@ -261,6 +283,7 @@ type errorResponse struct {
 type errorBody struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 
 // nullID is the canonical JSON `null` literal used when the host
@@ -268,13 +291,17 @@ type errorBody struct {
 var nullID = json.RawMessage(`null`)
 
 func buildErrorResponse(id json.RawMessage, code int, message string) errorResponse {
+	return buildErrorResponseData(id, code, message, nil)
+}
+
+func buildErrorResponseData(id json.RawMessage, code int, message string, data any) errorResponse {
 	if len(id) == 0 {
 		id = nullID
 	}
 	return errorResponse{
 		JSONRPC: JSONRPCVersion,
 		ID:      id,
-		Error:   errorBody{Code: code, Message: message},
+		Error:   errorBody{Code: code, Message: message, Data: data},
 	}
 }
 

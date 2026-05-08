@@ -7,10 +7,10 @@ import (
 	"log/slog"
 )
 
-// Option configures a [WiredRuntime] at construction time. Pass
-// options to [NewWiredRuntime]; later options override earlier ones
+// WiredRuntimeOption configures a [WiredRuntime] at construction time.
+// Pass options to [NewWiredRuntime]; later options override earlier ones
 // for the same field.
-type Option func(*WiredRuntime)
+type WiredRuntimeOption func(*WiredRuntime)
 
 // WithToolErrorReflector wires a [ToolErrorReflector] onto the
 // returned [*WiredRuntime]. When set, every [WiredRuntime.InvokeTool]
@@ -23,7 +23,7 @@ type Option func(*WiredRuntime)
 // whatever they have. Without this option the runtime behaves
 // identically to the underlying [AgentRuntime] — pinning the
 // regression guard documented in the M5.6.b test plan.
-func WithToolErrorReflector(r *ToolErrorReflector) Option {
+func WithToolErrorReflector(r *ToolErrorReflector) WiredRuntimeOption {
 	return func(w *WiredRuntime) {
 		if r != nil {
 			w.reflector = r
@@ -37,7 +37,7 @@ func WithToolErrorReflector(r *ToolErrorReflector) Option {
 // `runtime: tool-error reflector failed` entry carrying the tool
 // name, error class, and the reflector's err_type. Callers passing
 // nil get the package default ([slog.Default]).
-func WithLogger(l *slog.Logger) Option {
+func WithLogger(l *slog.Logger) WiredRuntimeOption {
 	return func(w *WiredRuntime) {
 		if l != nil {
 			w.logger = l
@@ -52,7 +52,7 @@ func WithLogger(l *slog.Logger) Option {
 // an opaque [Runtime] handle. M6's Watchmaster session-aware
 // dispatch will add a more structured plumbing path; for M5.6.b a
 // single agent-id per WiredRuntime is sufficient.
-func WithAgentID(agentID string) Option {
+func WithAgentID(agentID string) WiredRuntimeOption {
 	return func(w *WiredRuntime) {
 		w.agentID = agentID
 	}
@@ -91,7 +91,7 @@ type WiredRuntime struct {
 //
 // Panics on a nil `inner`; matches the panic discipline of
 // [keeperslog.New], [lifecycle.New], and [NewToolErrorReflector].
-func NewWiredRuntime(inner AgentRuntime, opts ...Option) *WiredRuntime {
+func NewWiredRuntime(inner AgentRuntime, opts ...WiredRuntimeOption) *WiredRuntime {
 	if inner == nil {
 		panic("runtime: NewWiredRuntime: inner runtime must not be nil")
 	}

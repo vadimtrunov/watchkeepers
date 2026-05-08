@@ -140,7 +140,8 @@ func TestNotebookRemember_HappyPath_PersistsEntry(t *testing.T) {
 // ── unit tests (handler-only, no Host wrapper) ────────────────────────────────
 
 // TestNotebookRememberHandler_AgentNotRegistered_FailsRPC verifies that a
-// Lookup miss (agent UUID never opened in supervisor) returns -32603.
+// Lookup miss (agent UUID never opened in supervisor) returns -32603 with
+// data.kind == "agent_not_registered".
 func TestNotebookRememberHandler_AgentNotRegistered_FailsRPC(t *testing.T) {
 	sup := runtime.NewNotebookSupervisor() // empty — no Open calls
 	handler := harnessrpc.NewNotebookRememberHandler(sup, llm.NewFakeEmbeddingProvider())
@@ -152,18 +153,25 @@ func TestNotebookRememberHandler_AgentNotRegistered_FailsRPC(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unregistered agent, got nil")
 	}
-	// Should NOT be an RPCError (invalid params); it's an internal error.
 	var rpcErr *harnessrpc.RPCError
-	if errors.As(err, &rpcErr) && rpcErr.Code == harnessrpc.ErrCodeInvalidParams {
-		t.Errorf("expected internal error, got invalid params code")
+	if !errors.As(err, &rpcErr) {
+		t.Fatalf("error is not *RPCError: %T %v", err, err)
 	}
-	if err.Error() == "" {
-		t.Error("error message must not be empty")
+	if rpcErr.Code != harnessrpc.ErrCodeInternalError {
+		t.Errorf("code = %d, want %d (ErrCodeInternalError)", rpcErr.Code, harnessrpc.ErrCodeInternalError)
+	}
+	// Assert structured data sentinel so M5.5.d.b dispatcher can classify without string-matching.
+	dataMap, ok := rpcErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("RPCError.Data is not map[string]any: %T", rpcErr.Data)
+	}
+	if got := dataMap["kind"]; got != "agent_not_registered" {
+		t.Errorf("data.kind = %q, want %q", got, "agent_not_registered")
 	}
 }
 
 // TestNotebookRememberHandler_EmbedError_FailsRPC verifies that an Embed
-// failure propagates as a -32603 internal error.
+// failure propagates as a -32603 internal error with data.kind == "embed_failed".
 func TestNotebookRememberHandler_EmbedError_FailsRPC(t *testing.T) {
 	const agentID = "00000000-0000-0000-0000-000000000002"
 	dir := t.TempDir()
@@ -177,8 +185,24 @@ func TestNotebookRememberHandler_EmbedError_FailsRPC(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected embed error, got nil")
 	}
-	if !errors.Is(err, sentinel) {
-		t.Errorf("error chain does not contain sentinel: %v", err)
+	var rpcErr *harnessrpc.RPCError
+	if !errors.As(err, &rpcErr) {
+		t.Fatalf("error is not *RPCError: %T %v", err, err)
+	}
+	if rpcErr.Code != harnessrpc.ErrCodeInternalError {
+		t.Errorf("code = %d, want %d (ErrCodeInternalError)", rpcErr.Code, harnessrpc.ErrCodeInternalError)
+	}
+	// Assert structured data sentinel.
+	dataMap, ok := rpcErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("RPCError.Data is not map[string]any: %T", rpcErr.Data)
+	}
+	if got := dataMap["kind"]; got != "embed_failed" {
+		t.Errorf("data.kind = %q, want %q", got, "embed_failed")
+	}
+	// The sentinel message must appear in the RPCError message.
+	if rpcErr.Message == "" {
+		t.Error("RPCError.Message must not be empty")
 	}
 }
 
@@ -237,6 +261,12 @@ func TestNotebookRememberHandler_InvalidParams_FailsRPC(t *testing.T) {
 		{
 			name:   "no category",
 			params: map[string]string{"agentID": "00000000-0000-0000-0000-000000000010", "category": "", "subject": "", "content": "x"},
+		},
+		{
+			// Non-empty but unknown category must be rejected with -32602 before
+			// any Embed or DB work (Important 1: early enum validation).
+			name:   "unknown category",
+			params: map[string]string{"agentID": "00000000-0000-0000-0000-000000000010", "category": "unknown", "subject": "", "content": "x"},
 		},
 	}
 

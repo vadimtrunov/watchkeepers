@@ -230,6 +230,92 @@ func TestWiredRuntime_InvokeTool_ToolUnauthorized_DoesNotReflect(t *testing.T) {
 	}
 }
 
+// TestWiredRuntime_InvokeTool_EmbedFailure_ReturnsOriginalToolError
+// (AC5 best-effort swallow — embed path): when the reflector's Embed
+// call fails, WiredRuntime MUST return the original tool error
+// unchanged AND must NOT write any lesson row. The reflector failure
+// is best-effort: it is logged but never replaces the original error.
+//
+// This test covers the swallow path at wired_runtime.go:165-173 that
+// the reflector-only unit tests (TestToolErrorReflector_Reflect_Negative_EmbedError)
+// cannot reach because they exercise the reflector in isolation.
+func TestWiredRuntime_InvokeTool_EmbedFailure_ReturnsOriginalToolError(t *testing.T) {
+	// no t.Parallel: t.Setenv inside setupWiredHarness.
+	h := setupWiredHarness(t, errToolBoom)
+
+	// Build a reflector whose embedder always fails.
+	errEmbedDown := errors.New("embed: provider down")
+	reflector, err := runtime.NewToolErrorReflector(
+		h.db,
+		runtime.WithEmbedder(llm.NewFakeEmbeddingProvider(llm.WithEmbedError(errEmbedDown))),
+	)
+	if err != nil {
+		t.Fatalf("NewToolErrorReflector: %v", err)
+	}
+
+	wired := runtime.NewWiredRuntime(
+		h.fake,
+		runtime.WithToolErrorReflector(reflector),
+		runtime.WithAgentID(reflectorAgentID),
+	)
+
+	_, gotErr := wired.InvokeTool(context.Background(), h.rt.ID(), runtime.ToolCall{
+		Name:        "sandbox.exec",
+		ToolVersion: "v1.0.0",
+		Arguments:   map[string]any{"cmd": "ls"},
+	})
+
+	// AC5: original tool error must reach the caller unchanged.
+	if !errors.Is(gotErr, errToolBoom) {
+		t.Fatalf("InvokeTool err = %v, want errors.Is errToolBoom (original tool error must survive embed failure)", gotErr)
+	}
+
+	// No lesson row must have been written (embed failed before Remember).
+	res := recallAllLessons(t, h.db, time.Now().Add(48*time.Hour))
+	if len(res) != 0 {
+		t.Fatalf("Recall result count = %d, want 0 (embed failed, no row should be written)", len(res))
+	}
+}
+
+// TestWiredRuntime_InvokeTool_RememberFailure_ReturnsOriginalToolError
+// (AC5 best-effort swallow — remember path): when the reflector's
+// Remember call fails, WiredRuntime MUST return the original tool
+// error unchanged. The embed succeeds; only Remember is stubbed to
+// return a sentinel error. Covers the swallow path independently of
+// the embed-failure variant above.
+func TestWiredRuntime_InvokeTool_RememberFailure_ReturnsOriginalToolError(t *testing.T) {
+	// no t.Parallel: t.Setenv inside setupWiredHarness.
+	h := setupWiredHarness(t, errToolBoom)
+
+	// Build a reflector backed by a remember stub that always fails.
+	errRememberLocked := errors.New("remember: db locked")
+	stub := &rememberStub{err: errRememberLocked}
+	reflector, err := runtime.NewToolErrorReflector(
+		stub,
+		runtime.WithEmbedder(llm.NewFakeEmbeddingProvider()),
+	)
+	if err != nil {
+		t.Fatalf("NewToolErrorReflector: %v", err)
+	}
+
+	wired := runtime.NewWiredRuntime(
+		h.fake,
+		runtime.WithToolErrorReflector(reflector),
+		runtime.WithAgentID(reflectorAgentID),
+	)
+
+	_, gotErr := wired.InvokeTool(context.Background(), h.rt.ID(), runtime.ToolCall{
+		Name:        "sandbox.exec",
+		ToolVersion: "v1.0.0",
+		Arguments:   map[string]any{"cmd": "ls"},
+	})
+
+	// AC5: original tool error must reach the caller unchanged.
+	if !errors.Is(gotErr, errToolBoom) {
+		t.Fatalf("InvokeTool err = %v, want errors.Is errToolBoom (original tool error must survive remember failure)", gotErr)
+	}
+}
+
 // contains is a tiny std-lib-free strings.Contains alias kept local to
 // avoid importing strings just for two assertions.
 func contains(s, substr string) bool {
