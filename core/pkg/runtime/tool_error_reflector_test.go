@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/vadimtrunov/watchkeepers/core/pkg/keeperslog"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/llm"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/notebook"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/runtime"
@@ -354,5 +356,373 @@ func TestToolErrorReflector_Reflect_Negative_RememberError(t *testing.T) {
 	err = r.Reflect(context.Background(), reflectorAgentID, "x", "v0", "panic", "boom")
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Reflect err = %v, want errors.Is sentinel remember error", err)
+	}
+}
+
+// recordingAppender is the test-only [keeperslogAppender] stub the
+// M5.6.c reflector tests use to assert composition + ordering of the
+// `lesson_learned` event without standing up a real keeperslog.Writer.
+// Records every Append call's Event into a slice exposed via a getter
+// that returns a defensive copy under a mutex; mirrors the
+// fakeKeepClient pattern in core/pkg/keeperslog/fake_keepclient_test.go.
+type recordingAppender struct {
+	returnID string
+	err      error
+
+	mu    sync.Mutex
+	calls []keeperslog.Event
+}
+
+// Append records the event and returns the configured id / err. A
+// non-nil err short-circuits before recording so production code can
+// rely on the call count == success count when error is nil.
+// Implementation detail: we record on every call (success OR error)
+// because the M5.6.c tests need to assert the appender WAS invoked
+// even on the failure path.
+func (r *recordingAppender) Append(_ context.Context, evt keeperslog.Event) (string, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, evt)
+	r.mu.Unlock()
+	if r.err != nil {
+		return "", r.err
+	}
+	return r.returnID, nil
+}
+
+// recordedCalls returns a defensive copy of the recorded Event slice.
+func (r *recordingAppender) recordedCalls() []keeperslog.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]keeperslog.Event, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
+// callCount returns the total number of Append invocations.
+func (r *recordingAppender) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
+}
+
+// TestToolErrorReflector_Reflect_KeepersLog_HappyPath_EvidenceLogRef
+// (AC1, AC2): Reflect with a configured keepers-log appender composes
+// the `lesson_learned` event, calls Append, and lands the returned
+// event id on the Entry's evidence_log_ref column. The recall asserts
+// the round-trip via the per-agent notebook DB.
+func TestToolErrorReflector_Reflect_KeepersLog_HappyPath_EvidenceLogRef(t *testing.T) {
+	// no t.Parallel: t.Setenv inside freshReflectorDB.
+	db := freshReflectorDB(t)
+	clock := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	app := &recordingAppender{returnID: "kl-event-id-001"}
+
+	r, err := runtime.NewToolErrorReflector(
+		db,
+		runtime.WithEmbedder(llm.NewFakeEmbeddingProvider()),
+		runtime.WithClock(fixedClock(clock)),
+		runtime.WithKeepersLog(app),
+	)
+	if err != nil {
+		t.Fatalf("NewToolErrorReflector: %v", err)
+	}
+
+	if err := r.Reflect(
+		context.Background(),
+		reflectorAgentID,
+		"sandbox.exec",
+		"v1.2.3",
+		"sandbox_timeout",
+		"sandboxed process exceeded wall-clock budget",
+	); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+
+	if app.callCount() != 1 {
+		t.Fatalf("appender call count = %d, want exactly 1", app.callCount())
+	}
+	res := recallAllLessons(t, db, clock.Add(48*time.Hour))
+	if len(res) != 1 {
+		t.Fatalf("Recall result count = %d, want 1", len(res))
+	}
+	if res[0].EvidenceLogRef == nil || *res[0].EvidenceLogRef != "kl-event-id-001" {
+		t.Errorf("EvidenceLogRef = %v, want pointer to %q (the returned event id)", res[0].EvidenceLogRef, "kl-event-id-001")
+	}
+}
+
+// TestToolErrorReflector_Reflect_KeepersLog_HappyPath_PayloadShape
+// (AC6): the appended event carries EventType="lesson_learned" and a
+// Payload map with the five snake_case fields verbatim from the
+// Reflect arguments.
+func TestToolErrorReflector_Reflect_KeepersLog_HappyPath_PayloadShape(t *testing.T) {
+	// no t.Parallel: t.Setenv inside freshReflectorDB.
+	db := freshReflectorDB(t)
+	app := &recordingAppender{returnID: "evt-001"}
+
+	r, err := runtime.NewToolErrorReflector(
+		db,
+		runtime.WithEmbedder(llm.NewFakeEmbeddingProvider()),
+		runtime.WithKeepersLog(app),
+	)
+	if err != nil {
+		t.Fatalf("NewToolErrorReflector: %v", err)
+	}
+
+	if err := r.Reflect(
+		context.Background(),
+		reflectorAgentID,
+		"http.fetch",
+		"v0.2.1",
+		"rpc_error",
+		"upstream returned 502",
+	); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+
+	calls := app.recordedCalls()
+	if len(calls) != 1 {
+		t.Fatalf("recorded calls = %d, want 1", len(calls))
+	}
+	got := calls[0]
+	if got.EventType != "lesson_learned" {
+		t.Errorf("EventType = %q, want %q", got.EventType, "lesson_learned")
+	}
+	payload, ok := got.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("Payload type = %T, want map[string]any", got.Payload)
+	}
+	wantFields := map[string]string{
+		"tool_name":     "http.fetch",
+		"tool_version":  "v0.2.1",
+		"error_class":   "rpc_error",
+		"error_message": "upstream returned 502",
+		"agent_id":      reflectorAgentID,
+	}
+	for k, want := range wantFields {
+		got, ok := payload[k]
+		if !ok {
+			t.Errorf("Payload missing key %q", k)
+			continue
+		}
+		if gotStr, ok := got.(string); !ok || gotStr != want {
+			t.Errorf("Payload[%q] = %v, want %q", k, got, want)
+		}
+	}
+}
+
+// TestToolErrorReflector_Reflect_KeepersLog_NoOptionFallsBackToLogRefFunc
+// (AC4): when no keepers-log option is supplied, Reflect uses
+// logRefFunc() exactly as the M5.6.b regression. No appender call.
+func TestToolErrorReflector_Reflect_KeepersLog_NoOptionFallsBackToLogRefFunc(t *testing.T) {
+	// no t.Parallel: t.Setenv inside freshReflectorDB.
+	db := freshReflectorDB(t)
+
+	r, err := runtime.NewToolErrorReflector(
+		db,
+		runtime.WithEmbedder(llm.NewFakeEmbeddingProvider()),
+		runtime.WithLogRefFunc(func() string { return "fallback-ref-xyz" }),
+	)
+	if err != nil {
+		t.Fatalf("NewToolErrorReflector: %v", err)
+	}
+
+	if err := r.Reflect(
+		context.Background(),
+		reflectorAgentID,
+		"shell.run",
+		"v0",
+		"capability_denied",
+		"missing exec capability",
+	); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+
+	res := recallAllLessons(t, db, time.Now().Add(48*time.Hour))
+	if len(res) != 1 {
+		t.Fatalf("Recall result count = %d, want 1", len(res))
+	}
+	if res[0].EvidenceLogRef == nil || *res[0].EvidenceLogRef != "fallback-ref-xyz" {
+		t.Errorf("EvidenceLogRef = %v, want pointer to %q (logRefFunc fallback)", res[0].EvidenceLogRef, "fallback-ref-xyz")
+	}
+}
+
+// TestToolErrorReflector_Reflect_KeepersLog_Edge_TruncatesLongErrMsg
+// (AC6 truncation): an errMsg longer than the truncation cap is
+// truncated to the cap with the marker; the keepers-log row carries the
+// truncated version while the notebook Entry.Content keeps the full
+// message verbatim.
+func TestToolErrorReflector_Reflect_KeepersLog_Edge_TruncatesLongErrMsg(t *testing.T) {
+	// no t.Parallel: t.Setenv inside freshReflectorDB.
+	db := freshReflectorDB(t)
+	app := &recordingAppender{returnID: "evt-truncated"}
+
+	r, err := runtime.NewToolErrorReflector(
+		db,
+		runtime.WithEmbedder(llm.NewFakeEmbeddingProvider()),
+		runtime.WithKeepersLog(app),
+	)
+	if err != nil {
+		t.Fatalf("NewToolErrorReflector: %v", err)
+	}
+
+	// Build an errMsg comfortably above the 4096 cap.
+	longMsg := strings.Repeat("X", runtime.ErrMessageTruncationCap+512)
+
+	if err := r.Reflect(
+		context.Background(),
+		reflectorAgentID,
+		"sandbox.exec",
+		"v1",
+		"panic",
+		longMsg,
+	); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+
+	calls := app.recordedCalls()
+	if len(calls) != 1 {
+		t.Fatalf("recorded calls = %d, want 1", len(calls))
+	}
+	payload := calls[0].Payload.(map[string]any)
+	gotMsg, _ := payload["error_message"].(string)
+	if !strings.HasSuffix(gotMsg, "…[truncated]") {
+		t.Errorf("error_message does not end in truncation marker; suffix=%q", gotMsg[max0(len(gotMsg)-32):])
+	}
+	wantPrefix := strings.Repeat("X", runtime.ErrMessageTruncationCap)
+	if !strings.HasPrefix(gotMsg, wantPrefix) {
+		t.Errorf("error_message lost the cap-length prefix")
+	}
+	if got := len([]byte(gotMsg)); got != runtime.ErrMessageTruncationCap+len("…[truncated]") {
+		t.Errorf("error_message len = %d bytes, want cap (%d) + marker (%d)",
+			got, runtime.ErrMessageTruncationCap, len("…[truncated]"))
+	}
+
+	// The notebook Entry.Content keeps the full untruncated message.
+	res := recallAllLessons(t, db, time.Now().Add(48*time.Hour))
+	if len(res) != 1 {
+		t.Fatalf("Recall result count = %d, want 1", len(res))
+	}
+	if !strings.Contains(res[0].Content, longMsg) {
+		t.Errorf("Entry.Content lost the full untruncated error message")
+	}
+}
+
+// max0 returns max(0, n) — used by the truncation-suffix slicing
+// without pulling in math.Max for an int.
+func max0(n int) int {
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// TestToolErrorReflector_Reflect_KeepersLog_Edge_CancelledCtx (AC2 +
+// edge): Reflect under a cancelled ctx returns ctx.Err from the
+// embedder without panicking; the original tool-error preservation is
+// the wired runtime's job (covered separately).
+func TestToolErrorReflector_Reflect_KeepersLog_Edge_CancelledCtx(t *testing.T) {
+	// no t.Parallel: t.Setenv inside freshReflectorDB.
+	db := freshReflectorDB(t)
+	app := &recordingAppender{returnID: "should-not-be-used"}
+
+	r, err := runtime.NewToolErrorReflector(
+		db,
+		runtime.WithEmbedder(llm.NewFakeEmbeddingProvider()),
+		runtime.WithKeepersLog(app),
+	)
+	if err != nil {
+		t.Fatalf("NewToolErrorReflector: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = r.Reflect(ctx, reflectorAgentID, "http.fetch", "v0", "rpc_error", "boom")
+	if err == nil {
+		t.Fatal("Reflect under cancelled ctx returned nil; want non-nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Reflect err = %v, want errors.Is context.Canceled", err)
+	}
+}
+
+// TestToolErrorReflector_Reflect_KeepersLog_Negative_AppendFailureFallsBack
+// (AC3): when Append returns a sentinel error, Reflect logs nothing
+// fatal, falls back to logRefFunc() for evidence_log_ref, and STILL
+// calls Remember. Reflect itself returns nil (the keepers-log Append
+// failure is best-effort and does NOT abort the lesson row).
+func TestToolErrorReflector_Reflect_KeepersLog_Negative_AppendFailureFallsBack(t *testing.T) {
+	// no t.Parallel: t.Setenv inside freshReflectorDB.
+	db := freshReflectorDB(t)
+	app := &recordingAppender{err: errors.New("kl: backend down")}
+
+	r, err := runtime.NewToolErrorReflector(
+		db,
+		runtime.WithEmbedder(llm.NewFakeEmbeddingProvider()),
+		runtime.WithKeepersLog(app),
+		runtime.WithLogRefFunc(func() string { return "fallback-on-append-fail" }),
+	)
+	if err != nil {
+		t.Fatalf("NewToolErrorReflector: %v", err)
+	}
+
+	if err := r.Reflect(
+		context.Background(),
+		reflectorAgentID,
+		"sandbox.exec",
+		"v1",
+		"sandbox_timeout",
+		"deadline exceeded",
+	); err != nil {
+		t.Fatalf("Reflect returned err = %v on Append-failure path; want nil (best-effort fallback)", err)
+	}
+
+	if app.callCount() != 1 {
+		t.Errorf("appender call count = %d, want 1 (one attempt before fallback)", app.callCount())
+	}
+	// Remember still happened — the row is in the DB.
+	res := recallAllLessons(t, db, time.Now().Add(48*time.Hour))
+	if len(res) != 1 {
+		t.Fatalf("Recall result count = %d, want 1 (Remember should still run on Append failure)", len(res))
+	}
+	// And evidence_log_ref came from the fallback logRefFunc.
+	if res[0].EvidenceLogRef == nil || *res[0].EvidenceLogRef != "fallback-on-append-fail" {
+		t.Errorf("EvidenceLogRef = %v, want pointer to %q (fallback)", res[0].EvidenceLogRef, "fallback-on-append-fail")
+	}
+}
+
+// TestToolErrorReflector_Reflect_KeepersLog_NilOptionTreatedAsUnset
+// (AC1 nil-option): WithKeepersLog(nil) is a no-op identical to "no
+// option supplied" — the reflector falls back to logRefFunc.
+func TestToolErrorReflector_Reflect_KeepersLog_NilOptionTreatedAsUnset(t *testing.T) {
+	// no t.Parallel: t.Setenv inside freshReflectorDB.
+	db := freshReflectorDB(t)
+
+	r, err := runtime.NewToolErrorReflector(
+		db,
+		runtime.WithEmbedder(llm.NewFakeEmbeddingProvider()),
+		runtime.WithKeepersLog(nil),
+		runtime.WithLogRefFunc(func() string { return "nil-option-fallback" }),
+	)
+	if err != nil {
+		t.Fatalf("NewToolErrorReflector: %v", err)
+	}
+
+	if err := r.Reflect(
+		context.Background(),
+		reflectorAgentID,
+		"shell.run",
+		"v0",
+		"capability_denied",
+		"missing exec capability",
+	); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+
+	res := recallAllLessons(t, db, time.Now().Add(48*time.Hour))
+	if len(res) != 1 {
+		t.Fatalf("Recall result count = %d, want 1", len(res))
+	}
+	if res[0].EvidenceLogRef == nil || *res[0].EvidenceLogRef != "nil-option-fallback" {
+		t.Errorf("EvidenceLogRef = %v, want pointer to %q (nil option = unset)", res[0].EvidenceLogRef, "nil-option-fallback")
 	}
 }
