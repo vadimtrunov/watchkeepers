@@ -72,3 +72,22 @@ export class EnvSecretSource implements SecretSource {
     return process.env[name];
   }
 }
+
+/**
+ * Convenience wrapper that reads the Claude Code API-key secret from
+ * the supplied {@link SecretSource}. Centralised here so the
+ * `ANTHROPIC_API_KEY` literal stays inside this single allowlisted
+ * production-code file (see module doc-comment for the M5.7.a
+ * grep-invariant contract).
+ *
+ * Returns the raw secret value when set to a non-empty string,
+ * otherwise `undefined`. Empty-string env values collapse to
+ * `undefined` here so the boot-path "is the key usable?" check stays
+ * a single `=== undefined` comparison; callers needing to distinguish
+ * unset-vs-empty can drop down to `source.get(...)` directly.
+ */
+export function getAnthropicApiKey(source: SecretSource): string | undefined {
+  const v = source.get("ANTHROPIC_API_KEY");
+  if (v === undefined || v === "") return undefined;
+  return v;
+}
