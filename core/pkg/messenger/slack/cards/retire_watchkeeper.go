@@ -43,6 +43,6 @@ func RenderRetireWatchkeeper(in RetireWatchkeeperCardInput) (blocks []Block, act
 		header,
 		sectionMarkdown(bodyText),
 		actionButtons(actionID),
-		contextLine(fmt.Sprintf("approval_token: `%s`", in.ApprovalToken)),
+		contextLine(fmt.Sprintf("approval_token: `%s`", tokenPrefix(in.ApprovalToken))),
 	}, actionID
 }

@@ -53,7 +53,7 @@ func RenderProposeSpawn(in ProposeSpawnCardInput) (blocks []Block, actionID stri
 		sectionMarkdown(body),
 		sectionMarkdown(systemPromptPreview(in.SystemPrompt)),
 		actionButtons(actionID),
-		contextLine(fmt.Sprintf("approval_token: `%s`", in.ApprovalToken)),
+		contextLine(fmt.Sprintf("approval_token: `%s`", tokenPrefix(in.ApprovalToken))),
 	}
 	return blocks, actionID
 }

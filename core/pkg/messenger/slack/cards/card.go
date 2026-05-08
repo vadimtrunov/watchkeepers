@@ -117,6 +117,14 @@ const (
 // `reason=malformed_action_id` for any value matching this error.
 var ErrInvalidActionID = errors.New("cards: invalid action_id")
 
+// ErrInvalidButtonValue is the typed error [decisionFromButtonValue]
+// returns when the `value` field on the clicked button is not one of
+// the closed-set vocabulary (`approved` | `rejected`). Distinct from
+// [ErrInvalidActionID] so the dispatcher's audit chain can emit a
+// separate `reason=invalid_button_value` and operators can group the
+// two failure modes independently.
+var ErrInvalidButtonValue = errors.New("cards: invalid button value")
+
 // EncodeActionID composes the opaque action_id payload the Approve /
 // Reject buttons carry. Returns the empty string when either input is
 // empty — the caller (always one of this package's renderers) treats
@@ -218,6 +226,20 @@ func actionButtons(actionID string) Block {
 			},
 		},
 	}
+}
+
+// tokenPrefix returns a short operator-visible identifier for an
+// approval token: `tok-<first-6-chars>…`. Renders only the prefix so
+// the full token is never embedded in the card body (M6.3.c bearer
+// token hardening). Tokens shorter than 6 runes are shown in full
+// without the ellipsis.
+func tokenPrefix(token string) string {
+	const prefixLen = 6
+	runes := []rune(token)
+	if len(runes) <= prefixLen {
+		return "tok-" + token
+	}
+	return "tok-" + string(runes[:prefixLen]) + "…"
 }
 
 // contextLine returns a context block with a single mrkdwn line.

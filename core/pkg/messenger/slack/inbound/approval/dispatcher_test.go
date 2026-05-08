@@ -207,6 +207,52 @@ func TestDispatch_RejectHappy(t *testing.T) {
 	}
 }
 
+// TestDispatch_InvalidButtonValue pins AC9: a payload with a valid
+// action_id but an unrecognised button value emits 1 audit event with
+// reason=invalid_button_value (not malformed_action_id); no DAO
+// mutation; no replay.
+func TestDispatch_InvalidButtonValue(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryPendingApprovalDAO(nil)
+	tool := spawn.PendingApprovalToolProposeSpawn
+	token := seedPending(t, dao, tool, `{}`)
+
+	rp := &fakeReplayer{}
+	d, fkc := newDispatcher(t, dao, rp)
+
+	// Valid action_id, bogus button value.
+	actionID := cards.EncodeActionID(tool, token)
+	err := d.DispatchInteraction(context.Background(), inbound.Interaction{
+		Type: "block_actions",
+		Raw:  blockActionsPayloadJSON(actionID, "bogus-value"),
+	})
+	if err == nil {
+		t.Fatal("DispatchInteraction returned nil, want non-nil error")
+	}
+	if !errors.Is(err, cards.ErrInvalidButtonValue) {
+		t.Errorf("err = %v, want ErrInvalidButtonValue", err)
+	}
+
+	rows := fkc.appended()
+	if len(rows) != 1 {
+		t.Fatalf("audit rows = %d, want 1", len(rows))
+	}
+	if rows[0].EventType != "approval_card_action_received" {
+		t.Errorf("event_type = %q, want approval_card_action_received", rows[0].EventType)
+	}
+	if !strings.Contains(string(rows[0].Payload), `"reason":"invalid_button_value"`) {
+		t.Errorf("payload missing invalid_button_value reason: %s", rows[0].Payload)
+	}
+	if strings.Contains(string(rows[0].Payload), `"reason":"malformed_action_id"`) {
+		t.Errorf("payload must NOT contain malformed_action_id reason: %s", rows[0].Payload)
+	}
+
+	if calls := rp.recorded(); len(calls) != 0 {
+		t.Errorf("Replay called %d times, want 0", len(calls))
+	}
+}
+
 // TestDispatch_MalformedActionID pins AC9: 1 audit event with
 // reason=malformed_action_id; no DAO mutation; no replay.
 func TestDispatch_MalformedActionID(t *testing.T) {
@@ -444,10 +490,29 @@ func TestDispatch_PIIDiscipline(t *testing.T) {
 		t.Fatalf("DispatchInteraction: %v", err)
 	}
 
+	// leakFieldNames lists param-struct field names that must NOT appear
+	// in any audit payload as JSON keys. These are the field names from
+	// the M6.2.x request structs that are NOT part of the closed-set
+	// audit vocabulary (tool_name, approval_token, decision, reason,
+	// error_class, interaction_type).
+	leakFieldNames := []string{
+		`"system_prompt"`,
+		`"new_personality"`,
+		`"new_language"`,
+		`"display_name"`,
+		`"agent_id"`,
+	}
+
 	for _, row := range fkc.appended() {
+		payload := string(row.Payload)
 		for _, leak := range leakValues {
-			if strings.Contains(string(row.Payload), leak) {
-				t.Errorf("audit row %q leaked %q in payload: %s", row.EventType, leak, row.Payload)
+			if strings.Contains(payload, leak) {
+				t.Errorf("audit row %q leaked value %q in payload: %s", row.EventType, leak, payload)
+			}
+		}
+		for _, fieldName := range leakFieldNames {
+			if strings.Contains(payload, fieldName) {
+				t.Errorf("audit row %q leaked field name %q in payload: %s", row.EventType, fieldName, payload)
 			}
 		}
 	}

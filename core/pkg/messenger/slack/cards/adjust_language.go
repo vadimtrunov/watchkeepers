@@ -41,6 +41,6 @@ func RenderAdjustLanguage(in AdjustLanguageCardInput) (blocks []Block, actionID 
 		body,
 		diff,
 		actionButtons(actionID),
-		contextLine(fmt.Sprintf("approval_token: `%s`", in.ApprovalToken)),
+		contextLine(fmt.Sprintf("approval_token: `%s`", tokenPrefix(in.ApprovalToken))),
 	}, actionID
 }

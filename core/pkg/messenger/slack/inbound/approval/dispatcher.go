@@ -27,10 +27,11 @@ const (
 // downstream Recall query can group failures without parsing free-form
 // strings.
 const (
-	reasonMalformedActionID = "malformed_action_id"
-	reasonUnknownToken      = "unknown_token"
-	reasonStaleState        = "stale_state"
-	reasonReplayError       = "replay_error"
+	reasonMalformedActionID  = "malformed_action_id"
+	reasonInvalidButtonValue = "invalid_button_value"
+	reasonUnknownToken       = "unknown_token"
+	reasonStaleState         = "stale_state"
+	reasonReplayError        = "replay_error"
 )
 
 // payload key vocabulary on the audit rows. Snake_case, hoisted so
@@ -194,7 +195,11 @@ func (d *Dispatcher) DispatchInteraction(ctx context.Context, p inbound.Interact
 	// a row into a non-terminal state.
 	decision, err := decisionFromButtonValue(action.Value)
 	if err != nil {
-		d.appendActionReceived(ctx, tool, token, action.Value, reasonMalformedActionID)
+		reason := reasonMalformedActionID
+		if errors.Is(err, cards.ErrInvalidButtonValue) {
+			reason = reasonInvalidButtonValue
+		}
+		d.appendActionReceived(ctx, tool, token, action.Value, reason)
 		return fmt.Errorf("approval: decode button value: %w", err)
 	}
 
@@ -248,7 +253,7 @@ func decisionFromButtonValue(v string) (spawn.PendingApprovalDecision, error) {
 	case cards.ButtonValueReject:
 		return spawn.PendingApprovalStateRejected, nil
 	}
-	return "", fmt.Errorf("%w: button value %q", cards.ErrInvalidActionID, v)
+	return "", fmt.Errorf("%w: button value %q", cards.ErrInvalidButtonValue, v)
 }
 
 // appendActionReceived emits the leading `approval_card_action_received`

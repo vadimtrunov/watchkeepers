@@ -46,6 +46,6 @@ func RenderAdjustPersonality(in AdjustPersonalityCardInput) (blocks []Block, act
 		body,
 		diff,
 		actionButtons(actionID),
-		contextLine(fmt.Sprintf("approval_token: `%s`", in.ApprovalToken)),
+		contextLine(fmt.Sprintf("approval_token: `%s`", tokenPrefix(in.ApprovalToken))),
 	}, actionID
 }

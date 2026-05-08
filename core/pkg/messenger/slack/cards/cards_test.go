@@ -116,6 +116,16 @@ func TestRenderProposeSpawn_HappyPath(t *testing.T) {
 			t.Errorf("blocks JSON missing %q\n%s", s, encoded)
 		}
 	}
+	// Context footer must show truncated prefix, not the full raw token.
+	if !strings.Contains(encoded, "tok-tok-ps…") {
+		t.Errorf("context footer missing truncated token prefix\n%s", encoded)
+	}
+	// Full raw token must NOT appear outside the action_id attribute.
+	// Strip action_id occurrences and verify the bare token is gone.
+	withoutActionID := strings.ReplaceAll(encoded, "approval:propose_spawn:tok-ps-1", "")
+	if strings.Contains(withoutActionID, "tok-ps-1") {
+		t.Errorf("full token leaked outside action_id in blocks JSON\n%s", encoded)
+	}
 }
 
 // TestRenderProposeSpawn_GuardEmptyInputs pins the renderer guard: a
