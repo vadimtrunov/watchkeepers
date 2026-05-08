@@ -349,7 +349,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M5.6.a** Add needs_review column + cooling-off/exclusion predicates in notebook.DB
   - [x] **M5.6.b** Auto-reflect on tool error: compose lesson Entry and write via Remember
   - [x] **M5.6.c** Emit lesson_learned to Keeper's Log with evidence_log_ref linkage
-  - [ ] **M5.6.d** Gate auto-injection in BuildTurnRequest by active_after and needs_review
+  - [x] **M5.6.d** Gate auto-injection in BuildTurnRequest by active_after and needs_review
   - [ ] **M5.6.e** Boot-time hot-load check: flag lessons on superseded tool_version as needs_review
   - [ ] **M5.6.f** E2E verification: forced tool error produces lesson + cooling-off injection behavior
 - [ ] **M5.7** **Provider plumbing** — Claude Code credentials flow through the secrets interface (no `ANTHROPIC_API_KEY` references in core); a dummy `FakeProvider` passes the same harness tests as the real provider, proving swap-without-touching-core.

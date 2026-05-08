@@ -2252,3 +2252,24 @@ Phase 4 iteration 1 flagged AC2 ordering as "important": the initial implementat
 - Total wall time from /rdd to merge: pending
 
 ---
+## 2026-05-08 — M5.6.d: Gate auto-injection in BuildTurnRequest by active_after and needs_review
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+Phase 3 executor reported deferred AC deviations (silent-swallow on counter failure vs literal AC4 "log via existing logger"; 5 files vs ≤ 4 target) directly in the build report BEFORE review. Phase 4 reviewer accepted both as defensible nits and converged at iteration 1 — exactly the M5.6.c follow-up suggestion. First observable payoff: deferred-deviation surfacing shortened the review loop from 3 iters (M5.6.b, M5.6.c) to 1 iter.
+
+### What wasted effort
+None — Phase 4 converged at iteration 1.
+
+### Suggested skill changes
+- Extend `references/agent-briefs/executor.md` §"Mode — build" to require deferred AC deviations be promoted to a TASK Progress-log entry as heads-up to Phase 4, documenting this M5.6.d dataset as the first observed payoff from flagging deviations pre-commit.
+
+### Metrics
+- Review iterations: 1
+- PR-fix iterations: 0
+- Operator interventions outside of gates: 0
+- Total wall time from Phase 3 start to Phase 4 convergence: est. 02:15 (executor + 1-iter review)
+
+---
