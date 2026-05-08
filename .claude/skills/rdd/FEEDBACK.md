@@ -2840,3 +2840,43 @@ coexist in M6.3 milestone family, not one cap mis-calibration.
 - First M6.3.x TASK under 1000 LOC soft cap
 
 ---
+
+## 2026-05-08 — M6.3.e: Per-Watchkeeper token spend recording on LLM calls
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 (fixer dispatch required)
+
+### What worked
+
+Comprehensive real-fakes test suite (real `keeperslog.Writer` + fake `LocalKeepClient`) validated
+contract without a runtime. Executor delivered 953 LOC / 3 files (decorator + tests + doc) with
+zero test/lint failures. Pattern: decorator-over-interface-with-narrow-seam is a clean extension
+point for future LLM observability (rate limits, retry counters, latency tracking).
+
+### What wasted effort
+
+Phase 4 iter-1: code-reviewer flagged `llm_call_completed` event_type mismatch — M6.2.a's deployed
+`ReportCost` aggregator expects rows prefixed `llm_turn_cost`, so M6.3.e rows silently dropped. TASK
+pinned literal `llm_call_completed` without grepping M6.2.a's reader for expected schema. Fixer
+renamed to `llm_turn_cost_completed` + added regression test `TestEventType_HasReportCostPrefix`.
+Pattern: when planning a TASK that feeds a previously-deployed consumer (like M6.2.a ReportCost),
+planner should grep consumer's vocab BEFORE pinning TASK literal. Saves one fixer round.
+
+### Suggested skill changes
+
+- Update `references/planner.md`: when a TASK feeds a previously-merged reader/aggregator,
+  grep the consumer's expected schema/vocab and document the contract in the brief. Example:
+  M6.2.a `ReportCost` expects event_type prefix `llm_turn_cost` — planner should name this
+  in the TASK statement and pin the literal in AC.
+- Update `references/code-reviewer.md`: highlight vocabulary alignment as recurring concern
+  when a TASK emits to a deployed aggregator. Recommend explicit prefix-contract regression
+  test (like `TestEventType_HasReportCostPrefix`) when cross-PR boundary exists.
+
+### Metrics
+
+- Review iterations: 1→2 (iter-1: 1 important vocabulary mismatch; iter-2: 0/0/0 converged)
+- Code LOC: 953 (under cap 1000); files 3 (decorator, cost, tests)
+- Fixer commits: 1 (event_type rename + regression pin)
+- Second M6.3.x TASK requiring fixer (M6.3.b was iter-0; M6.3.c iter-0; M6.3.d iter-0; M6.3.e iter-1→2)
+
+---
