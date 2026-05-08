@@ -2440,3 +2440,37 @@ focused loop.
 Document the TS conformance pattern in `references/patterns.md` as a reusable template
 for multi-impl interface testing (with skip-gating precedent).
 
+
+---
+
+## 2026-05-08 — M6.1.a: first M6 PR opens Watchmaster milestone + direct-state-inspection recovery documented
+
+**PR**: pending
+**Phases with incidents**: 0 (final verification conducted via direct-state inspection)
+
+### What worked
+
+M6.1.a is the **first M6 milestone PR**, opening the Watchmaster meta-agent phase. The
+manifest-seed-as-migration pattern (SQL with stable UUIDs, `ON CONFLICT DO NOTHING`, Go
+constant export) proved clean and idempotent. Privilege-boundary phrase contract (exact
+phrase pinned in manifest, asserted in Go tests) is a reusable guard against LLM rewrites
+that soften architectural rules. Authority enum reuse from M5.5.b.c.c.b keeps the system
+contract tight across roles.
+
+**Direct-state-inspection recovery**: executor exited silently during final verification.
+Orchestrator inspected `.omc/state/` to find tests/lint complete, ran them manually to
+confirm, and committed via git CLI. This pattern has now succeeded twice (M5.7.b recovery
++ M6.1.a recovery) and should be promoted from "experimental" to "documented orchestrator
+capability" in future OMC troubleshooting docs.
+
+### Milestone opener
+
+This is the **seventh consecutive iter-1 convergence** (M5.6.d → M5.7.b → M6.1.a). The
+loop has now spanned M5.6 → M5.7 → M6.1 in one continuous session. Autonomous loop
+behavior remains stable across milestone boundaries.
+
+### Suggested skill changes
+
+- Document direct-state-inspection recovery in `.claude/skills/rdd/RECOVERY.md` or
+  equivalent, with evidence-collection checklist (.omc/state contents, test logs,
+  git status).
