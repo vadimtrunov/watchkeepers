@@ -47,6 +47,12 @@ type e2eHarness struct {
 	// the lesson row's evidence_log_ref against the SAME id without
 	// re-reading the recording.
 	keepEventID string
+
+	// invokeErr is the error returned by the first InvokeTool call in
+	// Behaviour1. Behaviour2 asserts errors.Is against this field instead
+	// of re-invoking InvokeTool, keeping the cooling-off row count at
+	// exactly 1 so Behaviour3 can assert == "1" per AC5.
+	invokeErr error
 }
 
 // setupE2EHarness constructs the wired stack the M5.6.f integration test
@@ -186,6 +192,7 @@ func assertBehaviour1AutoReflectionWritesLesson(t *testing.T, h *e2eHarness) {
 		ToolVersion: "v1.2.3",
 		Arguments:   map[string]any{"cmd": "ls"},
 	})
+	h.invokeErr = err
 	if !errors.Is(err, errToolBoom) {
 		t.Fatalf("InvokeTool err = %v, want errors.Is errToolBoom", err)
 	}
@@ -233,26 +240,21 @@ func assertBehaviour1AutoReflectionWritesLesson(t *testing.T, h *e2eHarness) {
 // to the caller is the same sentinel errToolBoom the fakeAgentRuntime
 // injects — the reflector must not replace or wrap it.
 //
-// This subtest calls InvokeTool a second time, intentionally adding a
-// second cooling-off lesson row. Behaviour3 must exclude BOTH cooling-off
-// rows; Behaviour4 therefore starts with two rows cooling-off + one seeded.
+// The err from Behaviour1's InvokeTool is sufficient; re-invoking
+// InvokeTool would add a second cooling-off row and force Behaviour3
+// to assert strictly-positive instead of AC5's literal == "1".
 func assertBehaviour2OriginalToolErrorPreserved(t *testing.T, h *e2eHarness) {
 	t.Helper()
 
-	_, err := h.wired.InvokeTool(h.ctx, h.rtID, runtime.ToolCall{
-		Name:        "sandbox.exec",
-		ToolVersion: "v1.2.3",
-		Arguments:   map[string]any{"cmd": "ls"},
-	})
-	if !errors.Is(err, errToolBoom) {
-		t.Fatalf("errors.Is(err, errToolBoom) = false, got %v (reflector must not mask original error)", err)
+	if !errors.Is(h.invokeErr, errToolBoom) {
+		t.Fatalf("errors.Is(h.invokeErr, errToolBoom) = false, got %v (reflector must not mask original error)", h.invokeErr)
 	}
 }
 
 // assertBehaviour3CoolingOffSuppressesAutoInjection pins AC5: immediately
-// after the forced-error invocations, a BuildTurnRequest call for the same
+// after the forced-error invocation, a BuildTurnRequest call for the same
 // agent does NOT include the just-written lesson in the System block and
-// MetadataKeyCoolingOffFiltered is set to a strictly-positive count.
+// MetadataKeyCoolingOffFiltered equals "1".
 func assertBehaviour3CoolingOffSuppressesAutoInjection(t *testing.T, h *e2eHarness) {
 	t.Helper()
 
@@ -282,24 +284,23 @@ func assertBehaviour3CoolingOffSuppressesAutoInjection(t *testing.T, h *e2eHarne
 			errToolBoom.Error(), req.System)
 	}
 
-	// Diagnostic counter must be present and strictly positive. After
-	// Behaviour1 + Behaviour2 there are two cooling-off rows; we assert
-	// > 0 rather than == "2" so a future change in the number of forced
-	// invocations does not flip this test red.
+	// Diagnostic counter must equal "1" per AC5. Behaviour1 writes exactly
+	// one cooling-off row; Behaviour2 no longer re-invokes InvokeTool so
+	// the count stays at 1.
 	got, ok := req.Metadata[llm.MetadataKeyCoolingOffFiltered]
 	if !ok {
-		t.Fatalf("Metadata[%q] absent; want strictly-positive count",
-			llm.MetadataKeyCoolingOffFiltered)
+		t.Fatalf("Metadata[%q] absent; want %q",
+			llm.MetadataKeyCoolingOffFiltered, "1")
 	}
-	if got == "" || got == "0" {
-		t.Errorf("Metadata[%q] = %q, want strictly-positive count",
-			llm.MetadataKeyCoolingOffFiltered, got)
+	if got != "1" {
+		t.Errorf("Metadata[%q] = %q, want %q",
+			llm.MetadataKeyCoolingOffFiltered, got, "1")
 	}
 }
 
 // assertBehaviour4PostCoolingOffRecall pins AC6: a lesson seeded directly
 // via db.Remember with active_after = t0-1h (past) DOES appear in the next
-// BuildTurnRequest's System block while the two cooling-off lessons remain
+// BuildTurnRequest's System block while the cooling-off lesson remains
 // excluded.
 func assertBehaviour4PostCoolingOffRecall(t *testing.T, h *e2eHarness) {
 	t.Helper()
@@ -322,7 +323,7 @@ func assertBehaviour4PostCoolingOffRecall(t *testing.T, h *e2eHarness) {
 	}
 
 	// BuildTurnRequest runs against three rows:
-	//   - 2 cooling-off (Behaviour1 + Behaviour2) — excluded.
+	//   - 1 cooling-off (Behaviour1) — excluded.
 	//   - 1 past-active-after (just seeded) — INCLUDED.
 	// The query string equals the seed string so the fake embedder
 	// returns an identical vector; the seeded row has distance 0.
