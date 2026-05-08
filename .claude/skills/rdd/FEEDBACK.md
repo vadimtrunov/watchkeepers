@@ -2936,3 +2936,29 @@ None material. One small friction: `docs/lessons/M7.md` had to be created from s
 - Total wall time from /rdd to merge: pending
 
 ---
+
+## 2026-05-09 — M7.1.b: Slack interaction handler: approval action → Keeper's Log event → saga kickoff
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 (one fixer iteration on the dispatcher's manifest_version_id wire-shape defect)
+
+### What worked
+
+The bounded review loop's stale-detection guarantee played out correctly — iter-1 surfaced 2 genuine blockers (random UUID + weak assertion) where the executor's own report was truncated and the orchestrator's verification only confirmed test/lint exit codes, NOT semantic correctness. Reviewer iter-1 caught the wire-shape defect that exit-code verification cannot. Iter-2 confirmed all 5 fixes resolved without regressions; the loop converged in 2 iterations as designed.
+
+### What wasted effort
+
+The original Phase-3 executor's final report was truncated ("Both commands running in parallel. Let me wait for them.") — orchestrator had to verify branch state via direct `git log`/`git diff` and re-run `make lint` + `go test` itself. This added one round of orchestrator work between Phase 3 and Phase 4. The truncation was on the executor's text emission, not its tool calls (commits + tests were already done). The brief did not call out the verification-summary requirement loudly enough to survive a long executor session.
+
+### Suggested skill changes
+
+- In `.claude/skills/rdd/references/agent-briefs/executor.md` §"Mode — build (Phase 3)", explicitly require the final report's commit SHAs + test exit codes be the LAST thing emitted, before any other tool call, mirroring the orchestrator's Hard rule 5 turn-closure invariant. Helps survive long sessions where the agent's text emission gets truncated.
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: pending
+- Operator interventions outside of gates: 1 (operator interrupted between fixer dispatch and reviewer iter-2 to re-login; resumed cleanly via /loop tick continuity)
+- Total wall time from /rdd to merge: pending
+
+---
