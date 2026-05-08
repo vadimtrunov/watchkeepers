@@ -27,11 +27,14 @@ type fakeWriteClient struct {
 	putResp   *keepclient.PutManifestVersionResponse
 	putErr    error
 	updateErr error
+	storeResp *keepclient.StoreResponse
+	storeErr  error
 
 	mu          sync.Mutex
 	getCalls    []string
 	putCalls    []fakeWriteClientPutCall
 	updateCalls []fakeWriteClientUpdateCall
+	storeCalls  []keepclient.StoreRequest
 }
 
 type fakeWriteClientPutCall struct {
@@ -80,6 +83,28 @@ func (f *fakeWriteClient) UpdateWatchkeeperStatus(_ context.Context, id, status 
 	f.updateCalls = append(f.updateCalls, fakeWriteClientUpdateCall{id: id, status: status})
 	f.mu.Unlock()
 	return f.updateErr
+}
+
+func (f *fakeWriteClient) Store(_ context.Context, req keepclient.StoreRequest) (*keepclient.StoreResponse, error) {
+	f.mu.Lock()
+	f.storeCalls = append(f.storeCalls, req)
+	idx := len(f.storeCalls)
+	f.mu.Unlock()
+	if f.storeErr != nil {
+		return nil, f.storeErr
+	}
+	if f.storeResp == nil {
+		return &keepclient.StoreResponse{ID: fmt.Sprintf("chunk-%d", idx)}, nil
+	}
+	return f.storeResp, nil
+}
+
+func (f *fakeWriteClient) recordedStore() []keepclient.StoreRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]keepclient.StoreRequest, len(f.storeCalls))
+	copy(out, f.storeCalls)
+	return out
 }
 
 func (f *fakeWriteClient) recordedUpdate() []fakeWriteClientUpdateCall {
