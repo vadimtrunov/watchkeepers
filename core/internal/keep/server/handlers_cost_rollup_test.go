@@ -232,17 +232,31 @@ func TestCostRollups_EmptyWindow(t *testing.T) {
 	}
 }
 
+// rlsScope is the distinct scope used by TestCostRollups_RLSScoping to
+// simulate a request from a different org. Using "user:<uuid>" keeps the
+// value valid per auth.ValidScope while being visibly distinct from the
+// "org" scope every happy-path test uses.
+const rlsScope = "user:" + otherAgentUUID
+
 // TestCostRollups_RLSScoping covers test-plan case 5: a claim whose
 // scope hides the agent's rows surfaces as zero buckets, not as a
 // 4xx/5xx. The fake runner returns no rows when the staged-query path
 // runs, simulating RLS rejecting every row.
+//
+// The test also pins AC4's RLS contract: the handler MUST forward the
+// request's claim scope to WithScope unchanged, not substitute a
+// default. This is verified by asserting runner.LastClaim.Scope after
+// the handler returns.
 func TestCostRollups_RLSScoping(t *testing.T) {
 	// No rows staged — the fake runner walks the empty scan list and
 	// the handler decodes `{"buckets": []}`. Equivalent to "RLS
 	// filtered every row".
 	runner := stageCostRollupRows(nil)
 	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
-	tok := mustMintToken(t, ti, "org")
+	// Mint with a scope DISTINCT from the happy-path "org" scope so the
+	// assertion below actually pins propagation rather than merely
+	// observing the default.
+	tok := mustMintToken(t, ti, rlsScope)
 
 	q := "agent_id=" + otherAgentUUID +
 		"&from=" + fixedFrom + "&to=" + fixedTo +
@@ -259,6 +273,14 @@ func TestCostRollups_RLSScoping(t *testing.T) {
 	}
 	if len(resp.Buckets) != 0 {
 		t.Errorf("buckets = %+v, want empty (RLS-hidden rows)", resp.Buckets)
+	}
+	// AC4 RLS contract: the handler must propagate the request's claim
+	// scope to WithScope verbatim so the DB can apply row-level security
+	// for the requesting org. A mismatch here means the handler is
+	// substituting a default scope instead of forwarding the token's scope.
+	if runner.LastClaim.Scope != rlsScope {
+		t.Errorf("runner.LastClaim.Scope = %q, want %q (handler must forward request scope to WithScope)",
+			runner.LastClaim.Scope, rlsScope)
 	}
 }
 
