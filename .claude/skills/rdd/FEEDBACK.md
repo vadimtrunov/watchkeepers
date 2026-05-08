@@ -2910,3 +2910,29 @@ brief.
 - Milestone close: M6.3.f is last leaf in M6.3 → closes M6.3 + M6 (12 sub-items total: M6.1.a/b, M6.2.a/b/c/d, M6.3.a/b/c/d/e/f)
 
 ---
+
+## 2026-05-09 — M7.1.a: Saga skeleton: spawn/ package, state machine, saga-state DAO + migration
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+
+Phase 1 auto-decomposition triggered cleanly when planner returned `too large` with 5-item decomposition; Gate 1 auto-yes selected M7.1.a (first leaf) deterministically. Phase 4 converged at iteration 1 — code-reviewer's defect-class grep (audit-emit ordering, PII keys-only, AC4 state-precedence, migration goose syntax) caught nothing because executor anchored to the M6 lessons up front; this is the first iter-1-converge for an M7 task and validates the lesson-driven brief approach.
+
+### What wasted effort
+
+None material. One small friction: `docs/lessons/M7.md` had to be created from scratch; the writer brief recovered correctly via §"File structure (first time only)" but the path of "create file + index row + per-TASK section" is three Edit/Write actions in one commit, which the brief could call out more explicitly.
+
+### Suggested skill changes
+
+- In `references/agent-briefs/writer.md` step 1 of "Actions", split the file-create vs append-only paths into two numbered sub-steps so the agent does not skip the index-row update on a brand-new milestone family.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: pending
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending
+
+---
