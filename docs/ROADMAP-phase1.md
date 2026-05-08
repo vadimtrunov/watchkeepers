@@ -392,7 +392,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [ ] **M6.3** **Operator surface** — Slack DM conversation with designated admins (Manifest drafts rendered as Slack blocks with Approve/Reject actions) and per-Watchkeeper cost tracker (prompt + completion tokens, daily/weekly rollups persisted in Keep).
   - [x] **M6.3.a** Slack inbound webhook scaffolding (Events API + Interactivity) — request signature verification, dispatch skeleton, no business logic
   - [x] **M6.3.b** Manifest-draft approval card renderer + pending-approval DAO — Slack blocks for `propose_spawn` / `adjust_personality` / `adjust_language` / `retire_watchkeeper`, Approve/Reject button handler that resolves approval tokens
-  - [ ] **M6.3.c** DM intent router wiring read-only + manifest-bump tools — parses "what's running?", "propose Coordinator for backend team", etc., dispatches to existing M6.2 toolset
+  - [x] **M6.3.c** DM intent router wiring read-only + manifest-bump tools — parses "what's running?", "propose Coordinator for backend team", etc., dispatches to existing M6.2 toolset
   - [ ] **M6.3.d** promote_to_keep diff-preview renderer for approval cards — extends M6.3.b's renderer with notebook-entry diff
   - [ ] **M6.3.e** Per-Watchkeeper token spend recording on LLM calls — `keepers_log` event emitted per call with prompt + completion tokens, agent_id, model
   - [ ] **M6.3.f** Daily/weekly cost rollups persisted in Keep — aggregation tables / queries, optional CLI/Slack surface
