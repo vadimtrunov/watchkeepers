@@ -35,10 +35,16 @@ import { rememberEntry, type RememberEntryParams } from "./notebookClient.js";
 import { createSlackApp, type SlackAppCreateParams } from "./slackClient.js";
 import type { JsonRpcValue } from "./types.js";
 import {
+  adjustLanguage,
+  adjustPersonality,
   listWatchkeepers,
+  proposeSpawn,
   reportCost,
   reportHealth,
+  type AdjustLanguageParams,
+  type AdjustPersonalityParams,
   type ListWatchkeepersParams,
+  type ProposeSpawnParams,
   type ReportCostParams,
   type ReportHealthParams,
 } from "./watchmasterClient.js";
@@ -314,6 +320,136 @@ const reportHealthHandler: BuiltinHandler = async (rpc, agentID, input) => {
 };
 
 /**
+ * Zod schema for the `propose_spawn` builtin tool input (M6.2.b).
+ * Mirrors the Go-side `proposeSpawnParams` decoder
+ * (`core/pkg/harnessrpc/watchmaster_writes.go`) — snake_case names,
+ * required `agent_id` + `system_prompt` + `approval_token`, optional
+ * `personality` + `language`. `.strict()` rejects unknown wire fields
+ * for the same reason {@link SlackAppCreateInputSchema} does.
+ *
+ * Unlike the M6.1.b `slack_app_create` schema, this schema's
+ * `agent_id` field is part of the wire request shape — it is the
+ * TARGET agent the new manifest_version row will be pinned to (a
+ * freshly-allocated manifest UUID supplied by the caller). The
+ * calling agent's identity is handled out-of-band by the Go-side
+ * claim resolver and the harness ACL gate; the dispatcher does NOT
+ * inject it here.
+ */
+const ProposeSpawnInputSchema = z
+  .object({
+    agent_id: z.string().min(1, "agent_id must be a non-empty string"),
+    system_prompt: z.string().min(1, "system_prompt must be a non-empty string"),
+    personality: z.string().optional(),
+    language: z.string().optional(),
+    approval_token: z.string().min(1, "approval_token must be a non-empty string"),
+  })
+  .strict();
+
+/**
+ * `propose_spawn` built-in (M6.2.b) — forwards to the Go-side
+ * `watchmaster.propose_spawn` method via {@link proposeSpawn}. Throws
+ * {@link BuiltinAgentIDMissing} when the manifest never delivered an
+ * `agentID`; throws {@link BuiltinInvalidInput} on a local zod-shape
+ * mismatch BEFORE any outbound RPC.
+ */
+const proposeSpawnHandler: BuiltinHandler = async (rpc, agentID, input) => {
+  if (agentID === undefined) {
+    throw new BuiltinAgentIDMissing("propose_spawn");
+  }
+  const parsed = ProposeSpawnInputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new BuiltinInvalidInput(
+      "propose_spawn",
+      parsed.error.issues[0]?.message ?? parsed.error.message,
+    );
+  }
+  const params: ProposeSpawnParams = {
+    agent_id: parsed.data.agent_id,
+    system_prompt: parsed.data.system_prompt,
+    ...(parsed.data.personality === undefined ? {} : { personality: parsed.data.personality }),
+    ...(parsed.data.language === undefined ? {} : { language: parsed.data.language }),
+    approval_token: parsed.data.approval_token,
+  };
+  const result = await proposeSpawn(rpc, params);
+  return result as unknown as JsonRpcValue;
+};
+
+/**
+ * Zod schema for the `adjust_personality` builtin tool input (M6.2.b).
+ * Mirrors the Go-side `adjustPersonalityParams` decoder. The
+ * `new_personality` field allows empty strings — the keepclient
+ * preflight only caps the upper bound at 1024 runes; an empty value
+ * round-trips as SQL NULL on the server.
+ */
+const AdjustPersonalityInputSchema = z
+  .object({
+    agent_id: z.string().min(1, "agent_id must be a non-empty string"),
+    new_personality: z.string(),
+    approval_token: z.string().min(1, "approval_token must be a non-empty string"),
+  })
+  .strict();
+
+/**
+ * `adjust_personality` built-in (M6.2.b) — forwards to the Go-side
+ * `watchmaster.adjust_personality` method via {@link adjustPersonality}.
+ */
+const adjustPersonalityHandler: BuiltinHandler = async (rpc, agentID, input) => {
+  if (agentID === undefined) {
+    throw new BuiltinAgentIDMissing("adjust_personality");
+  }
+  const parsed = AdjustPersonalityInputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new BuiltinInvalidInput(
+      "adjust_personality",
+      parsed.error.issues[0]?.message ?? parsed.error.message,
+    );
+  }
+  const params: AdjustPersonalityParams = {
+    agent_id: parsed.data.agent_id,
+    new_personality: parsed.data.new_personality,
+    approval_token: parsed.data.approval_token,
+  };
+  const result = await adjustPersonality(rpc, params);
+  return result as unknown as JsonRpcValue;
+};
+
+/**
+ * Zod schema for the `adjust_language` builtin tool input (M6.2.b).
+ * Mirrors the Go-side `adjustLanguageParams` decoder.
+ */
+const AdjustLanguageInputSchema = z
+  .object({
+    agent_id: z.string().min(1, "agent_id must be a non-empty string"),
+    new_language: z.string(),
+    approval_token: z.string().min(1, "approval_token must be a non-empty string"),
+  })
+  .strict();
+
+/**
+ * `adjust_language` built-in (M6.2.b) — forwards to the Go-side
+ * `watchmaster.adjust_language` method via {@link adjustLanguage}.
+ */
+const adjustLanguageHandler: BuiltinHandler = async (rpc, agentID, input) => {
+  if (agentID === undefined) {
+    throw new BuiltinAgentIDMissing("adjust_language");
+  }
+  const parsed = AdjustLanguageInputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new BuiltinInvalidInput(
+      "adjust_language",
+      parsed.error.issues[0]?.message ?? parsed.error.message,
+    );
+  }
+  const params: AdjustLanguageParams = {
+    agent_id: parsed.data.agent_id,
+    new_language: parsed.data.new_language,
+    approval_token: parsed.data.approval_token,
+  };
+  const result = await adjustLanguage(rpc, params);
+  return result as unknown as JsonRpcValue;
+};
+
+/**
  * Read-only registry of built-in tools. Indexed by the wire-level
  * `tool.name` from `invokeTool.params.tool`. Adding a new built-in is
  * a single-line edit; no dispatch-branch change is needed.
@@ -325,6 +461,9 @@ export const builtinHandlers: ReadonlyMap<string, BuiltinHandler> = new Map<stri
     ["list_watchkeepers", listWatchkeepersHandler],
     ["report_cost", reportCostHandler],
     ["report_health", reportHealthHandler],
+    ["propose_spawn", proposeSpawnHandler],
+    ["adjust_personality", adjustPersonalityHandler],
+    ["adjust_language", adjustLanguageHandler],
   ],
 );
 
