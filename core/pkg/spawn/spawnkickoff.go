@@ -19,6 +19,21 @@ import (
 	"github.com/vadimtrunov/watchkeepers/core/pkg/spawn/saga"
 )
 
+// kickoffLogAppender is the minimal subset of [keeperslog.Writer] the
+// kickoffer consumes — only [keeperslog.Writer.Append]. Re-declared
+// locally (rather than reusing [keepersLogAppender] from slack_app.go)
+// so a reviewer reading spawnkickoff.go in isolation sees the contract
+// without cross-file lookup. The two interfaces are structurally
+// identical; both are satisfied by [*keeperslog.Writer] at the seam.
+type kickoffLogAppender interface {
+	Append(ctx context.Context, evt keeperslog.Event) (string, error)
+}
+
+// Compile-time assertion: every value satisfying the package-internal
+// [keepersLogAppender] also satisfies [kickoffLogAppender]; pins the
+// two seams against future drift.
+var _ kickoffLogAppender = keepersLogAppender(nil)
+
 // EventTypeManifestApprovedForSpawn is the M7.1.b audit event type the
 // kickoffer emits BEFORE inserting the saga row. Hoisted to a constant
 // so the payload-shape regression test pins the wire vocabulary AND so
@@ -57,7 +72,12 @@ const (
 //
 //nolint:revive // AC4 pins the exported name; see comment above.
 type SpawnKickoffer struct {
-	logger  keepersLogAppender
+	// logger is the audit-emit seam. Typed as [kickoffLogAppender]
+	// (declared above in this file) so a reviewer reading the field
+	// sees the 1-method contract inline. The package-internal
+	// [keepersLogAppender] from slack_app.go is structurally
+	// identical; both are satisfied by [*keeperslog.Writer].
+	logger  kickoffLogAppender
 	dao     saga.SpawnSagaDAO
 	runner  *saga.Runner
 	agentID string
@@ -71,10 +91,10 @@ type SpawnKickoffer struct {
 //nolint:revive // AC4 pins the exported `SpawnKickoffer` family name.
 type SpawnKickoffDeps struct {
 	// Logger is the audit-emit seam. Required; a nil Logger is
-	// rejected at construction. Reuses the package-internal
-	// [keepersLogAppender] (defined in slack_app.go) so the kickoffer
-	// never depends on the concrete `*keeperslog.Writer` type.
-	Logger keepersLogAppender
+	// rejected at construction. Typed as [kickoffLogAppender] —
+	// declared in this file — so the contract is visible inline.
+	// [*keeperslog.Writer] satisfies the seam in production.
+	Logger kickoffLogAppender
 
 	// DAO is the saga-persistence seam. Required; a nil DAO is
 	// rejected at construction. Production wiring composes

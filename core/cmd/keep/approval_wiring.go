@@ -6,6 +6,14 @@
 // share one wiring path. The keep service itself does not yet host
 // the inbound handler — the helper exists today so AC4 pins the
 // composition shape and the M7.1.c–.e items have one place to extend.
+//
+// DEFERRED WIRING (intentional): [composeApprovalDispatcher] is NOT
+// yet called from any running binary. The inbound HTTP handler that
+// invokes it lands in M7.1.c–.e (Slack interaction endpoint, OAuth
+// surface, runtime calls). This file ships ahead so the kickoffer +
+// saga DAO composition is pinned + smoke-tested before that handler
+// arrives; reviewers reading this code in isolation should NOT expect
+// to find a `composeApprovalDispatcher(...)` call site in M7.1.b.
 package main
 
 import (
@@ -57,6 +65,12 @@ type ApprovalDispatcherDeps struct {
 // dispatcher's job is dispatch-on-tool-name. Reusing this helper from
 // future Slack-bot wiring guarantees both halves of the contract land
 // together.
+//
+// TODO(M7.1.c-.e): wire this helper into the inbound Slack
+// interaction HTTP handler when that handler lands. Today this
+// helper has no production call site by design — see the file
+// docblock's DEFERRED WIRING note. The smoke test in
+// approval_wiring_test.go pins the composition shape until then.
 func composeApprovalDispatcher(deps ApprovalDispatcherDeps) (*approval.Dispatcher, *spawn.SpawnKickoffer, error) {
 	if deps.KeepClient == nil {
 		return nil, nil, fmt.Errorf("keep: composeApprovalDispatcher: KeepClient must not be nil")

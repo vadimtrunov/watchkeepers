@@ -639,13 +639,18 @@ func TestNew_PanicsOnNilSpawnKickoff(t *testing.T) {
 // happy-path test plan: an approve action on a `propose_spawn` pending
 // row routes to SpawnKickoff (NOT to the existing Replayer); the audit
 // chain is identical to the non-spawn approve path because the kickoff
-// itself owns the `manifest_approved_for_spawn` event emission.
+// itself owns the `manifest_approved_for_spawn` event emission. The
+// seeded `manifest_version_id` round-trips via params_json onto the
+// kickoff call (wire-shape regression — pins the dispatcher to forward
+// the row's real manifest_version_id rather than a fresh random UUID).
 func TestDispatch_ProposeSpawn_ApproveRoutesToKickoff(t *testing.T) {
 	t.Parallel()
 
 	dao := spawn.NewMemoryPendingApprovalDAO(nil)
 	tool := spawn.PendingApprovalToolProposeSpawn
-	token := seedPending(t, dao, tool, `{"agent_id":"a-1"}`)
+	seededMVID := uuid.New()
+	params := `{"agent_id":"a-1","manifest_version_id":"` + seededMVID.String() + `"}`
+	token := seedPending(t, dao, tool, params)
 
 	rp := &fakeReplayer{}
 	sk := &fakeSpawnKickoff{}
@@ -670,8 +675,13 @@ func TestDispatch_ProposeSpawn_ApproveRoutesToKickoff(t *testing.T) {
 		if calls[0].SagaID == uuid.Nil {
 			t.Errorf("SpawnKickoff sagaID = nil, want a non-zero uuid")
 		}
-		if calls[0].ManifestVersionID == uuid.Nil {
-			t.Errorf("SpawnKickoff manifestVersionID = nil, want a non-zero uuid")
+		// AC2 / test-plan happy-path: the dispatcher MUST forward the
+		// row's real manifest_version_id, not a fresh random UUID. A
+		// `!= uuid.Nil` check would pass for any non-zero UUID and
+		// hide the regression; pin the equality.
+		if calls[0].ManifestVersionID != seededMVID {
+			t.Errorf("SpawnKickoff manifestVersionID = %q, want %q (seeded via params_json)",
+				calls[0].ManifestVersionID, seededMVID)
 		}
 	}
 	if calls := rp.recorded(); len(calls) != 0 {
@@ -779,7 +789,8 @@ func TestDispatch_ProposeSpawn_KickoffError(t *testing.T) {
 
 	dao := spawn.NewMemoryPendingApprovalDAO(nil)
 	tool := spawn.PendingApprovalToolProposeSpawn
-	token := seedPending(t, dao, tool, `{"agent_id":"a-1"}`)
+	mvID := uuid.New().String()
+	token := seedPending(t, dao, tool, `{"agent_id":"a-1","manifest_version_id":"`+mvID+`"}`)
 
 	kickErr := errors.New("kickoff exploded")
 	rp := &fakeReplayer{}
@@ -814,6 +825,55 @@ func TestDispatch_ProposeSpawn_KickoffError(t *testing.T) {
 	}
 	if strings.Contains(string(failedRow.Payload), "kickoff exploded") {
 		t.Errorf("failed payload leaked error VALUE: %s", failedRow.Payload)
+	}
+}
+
+// TestDispatch_ProposeSpawn_MissingManifestVersionID pins the
+// negative-side guard for the M7.1.b dispatcher fix: a propose_spawn
+// pending row whose params_json omits `manifest_version_id` MUST NOT
+// reach SpawnKickoff. The dispatcher surfaces
+// [approval.ErrMissingManifestVersionID] on the audit chain via
+// `approval_replay_failed` so the producer-side gap (M6.3.c proposer
+// wiring) shows up as an audit signal rather than an orphan saga.
+func TestDispatch_ProposeSpawn_MissingManifestVersionID(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryPendingApprovalDAO(nil)
+	tool := spawn.PendingApprovalToolProposeSpawn
+	// params_json without `manifest_version_id` — the producer (M6.3.c
+	// proposer) is expected to populate it; this row simulates a
+	// mis-wired producer.
+	token := seedPending(t, dao, tool, `{"agent_id":"a-1"}`)
+
+	rp := &fakeReplayer{}
+	sk := &fakeSpawnKickoff{}
+	d, fkc := newDispatcherWithKickoff(t, dao, rp, sk)
+
+	actionID := cards.EncodeActionID(tool, token)
+	err := d.DispatchInteraction(context.Background(), inbound.Interaction{
+		Type: "block_actions",
+		Raw:  blockActionsPayloadJSON(actionID, cards.ButtonValueApprove),
+	})
+	if err == nil {
+		t.Fatal("DispatchInteraction returned nil, want non-nil error")
+	}
+	if !errors.Is(err, approval.ErrMissingManifestVersionID) {
+		t.Errorf("err = %v, want chain wrapping ErrMissingManifestVersionID", err)
+	}
+
+	if calls := sk.recorded(); len(calls) != 0 {
+		t.Errorf("SpawnKickoff calls = %d, want 0 (missing manifest_version_id must short-circuit)", len(calls))
+	}
+	if calls := rp.recorded(); len(calls) != 0 {
+		t.Errorf("Replay calls = %d, want 0", len(calls))
+	}
+	wantEvents := []string{
+		"approval_card_action_received",
+		"approval_resolved",
+		"approval_replay_failed",
+	}
+	if got := fkc.eventTypes(); !equalStringSlice(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
 	}
 }
 

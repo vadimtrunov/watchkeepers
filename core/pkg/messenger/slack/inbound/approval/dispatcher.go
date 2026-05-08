@@ -53,6 +53,14 @@ const (
 // silently and emits no audit row for foreign types.
 const interactionTypeBlockActions = "block_actions"
 
+// ErrMissingManifestVersionID is returned by the propose_spawn
+// dispatch branch when the params_json snapshot does not carry a
+// `manifest_version_id` field. The DM-side proposer (M6.3.c) is the
+// responsible producer; the M7.1.b dispatcher is the consumer. A
+// missing field surfaces as `approval_replay_failed` with this
+// sentinel's classified type — it is NEVER swallowed silently.
+var ErrMissingManifestVersionID = errors.New("approval: params_json missing manifest_version_id")
+
 // AuditAppender is the minimal subset of [keeperslog.Writer] the
 // dispatcher consumes — only Append. Defined locally so unit tests
 // can substitute a tiny fake. Mirrors the inbound-handler
@@ -244,7 +252,12 @@ func (d *Dispatcher) DispatchInteraction(ctx context.Context, p inbound.Interact
 	// the existing replayer path. The reject branch (handled above)
 	// is unchanged.
 	if row.ToolName == spawn.PendingApprovalToolProposeSpawn {
-		if err := d.spawnKickoff.Kickoff(ctx, uuid.New(), uuid.New(), token); err != nil {
+		manifestVersionID, err := manifestVersionIDFromParams(row.ParamsJSON)
+		if err != nil {
+			d.appendReplayFailed(ctx, tool, token, err)
+			return fmt.Errorf("approval: extract manifest_version_id: %w", err)
+		}
+		if err := d.spawnKickoff.Kickoff(ctx, uuid.New(), manifestVersionID, token); err != nil {
 			// Mirrors the replayer-error policy: emit the failed
 			// audit row and surface the error; do NOT roll back the
 			// DAO transition.
@@ -380,6 +393,38 @@ func (d *Dispatcher) appendReplayFailed(ctx context.Context, tool, token string,
 			payloadKeyErrorClass:    classifyError(err),
 		},
 	})
+}
+
+// manifestVersionIDFromParams extracts the `manifest_version_id` field
+// from a `propose_spawn` params_json snapshot. The propose_spawn flow's
+// upstream (M6.3.c DM proposer wiring, currently a seam — see
+// `dm.ProposeSpawnInvoker`) is responsible for embedding the
+// freshly-allocated manifest_version_id under that key when it builds
+// the ParamsJSON snapshot. The dispatcher reads it back here on
+// approval so the kickoffer's audit row + saga-state row reference the
+// real manifest, not a fresh random UUID.
+//
+// TODO(M6.3.c+): once a production [dm.ProposeSpawnInvoker] is wired,
+// pin a contract test on the producer side that ParamsJSON carries
+// `manifest_version_id`. M7.1.b ships the consumer side; the producer
+// side is a future TASK. Until then the dispatcher returns a typed
+// error via [ErrMissingManifestVersionID] which the existing
+// approval_replay_failed audit row surfaces.
+func manifestVersionIDFromParams(paramsJSON json.RawMessage) (uuid.UUID, error) {
+	var snapshot struct {
+		ManifestVersionID string `json:"manifest_version_id"`
+	}
+	if err := json.Unmarshal(paramsJSON, &snapshot); err != nil {
+		return uuid.Nil, fmt.Errorf("approval: decode params_json: %w", err)
+	}
+	if snapshot.ManifestVersionID == "" {
+		return uuid.Nil, ErrMissingManifestVersionID
+	}
+	mvID, err := uuid.Parse(snapshot.ManifestVersionID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("approval: parse manifest_version_id: %w", err)
+	}
+	return mvID, nil
 }
 
 // classifyError extracts a stable string suitable for the

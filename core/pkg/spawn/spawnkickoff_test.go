@@ -495,18 +495,23 @@ func TestSpawnKickoff_TokenPrefixShortToken(t *testing.T) {
 // ────────────────────────────────────────────────────────────────────────
 
 // TestEventTypeManifestApprovedForSpawn_NoPrefixCollision pins the
-// closed-set vocabulary discipline: the kickoff event_type must NOT
-// collide with the `llm_turn_cost_*` family established in M6.3.e or
-// the `saga_*` family established in M7.1.a — a future edit that
-// accidentally renamed it would silently feed bogus rows into one of
-// those aggregators.
+// closed-set vocabulary discipline: the kickoff event_type must equal
+// exactly `manifest_approved_for_spawn` (a typo like
+// `manifest_approved_for_spam` would slip past a `HasPrefix` check)
+// AND must NOT collide with the `llm_turn_cost_*` family established
+// in M6.3.e or the `saga_*` family established in M7.1.a — a future
+// edit that accidentally renamed it would silently feed bogus rows
+// into one of those aggregators.
 func TestEventTypeManifestApprovedForSpawn_NoPrefixCollision(t *testing.T) {
 	t.Parallel()
 
 	et := spawn.EventTypeManifestApprovedForSpawn
-	if !strings.HasPrefix(et, "manifest_approved_for_spawn") {
-		t.Errorf("event_type %q does not start with manifest_approved_for_spawn", et)
+	const want = "manifest_approved_for_spawn"
+	if et != want {
+		t.Errorf("event_type = %q, want exact %q", et, want)
 	}
+	// Defense-in-depth: even if the constant is renamed, it must not
+	// alias into a sibling event-type family the aggregators consume.
 	if strings.HasPrefix(et, "llm_turn_cost") {
 		t.Errorf("event_type %q has forbidden llm_turn_cost prefix (M6.3.e)", et)
 	}
