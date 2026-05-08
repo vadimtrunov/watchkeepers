@@ -2582,3 +2582,44 @@ cadence; 14 PRs landed in single autonomous loop session — consider documentin
 session-checkpoint protocol for multi-item momentum runs.
 
 ---
+
+## 2026-05-08 — M6.2.c: iter-0 convergence from tight TASKs + recent precedent
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+
+M6.2.c achieved iter-0 convergence (13th consecutive iter-0 or iter-1 convergence streak).
+The executor correctly mirrored M6.2.b's gate pattern for a write tool, but diverged
+precisely where required (no pre-read, separate audit-event helpers). The reviewer accepted
+all four pre-flagged design choices (no pre-read shape, separate error mappers, empty
+success envelope, incremental WatchmasterWriteClient seam) without rework. When planner
+correctly classifies "fits" + executor mirrors recent precedent + reviewer has explicit
+AC list, fixer dispatch becomes rare. TASK scope was surgical (single tool, one new file
+per layer) and dependencies (M6.2.a, M6.2.b) were merged at the moment of planning.
+
+### What wasted effort
+
+None. Zero iterations required.
+
+### Suggested skill changes
+
+- Track iter-0/1 convergence as predictor of when to reconsider auto-yes thresholds or
+  shrink bounded-loop budgets. Thirteen consecutive iter-0/1 convergences suggest the
+  planner-executor-reviewer alignment is working well for scoped TASKs inheriting recent
+  patterns. Consider documenting the "tight TASK + recent precedent → iter-0" pattern
+  explicitly so future milestone families can reuse it.
+- LOC soft-cap exceeded (1223 / 1000) but Hard rule 6 ("both caps or reject") not triggered
+  (files within ≤20). AC7 mandates audit-order regression which costs LOC. Future TASKs
+  with regression coverage should pre-budget LOC accordingly.
+
+### Metrics
+
+- Review iterations: 0 (Phase 4 iter 0, fully clean diff)
+- Consecutive iter-0/1 convergence streak: 13 (M5.6.d → M6.2.c)
+- PRs in session: 15 (#90–#102), all iter-0 or iter-1
+- Design choices pre-flagged: 4/4 accepted (no rework)
+- Fixer dispatch: 0
+
+---
