@@ -23,12 +23,12 @@ const defaultCoolingOff = 24 * time.Hour
 // fake / real embedder folds both into one vector.
 const reflectionEmbedQuerySeparator = "\n"
 
-// Embedder is the minimal subset of the [Embedder]
-// surface the [ToolErrorReflector] consumes — only the Embed method.
-// Defined as a local interface in this package so the runtime package
-// does NOT import the llm package (which itself imports runtime,
-// which would create a cycle). The concrete `Embedder`
-// implementations (`*llm.FakeEmbeddingProvider`, the production
+// Embedder is the minimal subset of the llm.EmbeddingProvider surface
+// the [ToolErrorReflector] consumes — only the Embed method. Defined
+// as a local interface in this package so the runtime package does
+// NOT import the llm package (which itself imports runtime, which
+// would create a cycle). The concrete llm.EmbeddingProvider
+// implementations (*llm.FakeEmbeddingProvider, the production
 // HTTP-backed provider in M5.5.c.d.b) satisfy this interface
 // structurally; tests assert this via a compile-time assertion in
 // `tool_error_reflector_test.go`. Mirrors the keeperslog.LocalKeepClient
