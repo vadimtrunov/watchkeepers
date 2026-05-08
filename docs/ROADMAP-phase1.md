@@ -351,6 +351,8 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M5.6.c** Emit lesson_learned to Keeper's Log with evidence_log_ref linkage
   - [x] **M5.6.d** Gate auto-injection in BuildTurnRequest by active_after and needs_review
   - [ ] **M5.6.e** Boot-time hot-load check: flag lessons on superseded tool_version as needs_review
+    - [ ] **M5.6.e.a** Project per-tool Version through manifest loader into runtime.Manifest (typed ToolEntry); migrate ACL/Toolset consumers via Names() helper
+    - [ ] **M5.6.e.b** Boot-time superseded-lesson scan in notebook supervisor: flag lessons whose tool_version != current manifest version via MarkNeedsReview
   - [ ] **M5.6.f** E2E verification: forced tool error produces lesson + cooling-off injection behavior
 - [ ] **M5.7** **Provider plumbing** — Claude Code credentials flow through the secrets interface (no `ANTHROPIC_API_KEY` references in core); a dummy `FakeProvider` passes the same harness tests as the real provider, proving swap-without-touching-core.
 
