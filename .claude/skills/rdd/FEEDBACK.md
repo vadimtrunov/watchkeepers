@@ -2804,3 +2804,39 @@ further.
 - Code LOC: 1729 (over soft cap 1000); files 7 ≤ target 12 (file count OK)
 - Consecutive structurally-novel iter-1 cycles: 2 (M6.3.b, M6.3.c both had 1 fixer round)
 
+
+---
+
+## 2026-05-08 — M6.3.d: promote_to_keep diff-preview renderer for approval cards
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: none
+
+### What worked
+
+Tightly-scoped pure-renderer extension (no I/O, mirrors propose_spawn shape) converged at iter-0.
+M6.3.d brief explicitly named `propose_spawn.go` as precedent; executor delivered 4 files / 573 LOC
+well under planner estimate (250-450). Code-reviewer Phase 4 produced 0 blocker, 0 important, 4 nit.
+Pattern: when planner can name a recent merged precedent and TASK is "extend X with Y for tool Z",
+convergence is clean. Executor stayed tight, no fixer dispatch needed.
+
+### What wasted effort
+
+None (pure-extension TASKs with focused fixture tables avoid the LOC overage pattern M6.3.a/b/c
+exhibited). M6.3.d provides data point: "scaffolding" TASKs (comprehensive negative-branch tests +
+audit-order regressions) → 1700+ LOC; "renderer extension" TASKs → 500–700 LOC. Two LOC profiles
+coexist in M6.3 milestone family, not one cap mis-calibration.
+
+### Suggested skill changes
+
+- (optional) Consider documenting in `references/planner.md` that "extension per precedent" TASKs
+  trend conservative LOC estimates (2x margin is good buffer). No action if this is already implicit.
+
+### Metrics
+
+- Review iterations: 0 (converged at Phase 4 iter 0, 0/0/0)
+- Code LOC: 573 (under soft cap 1000); files 4 ≤ target 4 (exact fit)
+- Wall time Phase 3→4: efficient
+- First M6.3.x TASK under 1000 LOC soft cap
+
+---
