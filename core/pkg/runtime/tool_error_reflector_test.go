@@ -619,10 +619,15 @@ func max0(n int) int {
 // edge): Reflect under a cancelled ctx returns ctx.Err from the
 // embedder without panicking; the original tool-error preservation is
 // the wired runtime's job (covered separately).
+//
+// After the AC2 reorder, Append runs BEFORE Embed. The recordingAppender
+// stub ignores ctx and always succeeds (Shape A — simpler determinism),
+// so appender.callCount == 1 even when ctx is already cancelled. The
+// Embed then fails with context.Canceled, which Reflect surfaces.
 func TestToolErrorReflector_Reflect_KeepersLog_Edge_CancelledCtx(t *testing.T) {
 	// no t.Parallel: t.Setenv inside freshReflectorDB.
 	db := freshReflectorDB(t)
-	app := &recordingAppender{returnID: "should-not-be-used"}
+	app := &recordingAppender{returnID: "kl-event-id"}
 
 	r, err := runtime.NewToolErrorReflector(
 		db,
@@ -642,6 +647,11 @@ func TestToolErrorReflector_Reflect_KeepersLog_Edge_CancelledCtx(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("Reflect err = %v, want errors.Is context.Canceled", err)
+	}
+	// Append ran before Embed: the keepers_log row was written despite
+	// the ctx cancellation that subsequently caused Embed to fail.
+	if app.callCount() != 1 {
+		t.Errorf("appender call count = %d, want 1 (Append runs before Embed per AC2)", app.callCount())
 	}
 }
 

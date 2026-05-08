@@ -321,12 +321,10 @@ func (r *ToolErrorReflector) Reflect(ctx context.Context, agentID, toolName, too
 	subject := composeSubject(toolName, errClass)
 	content := composeContent(toolName, toolVersion, errClass, errMsg)
 
-	embedQuery := subject + reflectionEmbedQuerySeparator + content
-	vec, err := r.embedder.Embed(ctx, embedQuery)
-	if err != nil {
-		return fmt.Errorf("runtime: reflector embed: %w", err)
-	}
-
+	// AC2 ordering: Append keepers_log row BEFORE Embed so that a failed
+	// Embed (e.g. cancelled ctx, embedder down) does not prevent the
+	// lesson_learned event from being written — the exact failure class
+	// the seam exists to capture.
 	evidenceLogRef := r.logRefFunc()
 	if r.keepersLog != nil {
 		evt := composeKeepersLogEvent(agentID, toolName, toolVersion, errClass, errMsg)
@@ -344,6 +342,12 @@ func (r *ToolErrorReflector) Reflect(ctx context.Context, agentID, toolName, too
 		} else {
 			evidenceLogRef = eventID
 		}
+	}
+
+	embedQuery := subject + reflectionEmbedQuerySeparator + content
+	vec, err := r.embedder.Embed(ctx, embedQuery)
+	if err != nil {
+		return fmt.Errorf("runtime: reflector embed: %w", err)
 	}
 
 	var logRefPtr *string
