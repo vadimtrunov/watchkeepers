@@ -378,8 +378,8 @@ func TestClient_UpdateWatchkeeperRetired_HappyPath(t *testing.T) {
 		if got.Status != "retired" {
 			t.Errorf("Status = %q, want retired", got.Status)
 		}
-		if got.ArchiveURI != wantURI {
-			t.Errorf("ArchiveURI = %q, want %q", got.ArchiveURI, wantURI)
+		if got.ArchiveURI == nil || *got.ArchiveURI != wantURI {
+			t.Errorf("ArchiveURI = %v, want %q", got.ArchiveURI, wantURI)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))

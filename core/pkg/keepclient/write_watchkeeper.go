@@ -70,12 +70,19 @@ func (c *Client) InsertWatchkeeper(ctx context.Context, req InsertWatchkeeperReq
 //     the M7.2.b NotebookArchive saga step. The server rejects an
 //     archive_uri on the pending→active transition pre-tx.
 //
-// `archive_uri` is `omitempty` so the existing pending→active call sites
-// continue to send the same wire-shape they always have; only the
-// retire-with-archive path materialises the new field on the wire.
+// Iter-2 critic finding (Major): `ArchiveURI` is `*string` so the
+// client mints the on-wire shape SYMMETRIC with the server's
+// `optionalArchiveURI.Present` bit. A plain `string` + `omitempty`
+// folded "absent" and "intentionally empty" into the same encoded form,
+// which silently took the no-archive SQL branch on the server when a
+// future caller forgot to pre-validate non-empty before construction.
+// With a pointer-typed field a caller who fails to set the field at
+// all sends the absent shape (legacy M6.2.c-compatible); a caller
+// who sets `&""` sends the present-but-empty shape and the server's
+// non-blank gate rejects it before any side effect.
 type updateWatchkeeperStatusRequest struct {
-	Status     string `json:"status"`
-	ArchiveURI string `json:"archive_uri,omitempty"`
+	Status     string  `json:"status"`
+	ArchiveURI *string `json:"archive_uri,omitempty"`
 }
 
 // UpdateWatchkeeperStatus calls PATCH /v1/watchkeepers/{id}/status. Allowed
@@ -107,19 +114,25 @@ func (c *Client) UpdateWatchkeeperStatus(ctx context.Context, id, status string)
 }
 
 // UpdateWatchkeeperRetired calls PATCH /v1/watchkeepers/{id}/status with
-// `status:"retired"` and the supplied non-blank archive_uri. Empty id,
-// empty archive_uri, OR whitespace-only archive_uri return
-// [ErrInvalidRequest] synchronously without a network round-trip — the
-// saga step (M7.2.c MarkRetired) is the sole production caller and
-// pre-validates the URI shape (RFC 3986 with a non-empty scheme; see
-// M7.2.b ErrInvalidArchiveURI), so a wiring bug upstream surfaces as
-// ErrInvalidRequest at this seam rather than burning a server
-// round-trip. The whitespace check mirrors the server-side
-// `parseUpdateWatchkeeperStatusRequest` defense-in-depth gate (iter-1
-// codex finding Minor): without it the docblock's "fail-fast on
-// obvious wiring bugs" promise was weaker than the server's, so a
-// `"   "` value would round-trip and surface as a 400 instead of an
-// `ErrInvalidRequest` at the closest layer to the bug.
+// `status:"retired"` and the supplied non-blank, RFC-3986-shaped
+// archive_uri. Empty id, empty archive_uri, whitespace-only
+// archive_uri, OR a value that does not parse as an absolute URI
+// (i.e. lacks a non-empty scheme — `"garbage"` and `"../../tmp"` both
+// fail this gate) return [ErrInvalidRequest] synchronously without a
+// network round-trip.
+//
+// The saga step (M7.2.c MarkRetired) is the sole production caller
+// and pre-validates the URI shape upstream via the M7.2.b
+// ErrInvalidArchiveURI gate. The whitespace check mirrors the
+// server-side `parseUpdateWatchkeeperStatusRequest` defense-in-depth
+// gate (iter-1 codex finding Minor); the absolute-URI check at the
+// seam is iter-2 codex finding (Major): the wire contract documents
+// `archive_uri` as an RFC 3986 URI with a non-empty scheme, but
+// neither this method nor the server enforced that — strings like
+// `"garbage"` would round-trip onto the column for any caller that
+// bypassed the saga path. The pre-flight scheme check fails fast at
+// the seam closest to the bug; the server enforces the same shape at
+// the HTTP boundary as defense-in-depth.
 //
 // Server-side error mapping is identical to [Client.UpdateWatchkeeperStatus]:
 // the active→retired transition rule applies and any other current row
@@ -146,7 +159,15 @@ func (c *Client) UpdateWatchkeeperRetired(ctx context.Context, id, archiveURI st
 	if strings.TrimSpace(archiveURI) == "" {
 		return ErrInvalidRequest
 	}
-	body := updateWatchkeeperStatusRequest{Status: "retired", ArchiveURI: archiveURI}
+	// RFC 3986 absolute-URI shape: a parse error OR a missing scheme
+	// rejects values like "garbage" or "../../tmp" that
+	// [net/url.Parse] otherwise tolerates as path-only URIs (iter-2
+	// codex finding Major).
+	parsed, err := url.Parse(archiveURI)
+	if err != nil || !parsed.IsAbs() {
+		return ErrInvalidRequest
+	}
+	body := updateWatchkeeperStatusRequest{Status: "retired", ArchiveURI: &archiveURI}
 	// PathEscape so caller-supplied ids with `/` or `?` cannot smuggle
 	// extra path segments. The server validates UUID shape before any DB
 	// work, so an escaped non-UUID still surfaces as a 4xx not a 5xx.

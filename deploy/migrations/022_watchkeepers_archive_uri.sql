@@ -41,12 +41,29 @@
 -- tool before the M7.2 saga family landed and through any future
 -- compensator path that retires without an archive (M7.3 scope).
 --
+-- DATA INTEGRITY: a CHECK constraint pins `archive_uri` to retired
+-- rows only — a non-NULL `archive_uri` paired with `status` ∈ {pending,
+-- active} is a wiring bug rejected at the storage layer. Iter-2 codex
+-- finding (Minor): the original migration relied on every handler
+-- branch being correct; with the CHECK constraint a stale non-NULL
+-- value cannot survive a state-machine-violating direct DB write
+-- either. The constraint also covers the legitimate "M6.2.c retired
+-- with NULL archive" path (NULL OR status='retired' is satisfied by
+-- both) so the M6.2.c synchronous tool stays wire-compatible.
+--
 -- See `docs/ROADMAP-phase1.md` §M7 → M7.2 → M7.2.c.
 
 -- +goose Up
 ALTER TABLE watchkeeper.watchkeeper
-ADD COLUMN archive_uri text NULL;
+ADD COLUMN IF NOT EXISTS archive_uri text NULL;
+
+ALTER TABLE watchkeeper.watchkeeper
+ADD CONSTRAINT watchkeeper_archive_uri_retired_only
+CHECK (archive_uri IS null OR status = 'retired');
 
 -- +goose Down
+ALTER TABLE watchkeeper.watchkeeper
+DROP CONSTRAINT IF EXISTS watchkeeper_archive_uri_retired_only;
+
 ALTER TABLE watchkeeper.watchkeeper
 DROP COLUMN IF EXISTS archive_uri;
