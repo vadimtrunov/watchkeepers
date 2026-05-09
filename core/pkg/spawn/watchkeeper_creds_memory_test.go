@@ -1,10 +1,12 @@
 package spawn_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -72,6 +74,106 @@ func TestMemoryWatchkeeperSlackAppCredsDAO_Put_DuplicateID_ReturnsErrCredsAlread
 	err := dao.Put(context.Background(), wkID, creds)
 	if !errors.Is(err, spawn.ErrCredsAlreadyStored) {
 		t.Fatalf("Put #2 err = %v, want ErrCredsAlreadyStored", err)
+	}
+}
+
+// TestMemoryWatchkeeperSlackAppCredsDAO_PutInstallTokens_RoundTrip pins
+// the M7.1.c.b.b extension: PutInstallTokens stores the supplied
+// ciphertext bundle keyed by watchkeeperID and the test-facing
+// GetInstallTokens accessor returns the bytes verbatim. The DAO does
+// NOT decrypt — it treats the byte slices as opaque (the encryption
+// layer lives one level up in the OAuthInstall step).
+func TestMemoryWatchkeeperSlackAppCredsDAO_PutInstallTokens_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	wkID := uuid.New()
+
+	// Pre-seed the row via Put so the install-tokens write has a row
+	// to update (mirrors the saga ordering: CreateApp creates the row,
+	// OAuthInstall extends it).
+	if err := dao.Put(context.Background(), wkID, newTestCreds()); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	wantBot := []byte{0x01, 0x02, 0x03}
+	wantUser := []byte{0x04, 0x05}
+	wantRefresh := []byte{0x06}
+	wantExpiry := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if err := dao.PutInstallTokens(
+		context.Background(), wkID, wantBot, wantUser, wantRefresh, wantExpiry,
+	); err != nil {
+		t.Fatalf("PutInstallTokens: %v", err)
+	}
+
+	gotBot, gotUser, gotRefresh, gotExpiry, gotInstalled, ok := dao.GetInstallTokens(wkID)
+	if !ok {
+		t.Fatalf("GetInstallTokens: ok = false, want true")
+	}
+	if !bytes.Equal(gotBot, wantBot) {
+		t.Errorf("botCT = %v, want %v", gotBot, wantBot)
+	}
+	if !bytes.Equal(gotUser, wantUser) {
+		t.Errorf("userCT = %v, want %v", gotUser, wantUser)
+	}
+	if !bytes.Equal(gotRefresh, wantRefresh) {
+		t.Errorf("refreshCT = %v, want %v", gotRefresh, wantRefresh)
+	}
+	if !gotExpiry.Equal(wantExpiry) {
+		t.Errorf("expiresAt = %v, want %v", gotExpiry, wantExpiry)
+	}
+	if gotInstalled.IsZero() {
+		t.Error("installedAt is zero; want non-zero (DAO stamps on write)")
+	}
+}
+
+// TestMemoryWatchkeeperSlackAppCredsDAO_PutInstallTokens_NoRow returns
+// [ErrCredsNotFound] — the install step's contract requires a prior
+// Put from the M7.1.c.a CreateAppStep before install tokens land.
+func TestMemoryWatchkeeperSlackAppCredsDAO_PutInstallTokens_NoRow(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	err := dao.PutInstallTokens(
+		context.Background(),
+		uuid.New(),
+		[]byte("bot"), []byte("user"), nil, time.Time{},
+	)
+	if !errors.Is(err, spawn.ErrCredsNotFound) {
+		t.Fatalf("PutInstallTokens with no row err = %v, want ErrCredsNotFound", err)
+	}
+}
+
+// TestMemoryWatchkeeperSlackAppCredsDAO_PutInstallTokens_Idempotent
+// pins the documented overwrite-on-second-call behaviour: a re-install
+// scenario is expressed by re-calling PutInstallTokens with a fresh
+// bundle; no `ErrAlreadyInstalled` sentinel exists (kept simple per
+// the M7.1.c.b.b plan).
+func TestMemoryWatchkeeperSlackAppCredsDAO_PutInstallTokens_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	wkID := uuid.New()
+	if err := dao.Put(context.Background(), wkID, newTestCreds()); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := dao.PutInstallTokens(
+		context.Background(), wkID, []byte("bot1"), nil, nil, time.Time{},
+	); err != nil {
+		t.Fatalf("PutInstallTokens #1: %v", err)
+	}
+	if err := dao.PutInstallTokens(
+		context.Background(), wkID, []byte("bot2"), nil, nil, time.Time{},
+	); err != nil {
+		t.Fatalf("PutInstallTokens #2 (overwrite): %v", err)
+	}
+
+	gotBot, _, _, _, _, ok := dao.GetInstallTokens(wkID)
+	if !ok {
+		t.Fatalf("GetInstallTokens: ok = false, want true")
+	}
+	if !bytes.Equal(gotBot, []byte("bot2")) {
+		t.Errorf("botCT after overwrite = %q, want %q", gotBot, "bot2")
 	}
 }
 

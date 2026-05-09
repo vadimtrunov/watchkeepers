@@ -3015,3 +3015,29 @@ None material this iteration. The crypto-checklist enumeration in the brief itse
 - Total wall time from /rdd to merge: pending
 
 ---
+
+## 2026-05-09 — M7.1.c.b.b: OAuthInstall saga step + encrypted bot-token storage
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 4 (one fixer iteration on the security redaction test gap; AC8 LOC waiver from orchestrator)
+
+### What worked
+
+The **executor checkpoint-commits protocol** (now standard after M7.1.c.a/b.a wins) held perfectly: 5 commits per the explicit plan, full final report. The **enumerated-antipattern-checklist** brief pattern again worked — the iter-1 reviewer's checklist of 8 crypto-consumer defect classes caught a real test gap (DAO PutInstallTokens-error redaction) that a generic "review for security" prompt would likely have missed. The iter-2 reviewer's stale-check did its job: iter-1 finding was substantively resolved (not papered over) and iter-2 returned 0/0/0 cleanly.
+
+### What wasted effort
+
+The TASK's AC8 LOC cap ("≤ 1000 LOC") was tighter than SKILL Hard rule 6 (BOTH-exceeded gate) and surfaced as iter-1 important #2. The orchestrator-side waiver was the right call (and stays consistent with how M7.1.c.a — also 1364 LOC — was handled), but the TASK author should have either (a) cited Hard rule 6 by reference to avoid double standards, or (b) explicitly narrowed AC8 to "≤ 20 files" alone and let the SKILL handle LOC. Cost was minimal (waiver decision was deterministic) but the friction is avoidable.
+
+### Suggested skill changes
+
+- Update `.claude/skills/rdd/references/task-template.md` §"Acceptance criteria" to discourage tightening Hard rule 6 (PR cap) at the AC level — instead reference it: "PR fits the §Hard rule 6 cap (≤ 1000 LOC AND ≤ 20 files BOTH-exceeded)". Avoids per-TASK AC drift from the SKILL-level rule.
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: pending
+- Operator interventions outside of gates: 1 (orchestrator AC8 LOC waiver decision based on Hard rule 6 reading)
+- Total wall time from /rdd to merge: pending
+
+---

@@ -13,6 +13,7 @@ package spawn
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -63,4 +64,36 @@ type WatchkeeperSlackAppCredsDAO interface {
 	// The returned value is a value copy; mutating it does not affect
 	// the persisted row.
 	Get(ctx context.Context, watchkeeperID uuid.UUID) (slackmessenger.CreateAppCredentials, error)
+
+	// PutInstallTokens persists the M7.1.c.b.b OAuthInstall step's
+	// encrypted bot/user/refresh tokens onto the existing row keyed by
+	// `watchkeeperID`. The three byte slices MUST already be ciphertexts
+	// produced by [secrets.Encrypter.Encrypt] (M7.1.c.b.a primitive);
+	// the DAO contract treats them as opaque bytes — no encryption layer
+	// lives on this side of the seam.
+	//
+	// `refreshCT` MUST be nil or zero-length when the OAuth response did
+	// not carry a refresh_token (rotation disabled on the app manifest).
+	// Storing an encrypted-empty-string here would silently disagree with
+	// downstream `len() == 0` callers (encrypting an empty plaintext
+	// produces a 28-byte ciphertext). The caller short-circuits the
+	// encryption call when the plaintext is empty.
+	//
+	// `expiresAt` is the UTC expiry derived from the response
+	// `expires_in`; the zero [time.Time] is the documented sentinel for
+	// "no expiry" (rotation disabled).
+	//
+	// Returns [ErrCredsNotFound] when no row exists for the supplied
+	// `watchkeeperID` (the row must have been created by the M7.1.c.a
+	// CreateAppStep first). Idempotent on second call (overwrites — re-
+	// install scenario; no `ErrAlreadyInstalled` sentinel to keep retry
+	// semantics simple).
+	PutInstallTokens(
+		ctx context.Context,
+		watchkeeperID uuid.UUID,
+		botCT []byte,
+		userCT []byte,
+		refreshCT []byte,
+		expiresAt time.Time,
+	) error
 }
