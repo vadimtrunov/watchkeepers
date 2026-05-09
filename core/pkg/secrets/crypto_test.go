@@ -452,6 +452,36 @@ func TestErrorsDoNotLeakSecrets(t *testing.T) {
 	}
 }
 
+// TestErrorsDoNotLeakInvalidHexBytes — regression pin at the byte level for
+// the hex.DecodeString error-wrap defect. Go's stdlib hex.DecodeString errors
+// embed the offending rune (e.g. "encoding/hex: invalid byte: U+0057 'W'"),
+// so wrapping the raw error would leak one input byte. This test feeds a
+// short invalid-hex KEK ("WK") and asserts that neither 'W' nor 'K' appears
+// in the returned error string.
+func TestErrorsDoNotLeakInvalidHexBytes(t *testing.T) {
+	t.Parallel()
+	// "ZZ" — both characters are invalid hex digits; 'Z' (0x5A) would appear
+	// verbatim in the stdlib hex.DecodeString error if the error were wrapped
+	// rather than replaced with the bare sentinel. 'Z' does not appear in the
+	// ErrInvalidKEKHex sentinel string itself, so a false-positive collision
+	// with the sentinel text is impossible.
+	const badKEK = "ZZ"
+	src := stubSecretSource{values: map[string]string{"ZZ_KEK": badKEK}}
+	_, err := NewAESGCMEncrypter(context.Background(), src, "ZZ_KEK")
+	if err == nil {
+		t.Fatalf("expected error for invalid-hex KEK, got nil")
+	}
+	if !errors.Is(err, ErrInvalidKEKHex) {
+		t.Fatalf("err = %v, want errors.Is ErrInvalidKEKHex", err)
+	}
+	msg := err.Error()
+	for _, ch := range badKEK {
+		if strings.ContainsRune(msg, ch) {
+			t.Errorf("error string %q contains input byte %q — KEK byte leak", msg, string(ch))
+		}
+	}
+}
+
 // equalBytes is a tiny non-allocating bytes-equal helper. We use it
 // instead of bytes.Equal to keep the test file's import surface minimal
 // (one less import means one less mismatch with `goimports`); the

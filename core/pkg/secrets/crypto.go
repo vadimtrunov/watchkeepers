@@ -116,9 +116,10 @@ func NewAESGCMEncrypter(ctx context.Context, src SecretSource, kekKey string) (E
 	}
 	keyBytes, err := hex.DecodeString(hexKEK)
 	if err != nil {
-		// Wrap with sentinel; do NOT include hexKEK in the error string —
-		// even an "invalid hex" KEK might still leak partial information.
-		return nil, fmt.Errorf("%w: %v", ErrInvalidKEKHex, err)
+		// Return bare sentinel only — the stdlib hex.DecodeString error
+		// embeds the offending rune directly (e.g. "invalid byte: U+0057 'W'"),
+		// so wrapping it would leak a KEK byte into the error string.
+		return nil, ErrInvalidKEKHex
 	}
 	if len(keyBytes) != aesGCMKeyLen {
 		return nil, fmt.Errorf("%w: got %d bytes", ErrInvalidKEKLength, len(keyBytes))
