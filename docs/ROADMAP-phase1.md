@@ -429,6 +429,9 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M7.1.d** Notebook provision step: per-agent Notebook file with personality/language
   - [x] **M7.1.e** Runtime launch + intro message step, wiring saga to completion
 - [ ] **M7.2** **Retire saga** — harness `Archive` runs; tarball lands in `ArchiveStore` (LocalFS or S3-compatible); `notebook_archived` event with archive URI logged; Watchkeeper row in Keep marked retired with archive reference.
+  - [ ] **M7.2.a** Retire saga kickoff seam: RetireSagaContext + RetireKickoff seam + audit chain + production-wiring helper (zero-step Run; mirrors M7.1.b)
+  - [ ] **M7.2.b** NotebookArchive saga step: thin seam over `notebook.ArchiveOnRetire`; archive_uri returned via SpawnContext-equivalent
+  - [ ] **M7.2.c** MarkRetired saga step + keepclient `archive_uri` extension + watchkeepers.archive_uri column + migration; wires M6.2.c retire tool through the saga
 - [ ] **M7.3** **Robustness** — saga compensations (install failure rolls back Slack App creation, removes the freshly-provisioned Notebook file, marks Manifest rejected; runtime boot failure tears down the app and **archives** — never deletes — any Notebook data written, flagged for review) plus idempotency keys so retried approvals never double-create apps.
 
 **Artifacts**: `spawn/` saga package, Slack interaction handler for approval actions, saga-state DAO.
