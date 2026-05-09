@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,8 +12,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vadimtrunov/watchkeepers/core/pkg/keepclient"
-	"github.com/vadimtrunov/watchkeepers/core/pkg/keeperslog"
 	slackmessenger "github.com/vadimtrunov/watchkeepers/core/pkg/messenger/slack"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/spawn"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/spawn/saga"
@@ -21,32 +20,6 @@ import (
 // ────────────────────────────────────────────────────────────────────────
 // Hand-rolled fakes (no mocking lib — M3.6 / M6.3.e pattern).
 // ────────────────────────────────────────────────────────────────────────
-
-// recordingKeepClient is the [keeperslog.LocalKeepClient] stand-in
-// that records every LogAppend call so the AC7 regression test can
-// ASSERT-IS-EMPTY when the step under test is the only producer
-// (the step does NOT emit any new keepers_log event). Distinct name
-// from the slack_app_test.go `fakeKeepClient` because both live in
-// the same `spawn_test` package.
-type recordingKeepClient struct {
-	mu    sync.Mutex
-	calls []keepclient.LogAppendRequest
-}
-
-func (f *recordingKeepClient) LogAppend(_ context.Context, req keepclient.LogAppendRequest) (*keepclient.LogAppendResponse, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, req)
-	return &keepclient.LogAppendResponse{ID: "fake-row"}, nil
-}
-
-func (f *recordingKeepClient) recorded() []keepclient.LogAppendRequest {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]keepclient.LogAppendRequest, len(f.calls))
-	copy(out, f.calls)
-	return out
-}
 
 // fakeSlackAppRPC is a hand-rolled [spawn.SlackAppRPC] that:
 //   - Records every CreateApp call onto a SHARED record set so tests
@@ -429,38 +402,43 @@ func TestCreateAppStep_Execute_NilAgentID_DoesNotCallRPC(t *testing.T) {
 // AC7: PII-safe audit — step does NOT call keeperslog.Writer.Append
 // ────────────────────────────────────────────────────────────────────────
 
-// TestCreateAppStep_Execute_DoesNotCallKeeperslogAppend pins AC7: the
-// underlying [SlackAppRPC.CreateApp] already emits the
-// `watchmaster_slack_app_create_*` chain (M6.1.b) and the saga core
-// (M7.1.a) emits `saga_step_started/completed`. The step itself MUST
-// NOT add a third audit row.
+// TestCreateAppStep_DoesNotCallKeepersLogAppend pins AC7 via a source-grep
+// assertion: it reads createapp_step.go, strips pure comment lines, then
+// asserts the non-comment source contains neither a "keeperslog." reference
+// nor a ".Append(" call. This is a stronger pin than a runtime assertion
+// because it catches any future edit that adds a keeperslog import or an
+// Append call regardless of whether a Writer is wired through the test
+// harness. Comment lines (starting with optional whitespace + "//") are
+// excluded so godoc cross-references like [keeperslog.Writer.Append] do not
+// trip the assertion.
 //
-// Strategy: wire a real *keeperslog.Writer over a recording fake
-// LocalKeepClient and assert ZERO Append calls land during a run that
-// uses the fake RPC (the fake RPC does not call the writer; the real
-// RPC's audit chain is exercised by the M6.1.b tests). If a future
-// edit adds a writer to the step, the recorder picks it up.
-func TestCreateAppStep_Execute_DoesNotCallKeeperslogAppend(t *testing.T) {
+// AC7 wording: "step does not call keeperslog.Writer.Append directly —
+// the audit chain belongs to SlackAppRPC + saga core."
+func TestCreateAppStep_DoesNotCallKeepersLogAppend(t *testing.T) {
 	t.Parallel()
 
-	keep := &recordingKeepClient{}
-	// Build the writer with the recording client so the test would
-	// observe any Append from the step.
-	_ = keeperslog.New(keep)
-
-	rpc := newFakeSlackAppRPC(newTestCreds())
-	dao := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
-	step := newStep(t, rpc, dao)
-
-	watchkeeperID := uuid.New()
-	ctx := saga.WithSpawnContext(context.Background(), newSpawnContext(t, watchkeeperID))
-
-	if err := step.Execute(ctx); err != nil {
-		t.Fatalf("Execute: %v", err)
+	src, err := os.ReadFile("createapp_step.go")
+	if err != nil {
+		t.Fatalf("read createapp_step.go: %v", err)
 	}
 
-	if got := keep.recorded(); len(got) != 0 {
-		t.Errorf("keepers_log Append call count = %d, want 0 (AC7: step MUST NOT emit audit rows)", len(got))
+	// Build a version of the source with comment-only lines removed so
+	// godoc cross-references (e.g. "[keeperslog.Writer.Append]") do not
+	// trigger the assertions.
+	var nonComment strings.Builder
+	for _, line := range strings.Split(string(src), "\n") {
+		if !strings.HasPrefix(strings.TrimLeft(line, " \t"), "//") {
+			nonComment.WriteString(line)
+			nonComment.WriteByte('\n')
+		}
+	}
+	body := nonComment.String()
+
+	if strings.Contains(body, "keeperslog.") {
+		t.Errorf("createapp_step.go imports/references keeperslog in non-comment code — AC7 says the step must not. Audit chain belongs to SlackAppRPC + saga core.")
+	}
+	if strings.Contains(body, ".Append(") {
+		t.Errorf("createapp_step.go contains '.Append(' in non-comment code — AC7 says the step must not call keeperslog.Writer.Append.")
 	}
 }
 
