@@ -428,7 +428,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
     - [x] **M7.1.c.c** BotProfile saga step + register step list in spawn kickoff wiring
   - [x] **M7.1.d** Notebook provision step: per-agent Notebook file with personality/language
   - [x] **M7.1.e** Runtime launch + intro message step, wiring saga to completion
-- [ ] **M7.2** **Retire saga** — harness `Archive` runs; tarball lands in `ArchiveStore` (LocalFS or S3-compatible); `notebook_archived` event with archive URI logged; Watchkeeper row in Keep marked retired with archive reference.
+- [x] **M7.2** **Retire saga** — harness `Archive` runs; tarball lands in `ArchiveStore` (LocalFS or S3-compatible); `notebook_archived` event with archive URI logged; Watchkeeper row in Keep marked retired with archive reference.
   - [x] **M7.2.a** Retire saga kickoff seam: RetireSagaContext + RetireKickoff seam + audit chain + production-wiring helper (zero-step Run; mirrors M7.1.b)
   - [x] **M7.2.b** NotebookArchive saga step: thin seam over `notebook.ArchiveOnRetire`; archive_uri returned via SpawnContext-equivalent
   - [x] **M7.2.c** MarkRetired saga step + keepclient `archive_uri` extension + watchkeepers.archive_uri column + migration; wires M6.2.c retire tool through the saga
