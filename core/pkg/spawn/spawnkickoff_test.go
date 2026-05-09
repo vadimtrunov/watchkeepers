@@ -25,19 +25,27 @@ import (
 // fakeLocalKeepClient stands in for [keeperslog.LocalKeepClient]; lets
 // the kickoffer tests assert event_type ordering through a real
 // *keeperslog.Writer without standing up the full HTTP keepclient.
+//
+// Records every per-call `ctx` in addition to the request body so
+// retire-kickoff ctx-propagation tests can assert the kickoffer
+// forwards the caller's ctx verbatim through the [keeperslog.Writer]
+// seam (M7.2.a iter-1: recording fake, not discarding — M7.1.e
+// lesson #6 held forward).
 type fakeLocalKeepClient struct {
 	mu          sync.Mutex
 	calls       []keepclient.LogAppendRequest
+	ctxs        []context.Context
 	errToReturn error
 }
 
-func (f *fakeLocalKeepClient) LogAppend(_ context.Context, req keepclient.LogAppendRequest) (*keepclient.LogAppendResponse, error) {
+func (f *fakeLocalKeepClient) LogAppend(ctx context.Context, req keepclient.LogAppendRequest) (*keepclient.LogAppendResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.errToReturn != nil {
 		return nil, f.errToReturn
 	}
 	f.calls = append(f.calls, req)
+	f.ctxs = append(f.ctxs, ctx)
 	return &keepclient.LogAppendResponse{ID: "fake-row"}, nil
 }
 
@@ -46,6 +54,14 @@ func (f *fakeLocalKeepClient) recorded() []keepclient.LogAppendRequest {
 	defer f.mu.Unlock()
 	out := make([]keepclient.LogAppendRequest, len(f.calls))
 	copy(out, f.calls)
+	return out
+}
+
+func (f *fakeLocalKeepClient) recordedCtxs() []context.Context {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]context.Context, len(f.ctxs))
+	copy(out, f.ctxs)
 	return out
 }
 
