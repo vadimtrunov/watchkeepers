@@ -773,6 +773,27 @@ func TestOAuthInstallStep_Execute_ErrorPaths_DoNotLeakSecrets(t *testing.T) {
 				)
 			},
 		},
+		{
+			// Highest-risk leak vector: Encrypt succeeds with all three
+			// plaintext tokens in scope; only PutInstallTokens fails.
+			// Ensures a future error that wraps token values is caught
+			// by this redaction harness.
+			name: "dao put install tokens error",
+			setup: func() (*spawn.OAuthInstallStep, context.Context) {
+				installer := newFakeInstaller(tokens)
+				memDAO := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+				enc := newTestEncrypter(t)
+				wkID := uuid.New()
+				seedCredsRow(t, memDAO, wkID)
+				dao := &putInstallTokensErrDAO{
+					MemoryWatchkeeperSlackAppCredsDAO: memDAO,
+					err:                               errors.New("simulated DAO write failure"),
+				}
+				return newOAuthStep(t, installer, dao, enc), saga.WithSpawnContext(
+					context.Background(), newOAuthSpawnContext(t, wkID, "code-secret-leak"),
+				)
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
