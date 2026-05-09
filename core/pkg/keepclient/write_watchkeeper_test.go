@@ -324,3 +324,219 @@ func TestClient_UpdateWatchkeeperStatus_NoTokenSource_ErrNoTokenSource(t *testin
 		t.Errorf("network hits = %d, want 0", got)
 	}
 }
+
+// TestClient_UpdateWatchkeeperStatus_OmitsEmptyArchiveURI asserts the
+// M7.2.c omitempty contract on the wire: the existing pending→active
+// path (and any active→retired call that does NOT carry an archive)
+// must not transmit an `archive_uri` key at all so the server's
+// DisallowUnknownFields decoder behaviour stays orthogonal — the new
+// optional field never materialises on legacy call sites' wire shape.
+func TestClient_UpdateWatchkeeperStatus_OmitsEmptyArchiveURI(t *testing.T) {
+	t.Parallel()
+
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		rawBody = raw
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	if err := c.UpdateWatchkeeperStatus(context.Background(), wkTestRowID, "retired"); err != nil {
+		t.Fatalf("UpdateWatchkeeperStatus: %v", err)
+	}
+	if strings.Contains(string(rawBody), `"archive_uri"`) {
+		t.Errorf("body included archive_uri field on legacy call; got %s", rawBody)
+	}
+	if !strings.Contains(string(rawBody), `"status"`) {
+		t.Errorf("body missing status field; got %s", rawBody)
+	}
+}
+
+// TestClient_UpdateWatchkeeperRetired_HappyPath asserts the M7.2.c
+// happy round-trip: PATCH /v1/watchkeepers/{id}/status carries
+// `status:"retired"` and the supplied archive_uri verbatim.
+func TestClient_UpdateWatchkeeperRetired_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	const wantURI = "file:///snapshots/wk/2026-05-09T12-34-56Z.tar.gz"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("Method = %q, want PATCH", r.Method)
+		}
+		if want := "/v1/watchkeepers/" + wkTestRowID + "/status"; r.URL.Path != want {
+			t.Errorf("Path = %q, want %q", r.URL.Path, want)
+		}
+		var got updateWatchkeeperStatusRequest
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode req: %v", err)
+		}
+		if got.Status != "retired" {
+			t.Errorf("Status = %q, want retired", got.Status)
+		}
+		if got.ArchiveURI == nil || *got.ArchiveURI != wantURI {
+			t.Errorf("ArchiveURI = %v, want %q", got.ArchiveURI, wantURI)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	if err := c.UpdateWatchkeeperRetired(context.Background(), wkTestRowID, wantURI); err != nil {
+		t.Fatalf("UpdateWatchkeeperRetired: %v", err)
+	}
+}
+
+// TestClient_UpdateWatchkeeperRetired_EmptyID_ErrInvalidRequest asserts
+// the M7.2.c synchronous-rejection contract on empty id (no network
+// round-trip).
+func TestClient_UpdateWatchkeeperRetired_EmptyID_ErrInvalidRequest(t *testing.T) {
+	t.Parallel()
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		atomic.AddInt32(&hits, 1)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	err := c.UpdateWatchkeeperRetired(context.Background(), "", "file:///x.tar.gz")
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("network hits = %d, want 0", got)
+	}
+}
+
+// TestClient_UpdateWatchkeeperRetired_EmptyArchiveURI_ErrInvalidRequest
+// asserts the M7.2.c synchronous-rejection contract on empty
+// archive_uri. The saga step pre-validates URI shape before it reaches
+// the wire (M7.2.b ErrInvalidArchiveURI gate); the client's
+// defense-in-depth check rejects an empty string upstream.
+func TestClient_UpdateWatchkeeperRetired_EmptyArchiveURI_ErrInvalidRequest(t *testing.T) {
+	t.Parallel()
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		atomic.AddInt32(&hits, 1)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	err := c.UpdateWatchkeeperRetired(context.Background(), wkTestRowID, "")
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("network hits = %d, want 0", got)
+	}
+}
+
+// TestClient_UpdateWatchkeeperRetired_SchemelessArchiveURI_ErrInvalidRequest
+// pins the M7.2.c iter-2 codex finding (Major) at the keepclient seam:
+// the wire contract documents archive_uri as an RFC 3986 URI with a
+// non-empty scheme, but the iter-1 method only rejected blank
+// strings. Strings like `"garbage"` would round-trip onto the column
+// for any caller that bypassed the saga path; the absolute-URI gate
+// fails fast at the seam closest to the bug, with no network
+// round-trip burned and the server's matching gate as
+// defense-in-depth.
+func TestClient_UpdateWatchkeeperRetired_SchemelessArchiveURI_ErrInvalidRequest(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		uri  string
+	}{
+		{name: "bare_word", uri: "garbage"},
+		{name: "relative_path", uri: "../../tmp"},
+		{name: "leading_slash_only", uri: "/snapshots/wk.tar.gz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var hits int32
+			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				atomic.AddInt32(&hits, 1)
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+			err := c.UpdateWatchkeeperRetired(context.Background(), wkTestRowID, tc.uri)
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("err = %v, want ErrInvalidRequest for %q", err, tc.uri)
+			}
+			if got := atomic.LoadInt32(&hits); got != 0 {
+				t.Errorf("network hits = %d, want 0 for %q", got, tc.uri)
+			}
+		})
+	}
+}
+
+// TestClient_UpdateWatchkeeperRetired_AbsoluteURISchemes_Accepted
+// pins the M7.2.c iter-2 positive complement: every scheme the
+// spawn-side archivestore can mint (file://, s3://, gs://, plus a
+// synthetic test:// to pin "any non-empty scheme" rather than a
+// hardcoded allowlist) round-trips through the new RFC 3986 gate
+// without burning ErrInvalidRequest.
+func TestClient_UpdateWatchkeeperRetired_AbsoluteURISchemes_Accepted(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		uri  string
+	}{
+		{name: "file_scheme", uri: "file:///snapshots/wk-active/2026-05-09T12-34-56Z.tar.gz"},
+		{name: "s3_scheme", uri: "s3://archives-bucket/wk/2026-05-09T12-34-56Z.tar.gz"},
+		{name: "gs_scheme", uri: "gs://archives-bucket/wk/2026-05-09T12-34-56Z.tar.gz"},
+		{name: "test_scheme", uri: "test://fake/host/path.tar.gz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+			if err := c.UpdateWatchkeeperRetired(context.Background(), wkTestRowID, tc.uri); err != nil {
+				t.Fatalf("UpdateWatchkeeperRetired(%q): %v", tc.uri, err)
+			}
+		})
+	}
+}
+
+// TestClient_UpdateWatchkeeperRetired_400_TransitionMaps asserts that
+// the M7.2.c method surfaces a 400 invalid_status_transition response
+// the same way [Client.UpdateWatchkeeperStatus] does — same Unwrap
+// chain, same ServerError shape.
+func TestClient_UpdateWatchkeeperRetired_400_TransitionMaps(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid_status_transition"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	err := c.UpdateWatchkeeperRetired(context.Background(), wkTestRowID, "file:///x.tar.gz")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidStatusTransition) {
+		t.Errorf("errors.Is(err, ErrInvalidStatusTransition) = false; err = %v", err)
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("errors.Is(err, ErrInvalidRequest) = false; err = %v", err)
+	}
+}

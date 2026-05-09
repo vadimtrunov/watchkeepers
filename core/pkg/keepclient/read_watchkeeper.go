@@ -33,6 +33,14 @@ type Watchkeeper struct {
 	SpawnedAt *time.Time `json:"spawned_at"`
 	// RetiredAt is set on the active→retired transition; nil before retire.
 	RetiredAt *time.Time `json:"retired_at"`
+	// ArchiveURI is the storage URI of the archived per-agent notebook
+	// recorded by the M7.2.c MarkRetired saga step. Nil when the row has
+	// not yet been retired, when it was retired before M7.2.c shipped, or
+	// when a future M7.3 compensator path retires the watchkeeper without
+	// an archive (e.g. a saga that fails before the M7.2.b NotebookArchive
+	// step runs). The server-side column is `archive_uri text NULL` —
+	// migration `022_watchkeepers_archive_uri.sql`.
+	ArchiveURI *string `json:"archive_uri"`
 	// CreatedAt is the row's created_at timestamp.
 	CreatedAt time.Time `json:"created_at"`
 }

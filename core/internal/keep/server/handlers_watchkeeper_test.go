@@ -391,6 +391,285 @@ func TestUpdateWatchkeeperStatus_UnknownField_400(t *testing.T) {
 	}
 }
 
+// stageUpdateTxCapturingArgs is the M7.2.c sibling of [stageUpdateTx]
+// that also captures the Exec args slice so the caller can assert
+// the archive_uri parameter binding on the active→retired branch.
+func stageUpdateTxCapturingArgs(t *testing.T, current string, gotSQL *string, gotArgs *[]any) pgx.Tx {
+	t.Helper()
+	queryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			if len(dest) > 0 {
+				if sp, ok := dest[0].(*string); ok {
+					*sp = current
+				}
+			}
+			return nil
+		})
+	}
+	exec := func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		if gotSQL != nil {
+			*gotSQL = sql
+		}
+		if gotArgs != nil {
+			*gotArgs = append([]any(nil), args...)
+		}
+		return pgconn.CommandTag{}, nil
+	}
+	return server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow, Exec: exec})
+}
+
+// TestUpdateWatchkeeperStatus_ActiveToRetiredWithArchiveURI_StampsColumn —
+// M7.2.c: the active→retired branch persists the supplied archive_uri
+// onto the new column when the body field is non-empty. Pins the SQL
+// shape (`archive_uri = $2`) and the parameter binding so a future
+// regression that drops the URI silently surfaces here.
+func TestUpdateWatchkeeperStatus_ActiveToRetiredWithArchiveURI_StampsColumn(t *testing.T) {
+	const wantURI = "file:///snapshots/wk-active/2026-05-09T12-34-56Z.tar.gz"
+	var execSQL string
+	var execArgs []any
+	runner := &server.FakeScopedRunner{Tx: stageUpdateTxCapturingArgs(t, "active", &execSQL, &execArgs)}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+		map[string]any{"status": "retired", "archive_uri": wantURI}, "")
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(execSQL, "retired_at = now()") {
+		t.Errorf("UPDATE did not stamp retired_at; got SQL: %s", execSQL)
+	}
+	if !strings.Contains(execSQL, "archive_uri = $2") {
+		t.Errorf("UPDATE did not bind archive_uri = $2 (M7.2.c regression); got SQL: %s", execSQL)
+	}
+	if len(execArgs) < 2 {
+		t.Fatalf("Exec args len = %d, want >= 2 (id, archive_uri); args=%v", len(execArgs), execArgs)
+	}
+	if execArgs[1] != wantURI {
+		t.Errorf("Exec args[1] = %v, want %q (archive_uri must be bound verbatim)", execArgs[1], wantURI)
+	}
+}
+
+// TestUpdateWatchkeeperStatus_ActiveToRetiredNoArchiveURI_LeavesColumnNull —
+// M7.2.c: omitting `archive_uri` in the body keeps the legacy
+// (M6.2.c synchronous tool) wire-shape green. The handler runs the
+// no-archive UPDATE branch which sets `archive_uri = NULL` explicitly
+// (defense-in-depth: a re-mark on a previously-retired row never
+// carries a stale archive_uri forward) and binds only the id parameter.
+func TestUpdateWatchkeeperStatus_ActiveToRetiredNoArchiveURI_LeavesColumnNull(t *testing.T) {
+	var execSQL string
+	var execArgs []any
+	runner := &server.FakeScopedRunner{Tx: stageUpdateTxCapturingArgs(t, "active", &execSQL, &execArgs)}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+		map[string]any{"status": "retired"}, "")
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(execSQL, "retired_at = now()") {
+		t.Errorf("UPDATE did not stamp retired_at; got SQL: %s", execSQL)
+	}
+	if !strings.Contains(execSQL, "archive_uri = NULL") {
+		t.Errorf("UPDATE did not set archive_uri = NULL on the no-archive branch (M7.2.c iter-2 explicit-NULL pattern); got SQL: %s", execSQL)
+	}
+	if strings.Contains(execSQL, "archive_uri = $") {
+		t.Errorf("UPDATE bound archive_uri as a parameter despite omitted body field; got SQL: %s", execSQL)
+	}
+	if len(execArgs) != 1 {
+		t.Errorf("Exec args len = %d, want 1 (id only — no archive_uri binding); args=%v", len(execArgs), execArgs)
+	}
+}
+
+// TestUpdateWatchkeeperStatus_PendingToActiveWithArchiveURI_400 — M7.2.c:
+// archive_uri only makes sense on the active→retired transition. A
+// pending→active body that smuggles archive_uri is rejected pre-tx
+// with 400 invalid_request so a wiring bug cannot poison the column
+// on the spawn-side path.
+func TestUpdateWatchkeeperStatus_PendingToActiveWithArchiveURI_400(t *testing.T) {
+	runner := &server.FakeScopedRunner{}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+		map[string]any{"status": "active", "archive_uri": "file:///wrong-direction.tar.gz"}, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked; expected pre-tx rejection on archive_uri+active combination")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "invalid_request" {
+		t.Errorf("error = %q, want invalid_request", env.Error)
+	}
+}
+
+// TestUpdateWatchkeeperStatus_BlankArchiveURI_400 — M7.2.c: a whitespace-
+// only archive_uri string (e.g. `" "` from a buggy client) is rejected
+// pre-tx so the column never receives a blank string. The saga step
+// pre-validates URI shape before it reaches the wire (M7.2.b
+// ErrInvalidArchiveURI), so this server-side gate is defense-in-depth.
+func TestUpdateWatchkeeperStatus_BlankArchiveURI_400(t *testing.T) {
+	runner := &server.FakeScopedRunner{}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+		map[string]any{"status": "retired", "archive_uri": "   "}, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked; expected pre-tx rejection on blank archive_uri")
+	}
+}
+
+// TestUpdateWatchkeeperStatus_ExplicitNullArchiveURI_OnRetired_400 —
+// M7.2.c iter-2 codex finding (Major): the on-wire shape
+// `"archive_uri": null` is structurally distinct from absent and must
+// not silently fall into the legacy no-archive branch. Test pins the
+// `Present && Null` rejection at the parser layer with no DB touch.
+func TestUpdateWatchkeeperStatus_ExplicitNullArchiveURI_OnRetired_400(t *testing.T) {
+	runner := &server.FakeScopedRunner{}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+		map[string]any{"status": "retired", "archive_uri": nil}, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked; expected pre-tx rejection on explicit-null archive_uri")
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "invalid_request" {
+		t.Errorf("error = %q, want invalid_request", env.Error)
+	}
+}
+
+// TestUpdateWatchkeeperStatus_ExplicitNullArchiveURI_OnActive_400 —
+// M7.2.c iter-2 codex finding (Major): a `"archive_uri": null` paired
+// with `status:"active"` is also a wiring bug. The original `*string`
+// shape silently accepted it (Go's json decodes null to a nil
+// pointer, which the old `body.ArchiveURI != nil` guard treated as
+// absent); the new `optionalArchiveURI` shape's `Present && Null`
+// branch rejects it pre-tx.
+func TestUpdateWatchkeeperStatus_ExplicitNullArchiveURI_OnActive_400(t *testing.T) {
+	runner := &server.FakeScopedRunner{}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+		map[string]any{"status": "active", "archive_uri": nil}, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if runner.FnInvoked {
+		t.Error("runner was invoked; expected pre-tx rejection on explicit-null archive_uri")
+	}
+}
+
+// TestUpdateWatchkeeperStatus_SchemelessArchiveURI_400 — M7.2.c iter-2
+// codex finding (Major): the wire contract documents archive_uri as
+// an RFC 3986 URI with a non-empty scheme, but the iter-1 server only
+// rejected blank values. Strings like `"garbage"` or `"../../tmp"`
+// would round-trip onto the column for any caller that bypassed the
+// saga path; the absolute-URI gate at the HTTP boundary closes that
+// hole as defense-in-depth (the saga step + keepclient pre-validate
+// the same shape upstream).
+func TestUpdateWatchkeeperStatus_SchemelessArchiveURI_400(t *testing.T) {
+	cases := []struct {
+		name string
+		uri  string
+	}{
+		{name: "bare_word", uri: "garbage"},
+		{name: "relative_path", uri: "../../tmp"},
+		{name: "leading_slash_only", uri: "/snapshots/wk.tar.gz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &server.FakeScopedRunner{}
+			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+			tok := mustMintToken(t, ti, "org")
+
+			rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+				map[string]any{"status": "retired", "archive_uri": tc.uri}, "")
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if runner.FnInvoked {
+				t.Errorf("runner was invoked on %q; expected pre-tx rejection on schemeless URI", tc.uri)
+			}
+			var env struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if env.Error != "invalid_request" {
+				t.Errorf("error = %q, want invalid_request", env.Error)
+			}
+		})
+	}
+}
+
+// TestUpdateWatchkeeperStatus_AbsoluteURISchemes_AcceptedRetire — M7.2.c
+// iter-2 positive complement to TestUpdateWatchkeeperStatus_SchemelessArchiveURI_400:
+// the absolute-URI gate accepts every scheme the spawn-side
+// archivestore can mint (file://, s3://, gs://, plus a synthetic
+// `test://` to pin "any non-empty scheme" rather than a hardcoded
+// allowlist).
+func TestUpdateWatchkeeperStatus_AbsoluteURISchemes_AcceptedRetire(t *testing.T) {
+	cases := []struct {
+		name string
+		uri  string
+	}{
+		{name: "file_scheme", uri: "file:///snapshots/wk-active/2026-05-09T12-34-56Z.tar.gz"},
+		{name: "s3_scheme", uri: "s3://archives-bucket/wk/2026-05-09T12-34-56Z.tar.gz"},
+		{name: "gs_scheme", uri: "gs://archives-bucket/wk/2026-05-09T12-34-56Z.tar.gz"},
+		{name: "test_scheme", uri: "test://fake/host/path.tar.gz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var execSQL string
+			var execArgs []any
+			runner := &server.FakeScopedRunner{Tx: stageUpdateTxCapturingArgs(t, "active", &execSQL, &execArgs)}
+			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+			tok := mustMintToken(t, ti, "org")
+
+			rec := writeDo(t, h, http.MethodPatch, "/v1/watchkeepers/"+wkFakeID+"/status", tok,
+				map[string]any{"status": "retired", "archive_uri": tc.uri}, "")
+
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204 for %q; body=%s", rec.Code, tc.uri, rec.Body.String())
+			}
+			if len(execArgs) < 2 || execArgs[1] != tc.uri {
+				t.Errorf("Exec args[1] = %v, want %q", execArgs, tc.uri)
+			}
+		})
+	}
+}
+
 // -----------------------------------------------------------------------
 // Get: GET /v1/watchkeepers/{id}
 // -----------------------------------------------------------------------
@@ -404,7 +683,7 @@ func TestGetWatchkeeper_ReturnsFullRow(t *testing.T) {
 			// Order matches handleGetWatchkeeper's Scan list:
 			//   id, manifest_id, lead_human_id,
 			//   active_manifest_version_id, status,
-			//   spawned_at, retired_at, created_at
+			//   spawned_at, retired_at, archive_uri, created_at
 			*dest[0].(*string) = wkFakeID
 			*dest[1].(*string) = wkManifestID
 			*dest[2].(*string) = wkLeadHumanID
@@ -413,7 +692,9 @@ func TestGetWatchkeeper_ReturnsFullRow(t *testing.T) {
 			*dest[4].(*string) = "active"
 			*dest[5].(**time.Time) = &spawnedAt
 			*dest[6].(**time.Time) = nil
-			*dest[7].(*time.Time) = time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+			// archive_uri NULL on this active-status row.
+			*dest[7].(**string) = nil
+			*dest[8].(*time.Time) = time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -492,12 +773,15 @@ func makeListScans(t *testing.T, statuses []string) []func(dest ...any) error {
 			*dest[4].(*string) = status
 			*dest[5].(**time.Time) = nil
 			*dest[6].(**time.Time) = nil
+			// archive_uri NULL on every staged row — list test does not
+			// exercise the M7.2.c retire-with-archive path.
+			*dest[7].(**string) = nil
 			// Stagger created_at by row index so the DESC order is
 			// observable end-to-end (the fake does not actually sort —
 			// it just returns rows in the order the test stages them).
 			// Row 0 is the newest (largest created_at); row N is oldest.
 			base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-			*dest[7].(*time.Time) = base.Add(-time.Duration(i) * time.Hour)
+			*dest[8].(*time.Time) = base.Add(-time.Duration(i) * time.Hour)
 			return nil
 		})
 	}

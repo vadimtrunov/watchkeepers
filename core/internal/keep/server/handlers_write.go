@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -771,13 +773,112 @@ func handleInsertWatchkeeper(r scopedRunner) http.Handler {
 // intentionally absent: those columns are stamped server-side on each
 // documented transition. Any of those keys in the body is rejected by
 // DisallowUnknownFields.
+//
+// `archive_uri` is the M7.2.c extension the MarkRetired saga step uses to
+// record the storage URI of the archived per-agent notebook. Permitted
+// only on the active→retired transition; the parser rejects it pre-tx
+// when supplied alongside `status:"active"` so a misuse cannot smuggle a
+// value into the column on the spawn-side path.
+//
+// Custom-typed [optionalArchiveURI] so the JSON decoder distinguishes
+// the THREE wire states the body can encode for the field:
+//
+//   - ABSENT — key omitted entirely (`!Present`).
+//   - PRESENT-AND-NULL — key present with explicit JSON null
+//     (`Present && Null`); rejected pre-tx as `invalid_request`.
+//   - PRESENT-AND-STRING — key present with a string value
+//     (`Present && !Null`); subject to non-blank + RFC 3986
+//     scheme validation pre-tx.
+//
+// Iter-1 codex finding (Major): a plain `string` field collapses
+// PRESENT-BUT-EMPTY into ABSENT, which would silently let
+// `{"status":"retired","archive_uri":""}` take the no-archive SQL
+// branch instead of being rejected. The naive `*string` upgrade still
+// folds explicit JSON null into ABSENT (Go's json package decodes
+// `null` to a nil `*string`), which iter-2 codex flagged as a Major
+// bypass: `{"status":"active","archive_uri":null}` would skip the
+// active-with-archive guard and `{"status":"retired","archive_uri":null}`
+// would silently fall into the legacy no-archive branch. The custom
+// type's Present/Null bits make all three states observable so the
+// parser can reject the explicit-null case as a wiring bug while
+// preserving the legacy ABSENT path for the M6.2.c synchronous tool.
 type updateWatchkeeperStatusRequest struct {
-	Status string `json:"status"`
+	Status     string             `json:"status"`
+	ArchiveURI optionalArchiveURI `json:"archive_uri,omitempty"`
+}
+
+// optionalArchiveURI captures the absent / explicit-null / string
+// trichotomy on the optional `archive_uri` body field of
+// PATCH /v1/watchkeepers/{id}/status. Decoded via [UnmarshalJSON] on
+// the pointer receiver so Go's [encoding/json] decoder calls into it
+// for any non-omitted key — including explicit JSON null, which the
+// stdlib would otherwise reduce to a zero-valued `*string`.
+//
+// The type is intentionally unexported and lives next to the request
+// struct: it is a one-off encoding helper, not a reusable abstraction.
+// If a future endpoint grows the same trichotomy on a different field
+// it can be promoted to a shared `optionalString` helper at that
+// point.
+type optionalArchiveURI struct {
+	Present bool   // true if the key was in the body (any value, including null)
+	Null    bool   // true if the value was explicit JSON null
+	Value   string // resolved string when Present && !Null
+}
+
+// UnmarshalJSON satisfies [encoding/json.Unmarshaler]. It records that
+// the field was present (any non-omitted key triggers the call),
+// distinguishes the explicit-null case via a literal byte compare on
+// the raw token, and otherwise unmarshals into the string value.
+//
+// Returning the underlying [encoding/json.Unmarshal] error preserves
+// the stdlib's invalid-shape diagnostic (e.g. a number value yields
+// `cannot unmarshal number into Go struct field optionalArchiveURI.Value
+// of type string`) so the parser surfaces a stable 400 invalid_body
+// just like other non-string fields.
+func (o *optionalArchiveURI) UnmarshalJSON(data []byte) error {
+	o.Present = true
+	if bytes.Equal(data, []byte("null")) {
+		o.Null = true
+		return nil
+	}
+	return json.Unmarshal(data, &o.Value)
 }
 
 // parseUpdateWatchkeeperStatusRequest validates the envelope and the
 // requested target status. It does NOT validate the transition rule: that
 // requires reading the current row, which happens inside the scoped tx.
+//
+// Pre-tx archive_uri rules (M7.2.c, iter-1 + iter-2):
+//
+//   - When ABSENT (`!body.ArchiveURI.Present`), the active→retired
+//     transition still succeeds with a SQL NULL archive_uri so the
+//     M6.2.c synchronous retire tool stays wire-compatible (it
+//     predates the saga family and omits the field entirely).
+//   - When PRESENT-AND-NULL (`Present && Null`, on-wire
+//     `"archive_uri": null`), the request is rejected pre-tx as
+//     `invalid_request`. Iter-2 codex finding (Major): the naive
+//     `*string` upgrade still folded explicit JSON null into ABSENT,
+//     so `{"status":"active","archive_uri":null}` skipped the
+//     active-with-archive guard and `{"status":"retired","archive_uri":null}`
+//     silently fell into the legacy no-archive branch. Treating null
+//     as a wiring bug (rather than a synonym for absent) closes both
+//     holes; the legacy M6.2.c path emits no key at all so the
+//     change is wire-shape backward-compatible.
+//   - When PRESENT-AND-STRING (`Present && !Null`), the field MUST
+//     be paired with status:"retired" — an `archive_uri` key on the
+//     pending→active path is a wiring bug (M7.2.c MarkRetired step
+//     is the sole producer; pending→active runs pre-archive). The
+//     value MUST be non-blank after TrimSpace AND parse as an
+//     absolute URI (RFC 3986 with a non-empty scheme; iter-2 codex
+//     finding Major). The saga step + keepclient pre-validate the
+//     same shape upstream; this is defense-in-depth at the HTTP
+//     boundary so a direct caller cannot land garbage like
+//     `"../../tmp"` or `"garbage"` on the column.
+//     Iter-1 codex finding (Major): with a plain `string` field
+//     `body.ArchiveURI != ""` could not detect the present-but-empty
+//     case, so a `{"status":"retired","archive_uri":""}` body would
+//     silently take the no-archive SQL branch — the custom type +
+//     non-blank check + scheme check together close that gap.
 func parseUpdateWatchkeeperStatusRequest(w http.ResponseWriter, req *http.Request) (updateWatchkeeperStatusRequest, bool) {
 	var body updateWatchkeeperStatusRequest
 
@@ -802,7 +903,75 @@ func parseUpdateWatchkeeperStatusRequest(w http.ResponseWriter, req *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return body, false
 	}
+	if body.ArchiveURI.Present {
+		// Reject explicit JSON null: structurally distinct from
+		// absent and must not silently fall into the legacy
+		// no-archive branch (iter-2 codex finding Major).
+		if body.ArchiveURI.Null {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return body, false
+		}
+		if body.Status != "retired" {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return body, false
+		}
+		if strings.TrimSpace(body.ArchiveURI.Value) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return body, false
+		}
+		// RFC 3986 absolute-URI shape: a parse error OR a missing
+		// scheme rejects values like "garbage" or "../../tmp" that
+		// [net/url.Parse] otherwise tolerates as path-only URIs.
+		// Defense-in-depth at the HTTP boundary; the saga step +
+		// keepclient pre-validate the same shape (iter-2 codex
+		// finding Major).
+		if u, err := url.Parse(body.ArchiveURI.Value); err != nil || !u.IsAbs() {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return body, false
+		}
+	}
 	return body, true
+}
+
+// execRetireUpdate runs the active→retired UPDATE inside the supplied
+// scoped tx. Extracted from handleUpdateWatchkeeperStatus to keep that
+// function below gocyclo's complexity ceiling (15) after the M7.2.c
+// optional archive_uri ride-along landed.
+//
+// archive_uri persistence (M7.2.c, iter-1 + iter-2):
+//   - archive supplied (`archiveURI.Present && !archiveURI.Null`) →
+//     stamp the value on the column alongside retired_at. The pre-tx
+//     parser already rejected the (status="active", archive_uri
+//     present) combination, the present-but-blank case, and the
+//     missing-scheme case, so a Present+!Null arg here is guaranteed
+//     paired with status:"retired" and a non-blank absolute URI.
+//   - archive absent (`!archiveURI.Present`) → explicitly stamp
+//     archive_uri = NULL alongside retired_at, NOT just omit the
+//     column. Iter-2 codex finding (Minor): the previous "omit the
+//     column" form would preserve any stale non-NULL value on the
+//     row, which is impossible via the legitimate state machine
+//     (retired→active is forbidden) but possible via a direct DB
+//     write. The explicit NULL stamp + the migration-022 CHECK
+//     constraint (`archive_uri IS NULL OR status='retired'`)
+//     together close the data-consistency gap. Wire-compatible with
+//     the M6.2.c synchronous tool that predates the saga family and
+//     omits the field entirely (the wire-shape doesn't change; only
+//     the SQL semantics tighten).
+func execRetireUpdate(ctx context.Context, tx pgx.Tx, id string, archiveURI optionalArchiveURI) error {
+	if archiveURI.Present {
+		_, err := tx.Exec(ctx, `
+            UPDATE watchkeeper.watchkeeper
+            SET status = 'retired', retired_at = now(), archive_uri = $2
+            WHERE id = $1
+        `, id, archiveURI.Value)
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+        UPDATE watchkeeper.watchkeeper
+        SET status = 'retired', retired_at = now(), archive_uri = NULL
+        WHERE id = $1
+    `, id)
+	return err
 }
 
 // handleUpdateWatchkeeperStatus serves PATCH /v1/watchkeepers/{id}/status.
@@ -908,8 +1077,16 @@ func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
 
 			// Allowed transitions only:
 			//   pending → active
+			//   active  → retired   (optional archive_uri stamps the
+			//                        archive_uri column when supplied)
+			// Everything else is rejected without touching the row.
+			//
+			// Allowed transitions only:
+			//   pending → active
 			//   active  → retired
 			// Everything else is rejected without touching the row.
+			// archive_uri persistence is handled inside execRetireUpdate
+			// to keep this handler under gocyclo's complexity ceiling.
 			switch {
 			case current == "pending" && body.Status == "active":
 				_, err := tx.Exec(ctx, `
@@ -919,12 +1096,7 @@ func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
                 `, id)
 				return err
 			case current == "active" && body.Status == "retired":
-				_, err := tx.Exec(ctx, `
-                    UPDATE watchkeeper.watchkeeper
-                    SET status = 'retired', retired_at = now()
-                    WHERE id = $1
-                `, id)
-				return err
+				return execRetireUpdate(ctx, tx, id, body.ArchiveURI)
 			default:
 				res.invalidTransition = true
 				return nil

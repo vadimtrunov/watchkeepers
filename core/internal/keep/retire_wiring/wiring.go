@@ -47,9 +47,14 @@ type RetireKickofferDeps struct {
 
 	// Steps is the saga step list the kickoffer hands to
 	// [saga.Runner.Run] on every Kickoff. Optional — a nil / empty
-	// slice keeps the M7.1.b zero-step behaviour. The future M7.2.b
-	// + M7.2.c steps populate this with [NotebookArchive,
-	// MarkRetired] when those land.
+	// slice keeps the M7.1.b zero-step behaviour. With M7.2.b
+	// [spawn.NotebookArchiveStep] and M7.2.c [spawn.MarkRetiredStep]
+	// shipped, production wiring populates this slot with
+	// [NotebookArchive, MarkRetired] in that order; the M7.2.c
+	// MarkRetired step reads the archive_uri the M7.2.b step
+	// publishes via [saga.RetireResult.ArchiveURI] and persists it
+	// onto the watchkeeper row through
+	// [keepclient.Client.UpdateWatchkeeperRetired].
 	Steps []saga.Step
 }
 
