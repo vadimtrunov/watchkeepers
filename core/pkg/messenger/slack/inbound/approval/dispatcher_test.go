@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/vadimtrunov/watchkeepers/core/pkg/keepclient"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/keeperslog"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger/slack/cards"
@@ -51,6 +53,41 @@ func (f *fakeReplayer) recorded() []fakeReplayerCall {
 	return out
 }
 
+// fakeSpawnKickoff records every Kickoff call; substitutes a canned
+// error when `errToReturn` is non-nil. Used by the propose_spawn
+// branch tests to assert the dispatcher routes to SpawnKickoff (and
+// not to the existing Replayer) for the M6.3.b spawn tool.
+type fakeSpawnKickoff struct {
+	mu          sync.Mutex
+	calls       []fakeKickoffCall
+	errToReturn error
+}
+
+type fakeKickoffCall struct {
+	SagaID            uuid.UUID
+	ManifestVersionID uuid.UUID
+	ApprovalToken     string
+}
+
+func (f *fakeSpawnKickoff) Kickoff(_ context.Context, sagaID uuid.UUID, mvID uuid.UUID, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fakeKickoffCall{
+		SagaID:            sagaID,
+		ManifestVersionID: mvID,
+		ApprovalToken:     token,
+	})
+	return f.errToReturn
+}
+
+func (f *fakeSpawnKickoff) recorded() []fakeKickoffCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]fakeKickoffCall, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
 // fakeKeepClient is a recording [keeperslog.LocalKeepClient]; lets
 // the dispatcher tests assert event_type ordering without standing
 // up the full HTTP keepclient stack.
@@ -86,13 +123,31 @@ func (f *fakeKeepClient) eventTypes() []string {
 }
 
 // newDispatcher wires a Dispatcher with the supplied DAO + Replayer
-// onto a fresh in-process audit chain. Returns the dispatcher plus
-// the recording keepclient for assertions.
+// onto a fresh in-process audit chain. Stamps a no-op SpawnKickoff so
+// the M7.1.b panic-on-nil constructor remains satisfied for tests
+// that exercise non-spawn branches. Returns the dispatcher plus the
+// recording keepclient for assertions.
 func newDispatcher(t *testing.T, dao spawn.PendingApprovalDAO, rp approval.Replayer) (*approval.Dispatcher, *fakeKeepClient) {
 	t.Helper()
 	fkc := &fakeKeepClient{}
 	w := keeperslog.New(fkc)
-	d := approval.New(dao, rp, approval.WithAuditAppender(w))
+	d := approval.New(dao, rp, &fakeSpawnKickoff{}, approval.WithAuditAppender(w))
+	return d, fkc
+}
+
+// newDispatcherWithKickoff wires a Dispatcher exposing a recording
+// SpawnKickoff so propose_spawn branch tests can assert the kickoff
+// call shape. Otherwise identical to [newDispatcher].
+func newDispatcherWithKickoff(
+	t *testing.T,
+	dao spawn.PendingApprovalDAO,
+	rp approval.Replayer,
+	sk approval.SpawnKickoff,
+) (*approval.Dispatcher, *fakeKeepClient) {
+	t.Helper()
+	fkc := &fakeKeepClient{}
+	w := keeperslog.New(fkc)
+	d := approval.New(dao, rp, sk, approval.WithAuditAppender(w))
 	return d, fkc
 }
 
@@ -377,7 +432,9 @@ func TestDispatch_ApproveDownstreamError(t *testing.T) {
 	t.Parallel()
 
 	dao := spawn.NewMemoryPendingApprovalDAO(nil)
-	tool := spawn.PendingApprovalToolProposeSpawn
+	// Use a non-spawn tool so the Approved-branch routes through the
+	// Replayer (the M7.1.b spawn-saga branch is exercised separately).
+	tool := spawn.PendingApprovalToolAdjustPersonality
 	token := seedPending(t, dao, tool, `{"agent_id":"a-1"}`)
 
 	replayErr := errors.New("downstream tool exploded")
@@ -526,11 +583,14 @@ func TestDispatch_NoAuditAppenderIsNoop(t *testing.T) {
 	t.Parallel()
 
 	dao := spawn.NewMemoryPendingApprovalDAO(nil)
-	tool := spawn.PendingApprovalToolProposeSpawn
+	// Use a non-spawn tool so the test exercises the Replayer fallback
+	// path (the spawn branch has its own test for the audit-nil
+	// fallback semantics).
+	tool := spawn.PendingApprovalToolAdjustPersonality
 	token := seedPending(t, dao, tool, `{}`)
 
 	rp := &fakeReplayer{}
-	d := approval.New(dao, rp) // no WithAuditAppender
+	d := approval.New(dao, rp, &fakeSpawnKickoff{}) // no WithAuditAppender
 	actionID := cards.EncodeActionID(tool, token)
 	if err := d.DispatchInteraction(context.Background(), inbound.Interaction{
 		Type: "block_actions",
@@ -543,22 +603,278 @@ func TestDispatch_NoAuditAppenderIsNoop(t *testing.T) {
 	}
 }
 
-// TestNew_PanicsOnNilDeps pins the panic discipline: nil DAO or nil
-// Replayer is a programmer bug, not a runtime branch.
+// TestNew_PanicsOnNilDeps pins the panic discipline (M6.3.b
+// dependency-required pattern): nil DAO, nil Replayer, or nil
+// SpawnKickoff is a programmer bug, not a runtime branch.
 func TestNew_PanicsOnNilDeps(t *testing.T) {
 	t.Parallel()
 
 	defer func() { _ = recover() }()
-	_ = approval.New(nil, &fakeReplayer{})
-	t.Fatal("New(nil, replayer) did not panic")
+	_ = approval.New(nil, &fakeReplayer{}, &fakeSpawnKickoff{})
+	t.Fatal("New(nil, replayer, kickoff) did not panic")
 }
 
 func TestNew_PanicsOnNilReplayer(t *testing.T) {
 	t.Parallel()
 
 	defer func() { _ = recover() }()
-	_ = approval.New(spawn.NewMemoryPendingApprovalDAO(nil), nil)
-	t.Fatal("New(dao, nil) did not panic")
+	_ = approval.New(spawn.NewMemoryPendingApprovalDAO(nil), nil, &fakeSpawnKickoff{})
+	t.Fatal("New(dao, nil, kickoff) did not panic")
+}
+
+// TestNew_PanicsOnNilSpawnKickoff pins the new M7.1.b dependency:
+// SpawnKickoff is a required parameter; a nil kickoff is a programmer
+// bug, not a runtime branch.
+func TestNew_PanicsOnNilSpawnKickoff(t *testing.T) {
+	t.Parallel()
+
+	defer func() { _ = recover() }()
+	_ = approval.New(spawn.NewMemoryPendingApprovalDAO(nil), &fakeReplayer{}, nil)
+	t.Fatal("New(dao, replayer, nil) did not panic")
+}
+
+// ── propose_spawn branch tests (M7.1.b) ───────────────────────────────────
+
+// TestDispatch_ProposeSpawn_ApproveRoutesToKickoff pins AC3 + the M7.1.b
+// happy-path test plan: an approve action on a `propose_spawn` pending
+// row routes to SpawnKickoff (NOT to the existing Replayer); the audit
+// chain is identical to the non-spawn approve path because the kickoff
+// itself owns the `manifest_approved_for_spawn` event emission. The
+// seeded `manifest_version_id` round-trips via params_json onto the
+// kickoff call (wire-shape regression — pins the dispatcher to forward
+// the row's real manifest_version_id rather than a fresh random UUID).
+func TestDispatch_ProposeSpawn_ApproveRoutesToKickoff(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryPendingApprovalDAO(nil)
+	tool := spawn.PendingApprovalToolProposeSpawn
+	seededMVID := uuid.New()
+	params := `{"agent_id":"a-1","manifest_version_id":"` + seededMVID.String() + `"}`
+	token := seedPending(t, dao, tool, params)
+
+	rp := &fakeReplayer{}
+	sk := &fakeSpawnKickoff{}
+	d, fkc := newDispatcherWithKickoff(t, dao, rp, sk)
+
+	actionID := cards.EncodeActionID(tool, token)
+	if err := d.DispatchInteraction(context.Background(), inbound.Interaction{
+		Type: "block_actions",
+		Raw:  blockActionsPayloadJSON(actionID, cards.ButtonValueApprove),
+	}); err != nil {
+		t.Fatalf("DispatchInteraction: %v", err)
+	}
+
+	// SpawnKickoff was invoked exactly once; the existing Replayer was
+	// NOT invoked at all (the propose_spawn branch fans out to the saga).
+	if calls := sk.recorded(); len(calls) != 1 {
+		t.Errorf("SpawnKickoff calls = %d, want 1", len(calls))
+	} else {
+		if calls[0].ApprovalToken != token {
+			t.Errorf("SpawnKickoff token = %q, want %q", calls[0].ApprovalToken, token)
+		}
+		if calls[0].SagaID == uuid.Nil {
+			t.Errorf("SpawnKickoff sagaID = nil, want a non-zero uuid")
+		}
+		// AC2 / test-plan happy-path: the dispatcher MUST forward the
+		// row's real manifest_version_id, not a fresh random UUID. A
+		// `!= uuid.Nil` check would pass for any non-zero UUID and
+		// hide the regression; pin the equality.
+		if calls[0].ManifestVersionID != seededMVID {
+			t.Errorf("SpawnKickoff manifestVersionID = %q, want %q (seeded via params_json)",
+				calls[0].ManifestVersionID, seededMVID)
+		}
+	}
+	if calls := rp.recorded(); len(calls) != 0 {
+		t.Errorf("Replay calls = %d, want 0 (propose_spawn must NOT route to Replayer)", len(calls))
+	}
+
+	// Audit chain mirrors the regular approve flow; the kickoff-side
+	// `manifest_approved_for_spawn` + `saga_completed` events are
+	// emitted by the kickoffer (see spawn package tests).
+	wantEvents := []string{
+		"approval_card_action_received",
+		"approval_resolved",
+		"approval_replay_succeeded",
+	}
+	if got := fkc.eventTypes(); !equalStringSlice(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
+}
+
+// TestDispatch_NonSpawn_ApproveRoutesToReplayer pins the M7.1.b
+// negative-side guard: an approve action on a non-spawn tool stays on
+// the existing Replayer path; SpawnKickoff is NOT invoked.
+func TestDispatch_NonSpawn_ApproveRoutesToReplayer(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryPendingApprovalDAO(nil)
+	tool := spawn.PendingApprovalToolAdjustPersonality
+	token := seedPending(t, dao, tool, `{"agent_id":"a-1","new_personality":"calm"}`)
+
+	rp := &fakeReplayer{}
+	sk := &fakeSpawnKickoff{}
+	d, fkc := newDispatcherWithKickoff(t, dao, rp, sk)
+
+	actionID := cards.EncodeActionID(tool, token)
+	if err := d.DispatchInteraction(context.Background(), inbound.Interaction{
+		Type: "block_actions",
+		Raw:  blockActionsPayloadJSON(actionID, cards.ButtonValueApprove),
+	}); err != nil {
+		t.Fatalf("DispatchInteraction: %v", err)
+	}
+
+	if calls := sk.recorded(); len(calls) != 0 {
+		t.Errorf("SpawnKickoff calls = %d, want 0", len(calls))
+	}
+	if calls := rp.recorded(); len(calls) != 1 {
+		t.Errorf("Replay calls = %d, want 1", len(calls))
+	}
+	wantEvents := []string{
+		"approval_card_action_received",
+		"approval_resolved",
+		"approval_replay_succeeded",
+	}
+	if got := fkc.eventTypes(); !equalStringSlice(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
+}
+
+// TestDispatch_ProposeSpawn_RejectDoesNotKickoff pins the test plan
+// "Reject on a propose_spawn pending row → neither SpawnKickoff nor
+// Replayer called; existing rejection path unchanged".
+func TestDispatch_ProposeSpawn_RejectDoesNotKickoff(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryPendingApprovalDAO(nil)
+	tool := spawn.PendingApprovalToolProposeSpawn
+	token := seedPending(t, dao, tool, `{"agent_id":"a-1"}`)
+
+	rp := &fakeReplayer{}
+	sk := &fakeSpawnKickoff{}
+	d, fkc := newDispatcherWithKickoff(t, dao, rp, sk)
+
+	actionID := cards.EncodeActionID(tool, token)
+	if err := d.DispatchInteraction(context.Background(), inbound.Interaction{
+		Type: "block_actions",
+		Raw:  blockActionsPayloadJSON(actionID, cards.ButtonValueReject),
+	}); err != nil {
+		t.Fatalf("DispatchInteraction: %v", err)
+	}
+
+	if calls := sk.recorded(); len(calls) != 0 {
+		t.Errorf("SpawnKickoff calls = %d, want 0", len(calls))
+	}
+	if calls := rp.recorded(); len(calls) != 0 {
+		t.Errorf("Replay calls = %d, want 0", len(calls))
+	}
+	wantEvents := []string{
+		"approval_card_action_received",
+		"approval_resolved",
+	}
+	if got := fkc.eventTypes(); !equalStringSlice(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
+	row, _ := dao.Get(context.Background(), token)
+	if row.State != spawn.PendingApprovalStateRejected {
+		t.Errorf("DAO state = %q, want rejected", row.State)
+	}
+}
+
+// TestDispatch_ProposeSpawn_KickoffError surfaces the kickoff error on
+// the audit chain via `approval_replay_failed` (the same event-type
+// vocabulary as the Replayer-error path so a downstream consumer can
+// branch on `error_class` rather than re-keying its query).
+func TestDispatch_ProposeSpawn_KickoffError(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryPendingApprovalDAO(nil)
+	tool := spawn.PendingApprovalToolProposeSpawn
+	mvID := uuid.New().String()
+	token := seedPending(t, dao, tool, `{"agent_id":"a-1","manifest_version_id":"`+mvID+`"}`)
+
+	kickErr := errors.New("kickoff exploded")
+	rp := &fakeReplayer{}
+	sk := &fakeSpawnKickoff{errToReturn: kickErr}
+	d, fkc := newDispatcherWithKickoff(t, dao, rp, sk)
+
+	actionID := cards.EncodeActionID(tool, token)
+	err := d.DispatchInteraction(context.Background(), inbound.Interaction{
+		Type: "block_actions",
+		Raw:  blockActionsPayloadJSON(actionID, cards.ButtonValueApprove),
+	})
+	if err == nil {
+		t.Fatal("DispatchInteraction returned nil, want non-nil error")
+	}
+
+	wantEvents := []string{
+		"approval_card_action_received",
+		"approval_resolved",
+		"approval_replay_failed",
+	}
+	if got := fkc.eventTypes(); !equalStringSlice(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
+	// Replay was NOT invoked (the spawn branch routes to SpawnKickoff).
+	if calls := rp.recorded(); len(calls) != 0 {
+		t.Errorf("Replay calls = %d, want 0", len(calls))
+	}
+	// Failed-row payload carries the error CLASS but never the value.
+	failedRow := fkc.appended()[2]
+	if !strings.Contains(string(failedRow.Payload), `"error_class":"*errors.errorString"`) {
+		t.Errorf("failed payload missing error_class: %s", failedRow.Payload)
+	}
+	if strings.Contains(string(failedRow.Payload), "kickoff exploded") {
+		t.Errorf("failed payload leaked error VALUE: %s", failedRow.Payload)
+	}
+}
+
+// TestDispatch_ProposeSpawn_MissingManifestVersionID pins the
+// negative-side guard for the M7.1.b dispatcher fix: a propose_spawn
+// pending row whose params_json omits `manifest_version_id` MUST NOT
+// reach SpawnKickoff. The dispatcher surfaces
+// [approval.ErrMissingManifestVersionID] on the audit chain via
+// `approval_replay_failed` so the producer-side gap (M6.3.c proposer
+// wiring) shows up as an audit signal rather than an orphan saga.
+func TestDispatch_ProposeSpawn_MissingManifestVersionID(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryPendingApprovalDAO(nil)
+	tool := spawn.PendingApprovalToolProposeSpawn
+	// params_json without `manifest_version_id` — the producer (M6.3.c
+	// proposer) is expected to populate it; this row simulates a
+	// mis-wired producer.
+	token := seedPending(t, dao, tool, `{"agent_id":"a-1"}`)
+
+	rp := &fakeReplayer{}
+	sk := &fakeSpawnKickoff{}
+	d, fkc := newDispatcherWithKickoff(t, dao, rp, sk)
+
+	actionID := cards.EncodeActionID(tool, token)
+	err := d.DispatchInteraction(context.Background(), inbound.Interaction{
+		Type: "block_actions",
+		Raw:  blockActionsPayloadJSON(actionID, cards.ButtonValueApprove),
+	})
+	if err == nil {
+		t.Fatal("DispatchInteraction returned nil, want non-nil error")
+	}
+	if !errors.Is(err, approval.ErrMissingManifestVersionID) {
+		t.Errorf("err = %v, want chain wrapping ErrMissingManifestVersionID", err)
+	}
+
+	if calls := sk.recorded(); len(calls) != 0 {
+		t.Errorf("SpawnKickoff calls = %d, want 0 (missing manifest_version_id must short-circuit)", len(calls))
+	}
+	if calls := rp.recorded(); len(calls) != 0 {
+		t.Errorf("Replay calls = %d, want 0", len(calls))
+	}
+	wantEvents := []string{
+		"approval_card_action_received",
+		"approval_resolved",
+		"approval_replay_failed",
+	}
+	if got := fkc.eventTypes(); !equalStringSlice(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
 }
 
 // equalStringSlice is a tiny helper that beats reflect.DeepEqual for
