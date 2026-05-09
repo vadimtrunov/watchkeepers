@@ -417,10 +417,10 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Scope**
 
-- [ ] **M7.1** **Spawn saga (forward path)** — Watchmaster posts the draft Manifest in Slack (Approve/Reject blocks); approval writes an event to Keeper's Log and triggers a core RPC saga that chains: Manifest approval → Slack App create → OAuth install → bot profile set → provision per-agent Notebook file → runtime launch (personality/language applied) → intro message.
+- [x] **M7.1** **Spawn saga (forward path)** — Watchmaster posts the draft Manifest in Slack (Approve/Reject blocks); approval writes an event to Keeper's Log and triggers a core RPC saga that chains: Manifest approval → Slack App create → OAuth install → bot profile set → provision per-agent Notebook file → runtime launch (personality/language applied) → intro message.
   - [x] **M7.1.a** Saga skeleton: spawn/ package, state machine, saga-state DAO + migration
   - [x] **M7.1.b** Slack interaction handler: approval action → Keeper's Log event → saga kickoff
-  - [ ] **M7.1.c** Slack App provisioning step: create app + OAuth install + bot profile set
+  - [x] **M7.1.c** Slack App provisioning step: create app + OAuth install + bot profile set
     - [x] **M7.1.c.a** CreateApp saga step + watchkeeper secrets column + migration
     - [x] **M7.1.c.b** OAuthInstall saga step with encrypted bot-token storage
       - [x] **M7.1.c.b.a** Extend core/pkg/secrets with AES-GCM Encrypt/Decrypt primitive + KEK resolution
