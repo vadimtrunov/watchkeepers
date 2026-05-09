@@ -437,6 +437,83 @@ func TestClient_UpdateWatchkeeperRetired_EmptyArchiveURI_ErrInvalidRequest(t *te
 	}
 }
 
+// TestClient_UpdateWatchkeeperRetired_SchemelessArchiveURI_ErrInvalidRequest
+// pins the M7.2.c iter-2 codex finding (Major) at the keepclient seam:
+// the wire contract documents archive_uri as an RFC 3986 URI with a
+// non-empty scheme, but the iter-1 method only rejected blank
+// strings. Strings like `"garbage"` would round-trip onto the column
+// for any caller that bypassed the saga path; the absolute-URI gate
+// fails fast at the seam closest to the bug, with no network
+// round-trip burned and the server's matching gate as
+// defense-in-depth.
+func TestClient_UpdateWatchkeeperRetired_SchemelessArchiveURI_ErrInvalidRequest(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		uri  string
+	}{
+		{name: "bare_word", uri: "garbage"},
+		{name: "relative_path", uri: "../../tmp"},
+		{name: "leading_slash_only", uri: "/snapshots/wk.tar.gz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var hits int32
+			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				atomic.AddInt32(&hits, 1)
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+			err := c.UpdateWatchkeeperRetired(context.Background(), wkTestRowID, tc.uri)
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("err = %v, want ErrInvalidRequest for %q", err, tc.uri)
+			}
+			if got := atomic.LoadInt32(&hits); got != 0 {
+				t.Errorf("network hits = %d, want 0 for %q", got, tc.uri)
+			}
+		})
+	}
+}
+
+// TestClient_UpdateWatchkeeperRetired_AbsoluteURISchemes_Accepted
+// pins the M7.2.c iter-2 positive complement: every scheme the
+// spawn-side archivestore can mint (file://, s3://, gs://, plus a
+// synthetic test:// to pin "any non-empty scheme" rather than a
+// hardcoded allowlist) round-trips through the new RFC 3986 gate
+// without burning ErrInvalidRequest.
+func TestClient_UpdateWatchkeeperRetired_AbsoluteURISchemes_Accepted(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		uri  string
+	}{
+		{name: "file_scheme", uri: "file:///snapshots/wk-active/2026-05-09T12-34-56Z.tar.gz"},
+		{name: "s3_scheme", uri: "s3://archives-bucket/wk/2026-05-09T12-34-56Z.tar.gz"},
+		{name: "gs_scheme", uri: "gs://archives-bucket/wk/2026-05-09T12-34-56Z.tar.gz"},
+		{name: "test_scheme", uri: "test://fake/host/path.tar.gz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+			if err := c.UpdateWatchkeeperRetired(context.Background(), wkTestRowID, tc.uri); err != nil {
+				t.Fatalf("UpdateWatchkeeperRetired(%q): %v", tc.uri, err)
+			}
+		})
+	}
+}
+
 // TestClient_UpdateWatchkeeperRetired_400_TransitionMaps asserts that
 // the M7.2.c method surfaces a 400 invalid_status_transition response
 // the same way [Client.UpdateWatchkeeperStatus] does — same Unwrap
