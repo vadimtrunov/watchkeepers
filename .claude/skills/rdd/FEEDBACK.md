@@ -2962,3 +2962,29 @@ The original Phase-3 executor's final report was truncated ("Both commands runni
 - Total wall time from /rdd to merge: pending
 
 ---
+
+## 2026-05-09 — M7.1.c.a: CreateApp saga step + watchkeeper secrets column + migration
+
+**PR**: pending — to be opened in Phase 5b
+**Phases with incidents**: 3 (Phase 3 executor truncated, requiring orchestrator-driven commit; Phase 4 iter-1 caught hollow AC pin)
+
+### What worked
+
+The bounded review loop's iter-2 stale-check did its job — the AC7 fix was substantive (mutation-tested) not papered-over, and reviewer iter-2 verified the resolution without flagging near-identical regressions. The deferred encryption-at-rest pattern (text columns + explicit deferral comment) kept the PR scope tight without sacrificing the migration-shipped-with-skeleton lesson from M6.3.b.
+
+### What wasted effort
+
+Third executor truncation in this session (Phase 3 of M7.1.c.a). The Phase 3 executor brief carried the ## Phase 3 Final Report discipline added after M7.1.b's truncation, but the executor still emitted "Let me wait for lint to finish." mid-tool-call and never reached the report. ALL files were created and the migration was staged, but 0 commits made. The orchestrator inspected branch state directly (git status, make lint, go test -race, CGO build), then created the 4 logically-grouped commits on the executor's behalf. By contrast, the Phase 4 fixer (sonnet, smaller scope) reached its final report cleanly. Hypothesis: the truncation correlates with executor wall-time exceeding ~10 min — the Phase 3 brief was too much work for one inline emission.
+
+### Suggested skill changes
+
+- .claude/skills/rdd/references/agent-briefs/executor.md §"Mode — build (Phase 3)": add a "checkpoint commits" requirement — executor MUST commit each plan-step (or each AC) as it lands, not batch the whole TASK into one final-report-then-commit phase. The orchestrator can recover from a truncation that left N committed commits + 0 staged files (just dispatch reviewer); recovery from N created files + 0 commits requires the orchestrator to do executor's git work.
+
+### Metrics
+
+- Review iterations: 2
+- PR-fix iterations: pending
+- Operator interventions outside of gates: 1 (orchestrator made commits on behalf of the truncated Phase 3 executor)
+- Total wall time from /rdd to merge: pending
+
+---

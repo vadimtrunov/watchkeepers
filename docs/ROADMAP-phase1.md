@@ -421,7 +421,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M7.1.a** Saga skeleton: spawn/ package, state machine, saga-state DAO + migration
   - [x] **M7.1.b** Slack interaction handler: approval action → Keeper's Log event → saga kickoff
   - [ ] **M7.1.c** Slack App provisioning step: create app + OAuth install + bot profile set
-    - [ ] **M7.1.c.a** CreateApp saga step + watchkeeper secrets column + migration
+    - [x] **M7.1.c.a** CreateApp saga step + watchkeeper secrets column + migration
     - [ ] **M7.1.c.b** OAuthInstall saga step with encrypted bot-token storage
     - [ ] **M7.1.c.c** BotProfile saga step + register step list in spawn kickoff wiring
   - [ ] **M7.1.d** Notebook provision step: per-agent Notebook file with personality/language
