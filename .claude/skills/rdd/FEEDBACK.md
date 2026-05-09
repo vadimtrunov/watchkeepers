@@ -2988,3 +2988,30 @@ Third executor truncation in this session (Phase 3 of M7.1.c.a). The Phase 3 exe
 - Total wall time from /rdd to merge: pending
 
 ---
+
+## 2026-05-09 — M7.1.c.b.a: Extend core/pkg/secrets with AES-GCM Encrypt/Decrypt primitive + KEK resolution
+
+**PR**: pending — Phase 5b
+**Phases with incidents**: none
+
+### What worked
+
+The **executor-checkpoint-commits protocol** (added to the brief after M7.1.c.a Phase 3 truncation) worked exactly as designed. Executor produced 2 checkpoint commits during the run (8daf47d `feat(secrets): AES-GCM Encrypter primitive`, 469486d `test(secrets): AES-GCM crypto round-trip + tampering + concurrency tests`) rather than batching into one final-emission. The final report emitted cleanly. Reviewer iter-1 converged with 0/0/0 because the brief enumerated 15 crypto-antipattern defect classes by name, giving the reviewer a targeted grep checklist instead of generic "review for security". Both improvements are now load-bearing for security-sensitive PRs.
+
+### What wasted effort
+
+None material this iteration. The crypto-checklist enumeration in the brief itself is dense (~600 chars in the executor brief, ~700 chars in the reviewer brief), but that cost amortizes across the 1-iter convergence.
+
+### Suggested skill changes
+
+- Promote the **enumerated-antipattern-checklist** brief pattern to `.claude/skills/rdd/references/agent-briefs/code-reviewer.md` §"Specific defect classes" — currently the brief tells the reviewer "scan for security issues" generically; M7.1.c.b.a showed that an explicit numbered list of named antipatterns produces a one-iteration convergence.
+- Promote the **executor checkpoint-commits-per-step** discipline to `.claude/skills/rdd/references/agent-briefs/executor.md` §"Mode — build (Phase 3)" as a default expectation, not a per-TASK brief addition. Three M7.1.b/M7.1.c.a executor truncations forced orchestrator-side recovery; the M7.1.c.b.a iteration shows the discipline works.
+
+### Metrics
+
+- Review iterations: 1
+- PR-fix iterations: pending
+- Operator interventions outside of gates: 0
+- Total wall time from /rdd to merge: pending
+
+---
