@@ -3,14 +3,18 @@
 // between the Slack approval card and the M7.1.a saga runner: when
 // the admin clicks Approve on a `propose_spawn` row, the dispatcher
 // hands a kickoffer the freshly-minted saga id, the manifest_version
-// id, and the approval token; the kickoffer composes the audit
+// id, the freshly-minted watchkeeper id, the Watchmaster's claim, and
+// the approval token; the kickoffer composes the audit
 // `manifest_approved_for_spawn` event, persists the saga row via
-// [saga.SpawnSagaDAO.Insert], and runs the saga via [saga.Runner.Run]
-// with an empty step list (concrete steps land in M7.1.c–.e).
+// [saga.SpawnSagaDAO.Insert], seeds a [saga.SpawnContext] on the
+// per-call `context.Context`, and runs the saga via [saga.Runner.Run]
+// with the construction-time configured step list (M7.1.c.c
+// registration; concrete steps land in M7.1.c–.e).
 package spawn
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -18,6 +22,15 @@ import (
 	"github.com/vadimtrunov/watchkeepers/core/pkg/keeperslog"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/spawn/saga"
 )
+
+// ErrInvalidKickoffArgs is returned by [SpawnKickoffer.Kickoff] when
+// the supplied per-call arguments fail synchronous shape validation —
+// currently: zero `sagaID`, zero `manifestVersionID`, zero
+// `watchkeeperID`. The fail-fast guard runs BEFORE the audit-emit /
+// state-write side effects so a malformed kickoff leaves NO orphan
+// `manifest_approved_for_spawn` row and NO orphan saga row.
+// Matchable via [errors.Is].
+var ErrInvalidKickoffArgs = errors.New("spawn: invalid kickoff args")
 
 // kickoffLogAppender is the minimal subset of [keeperslog.Writer] the
 // kickoffer consumes — only [keeperslog.Writer.Append]. Re-declared
@@ -81,6 +94,14 @@ type SpawnKickoffer struct {
 	dao     saga.SpawnSagaDAO
 	runner  *saga.Runner
 	agentID string
+	// steps is the M7.1.c.c step list registered at construction
+	// time. May be nil / empty — the runner treats nil as an empty
+	// slice and the saga completes immediately with a single
+	// `saga_completed` audit event (matches the M7.1.b zero-step
+	// behaviour). Production wiring populates this with
+	// CreateApp + OAuthInstall + BotProfile + (M7.1.d Notebook) +
+	// (M7.1.e Runtime launch) over the M7.1.c–.e milestones.
+	steps []saga.Step
 }
 
 // SpawnKickoffDeps is the construction-time bag wired into
@@ -105,8 +126,9 @@ type SpawnKickoffDeps struct {
 
 	// Runner is the saga-runner seam. Required; a nil Runner is
 	// rejected at construction. The kickoffer calls
-	// [saga.Runner.Run] with an empty step list in M7.1.b — concrete
-	// steps land in M7.1.c–.e.
+	// [saga.Runner.Run] with the construction-time-configured
+	// [SpawnKickoffDeps.Steps] slice (M7.1.c.c) seeded with a
+	// per-saga [saga.SpawnContext] on `ctx`.
 	Runner *saga.Runner
 
 	// AgentID is the bot's stable agent identifier emitted on every
@@ -114,13 +136,28 @@ type SpawnKickoffDeps struct {
 	// rejected at construction so a downstream consumer's `agent_id`
 	// query never silently returns rows with no owner.
 	AgentID string
+
+	// Steps is the M7.1.c.c-introduced step list the kickoffer hands
+	// to [saga.Runner.Run] on every Kickoff. Optional — a nil / empty
+	// slice keeps the M7.1.b zero-step behaviour (the saga completes
+	// immediately with a single `saga_completed` audit event). The
+	// kickoffer takes a defensive copy at construction time so a
+	// post-construction mutation of the caller's slice does not
+	// affect saga runs.
+	//
+	// Production wiring populates this with the M7.1.c.a CreateApp
+	// step + M7.1.c.b.b OAuthInstall step + M7.1.c.c BotProfile step
+	// (in that order), with M7.1.d Notebook + M7.1.e Runtime launch
+	// landing in their own milestones.
+	Steps []saga.Step
 }
 
 // NewSpawnKickoffer constructs a [SpawnKickoffer] with the supplied
 // [SpawnKickoffDeps]. Logger, DAO, Runner, and AgentID are required;
 // a nil/empty value for any of them panics with a clear message —
 // matches the panic discipline of [keeperslog.New] and
-// [saga.NewRunner].
+// [saga.NewRunner]. Steps is optional (nil / empty produces a
+// zero-step saga matching the M7.1.b behaviour).
 func NewSpawnKickoffer(deps SpawnKickoffDeps) *SpawnKickoffer {
 	if deps.Logger == nil {
 		panic("spawn: NewSpawnKickoffer: deps.Logger must not be nil")
@@ -134,15 +171,18 @@ func NewSpawnKickoffer(deps SpawnKickoffDeps) *SpawnKickoffer {
 	if deps.AgentID == "" {
 		panic("spawn: NewSpawnKickoffer: deps.AgentID must not be empty")
 	}
+	steps := append([]saga.Step(nil), deps.Steps...)
 	return &SpawnKickoffer{
 		logger:  deps.Logger,
 		dao:     deps.DAO,
 		runner:  deps.Runner,
 		agentID: deps.AgentID,
+		steps:   steps,
 	}
 }
 
-// Kickoff seeds the spawn saga and runs it with an empty step list.
+// Kickoff seeds the spawn saga and runs it through the
+// construction-time-registered step list.
 //
 // Sequence (load-bearing — the order is pinned by an ordering test):
 //
@@ -153,10 +193,17 @@ func NewSpawnKickoffer(deps SpawnKickoffDeps) *SpawnKickoffer {
 //  2. Call [saga.SpawnSagaDAO.Insert] to persist the saga row
 //     (Insert MUST precede Run — the runner's first action is
 //     [saga.SpawnSagaDAO.Get], which would fail without the row).
-//  3. Call [saga.Runner.Run] with an empty step list. M7.1.a's
-//     zero-step run completes immediately and emits a single
-//     `saga_completed` event, so the production happy-path emits
-//     exactly: 1 `manifest_approved_for_spawn` + 1 `saga_completed`.
+//  3. Seed the per-call [saga.SpawnContext] on `ctx` with the
+//     manifest_version id, the watchkeeperID (=AgentID), and the
+//     supplied claim. OAuthCode stays empty in the Phase-1
+//     admin-grant flow; the M7.1.c.b.b OAuthInstall step
+//     short-circuits with a wrapped sentinel until the operator
+//     supplies a code (a future M7.x will replace this with an
+//     auto-install callback HTTP route).
+//  4. Call [saga.Runner.Run] with the registered step list. A
+//     nil / empty step list completes immediately and emits a
+//     single `saga_completed` event (matches the M7.1.b
+//     zero-step behaviour).
 //
 // Errors are wrapped with the `spawn:` prefix; the underlying
 // keeperslog / saga sentinels remain matchable via [errors.Is]
@@ -166,8 +213,26 @@ func (k *SpawnKickoffer) Kickoff(
 	ctx context.Context,
 	sagaID uuid.UUID,
 	manifestVersionID uuid.UUID,
+	watchkeeperID uuid.UUID,
+	claim saga.SpawnClaim,
 	approvalToken string,
 ) error {
+	// Fail-fast validation runs BEFORE Append/Insert so a malformed
+	// kickoff leaves no audit row + no saga row. The dispatcher's
+	// production caller mints both ids via uuid.New(), so a Nil here
+	// is a programmer / wiring bug — surfacing it as
+	// `approval_replay_failed` (the dispatcher's existing error
+	// branch) is preferable to a half-emitted audit chain.
+	if sagaID == uuid.Nil {
+		return fmt.Errorf("%w: empty sagaID", ErrInvalidKickoffArgs)
+	}
+	if manifestVersionID == uuid.Nil {
+		return fmt.Errorf("%w: empty manifestVersionID", ErrInvalidKickoffArgs)
+	}
+	if watchkeeperID == uuid.Nil {
+		return fmt.Errorf("%w: empty watchkeeperID", ErrInvalidKickoffArgs)
+	}
+
 	if _, err := k.logger.Append(ctx, keeperslog.Event{
 		EventType: EventTypeManifestApprovedForSpawn,
 		Payload:   manifestApprovedPayload(manifestVersionID, approvalToken, k.agentID),
@@ -179,7 +244,13 @@ func (k *SpawnKickoffer) Kickoff(
 		return fmt.Errorf("spawn: kickoff: insert saga: %w", err)
 	}
 
-	if err := k.runner.Run(ctx, sagaID, []saga.Step{}); err != nil {
+	ctx = saga.WithSpawnContext(ctx, saga.SpawnContext{
+		ManifestVersionID: manifestVersionID,
+		AgentID:           watchkeeperID,
+		Claim:             claim,
+	})
+
+	if err := k.runner.Run(ctx, sagaID, k.steps); err != nil {
 		return fmt.Errorf("spawn: kickoff: run saga: %w", err)
 	}
 	return nil

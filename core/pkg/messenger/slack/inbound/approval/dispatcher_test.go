@@ -16,6 +16,7 @@ import (
 	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger/slack/inbound"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger/slack/inbound/approval"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/spawn"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/spawn/saga"
 )
 
 // ── real fakes (M5.6 discipline — no mocks of unit under test) ─────────
@@ -66,15 +67,26 @@ type fakeSpawnKickoff struct {
 type fakeKickoffCall struct {
 	SagaID            uuid.UUID
 	ManifestVersionID uuid.UUID
+	WatchkeeperID     uuid.UUID
+	Claim             saga.SpawnClaim
 	ApprovalToken     string
 }
 
-func (f *fakeSpawnKickoff) Kickoff(_ context.Context, sagaID uuid.UUID, mvID uuid.UUID, token string) error {
+func (f *fakeSpawnKickoff) Kickoff(
+	_ context.Context,
+	sagaID uuid.UUID,
+	mvID uuid.UUID,
+	watchkeeperID uuid.UUID,
+	claim saga.SpawnClaim,
+	token string,
+) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, fakeKickoffCall{
 		SagaID:            sagaID,
 		ManifestVersionID: mvID,
+		WatchkeeperID:     watchkeeperID,
+		Claim:             claim,
 		ApprovalToken:     token,
 	})
 	return f.errToReturn
@@ -137,18 +149,46 @@ func newDispatcher(t *testing.T, dao spawn.PendingApprovalDAO, rp approval.Repla
 
 // newDispatcherWithKickoff wires a Dispatcher exposing a recording
 // SpawnKickoff so propose_spawn branch tests can assert the kickoff
-// call shape. Otherwise identical to [newDispatcher].
+// call shape. Variadic `extraOpts` are appended after
+// [approval.WithAuditAppender] so tests can wire
+// [approval.WithSpawnClaimResolver] when they need to pin claim
+// forwarding. Otherwise identical to [newDispatcher].
 func newDispatcherWithKickoff(
 	t *testing.T,
 	dao spawn.PendingApprovalDAO,
 	rp approval.Replayer,
 	sk approval.SpawnKickoff,
+	extraOpts ...approval.Option,
 ) (*approval.Dispatcher, *fakeKeepClient) {
 	t.Helper()
 	fkc := &fakeKeepClient{}
 	w := keeperslog.New(fkc)
-	d := approval.New(dao, rp, sk, approval.WithAuditAppender(w))
+	opts := append([]approval.Option{approval.WithAuditAppender(w)}, extraOpts...)
+	d := approval.New(dao, rp, sk, opts...)
 	return d, fkc
+}
+
+// testSpawnClaim is the canonical [saga.SpawnClaim] used across the
+// dispatcher's propose_spawn branch tests. The matrix entry is the
+// M6.1.a "slack_app_create=lead_approval" pair the M7.1.c.a CreateApp
+// step's gate consults.
+func testSpawnClaim() saga.SpawnClaim {
+	return saga.SpawnClaim{
+		OrganizationID: "org-test",
+		AgentID:        "agent-watchmaster",
+		AuthorityMatrix: map[string]string{
+			"slack_app_create": "lead_approval",
+		},
+	}
+}
+
+// staticSpawnClaimResolver returns a [approval.SpawnClaimResolver]
+// that ignores the manifestVersionID input and always yields `claim`.
+// Used by the propose_spawn happy-path tests.
+func staticSpawnClaimResolver(claim saga.SpawnClaim) approval.SpawnClaimResolver {
+	return func(_ context.Context, _ uuid.UUID) (saga.SpawnClaim, error) {
+		return claim, nil
+	}
 }
 
 // blockActionsPayloadJSON builds a Slack `block_actions` payload as
@@ -654,7 +694,8 @@ func TestDispatch_ProposeSpawn_ApproveRoutesToKickoff(t *testing.T) {
 
 	rp := &fakeReplayer{}
 	sk := &fakeSpawnKickoff{}
-	d, fkc := newDispatcherWithKickoff(t, dao, rp, sk)
+	wantClaim := testSpawnClaim()
+	d, fkc := newDispatcherWithKickoff(t, dao, rp, sk, approval.WithSpawnClaimResolver(staticSpawnClaimResolver(wantClaim)))
 
 	actionID := cards.EncodeActionID(tool, token)
 	if err := d.DispatchInteraction(context.Background(), inbound.Interaction{
@@ -683,6 +724,24 @@ func TestDispatch_ProposeSpawn_ApproveRoutesToKickoff(t *testing.T) {
 			t.Errorf("SpawnKickoff manifestVersionID = %q, want %q (seeded via params_json)",
 				calls[0].ManifestVersionID, seededMVID)
 		}
+		// M7.1.c.c iter-1 codex-review pin #4: dispatcher mints a
+		// non-nil watchkeeperID per call (uuid.New()).
+		if calls[0].WatchkeeperID == uuid.Nil {
+			t.Errorf("SpawnKickoff watchkeeperID = nil, want a non-zero uuid")
+		}
+		if calls[0].WatchkeeperID == calls[0].SagaID {
+			t.Errorf("SpawnKickoff watchkeeperID == sagaID; want distinct uuid.New() pair")
+		}
+		// M7.1.c.c iter-1 codex-review pin #4: claim must come from
+		// the configured resolver, not a process-global static value.
+		if calls[0].Claim.OrganizationID != wantClaim.OrganizationID {
+			t.Errorf("SpawnKickoff claim.OrganizationID = %q, want %q (configured resolver)",
+				calls[0].Claim.OrganizationID, wantClaim.OrganizationID)
+		}
+		if calls[0].Claim.AuthorityMatrix["slack_app_create"] != "lead_approval" {
+			t.Errorf("SpawnKickoff claim.AuthorityMatrix[slack_app_create] = %q, want lead_approval",
+				calls[0].Claim.AuthorityMatrix["slack_app_create"])
+		}
 	}
 	if calls := rp.recorded(); len(calls) != 0 {
 		t.Errorf("Replay calls = %d, want 0 (propose_spawn must NOT route to Replayer)", len(calls))
@@ -695,6 +754,98 @@ func TestDispatch_ProposeSpawn_ApproveRoutesToKickoff(t *testing.T) {
 		"approval_card_action_received",
 		"approval_resolved",
 		"approval_replay_succeeded",
+	}
+	if got := fkc.eventTypes(); !equalStringSlice(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
+}
+
+// TestDispatch_ProposeSpawn_NoResolver_ForwardsZeroClaim pins the
+// M7.1.c.c iter-1 codex-review back-compat path: a dispatcher
+// constructed without [approval.WithSpawnClaimResolver] forwards the
+// zero [saga.SpawnClaim] (matches the M7.1.b no-resolver behaviour
+// that pre-dated the per-call resolver). Used by unit tests that
+// exercise non-spawn branches without a real claim source.
+func TestDispatch_ProposeSpawn_NoResolver_ForwardsZeroClaim(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryPendingApprovalDAO(nil)
+	tool := spawn.PendingApprovalToolProposeSpawn
+	mvID := uuid.New()
+	params := `{"agent_id":"a-1","manifest_version_id":"` + mvID.String() + `"}`
+	token := seedPending(t, dao, tool, params)
+
+	rp := &fakeReplayer{}
+	sk := &fakeSpawnKickoff{}
+	d, _ := newDispatcherWithKickoff(t, dao, rp, sk) // no resolver wired
+
+	actionID := cards.EncodeActionID(tool, token)
+	if err := d.DispatchInteraction(context.Background(), inbound.Interaction{
+		Type: "block_actions",
+		Raw:  blockActionsPayloadJSON(actionID, cards.ButtonValueApprove),
+	}); err != nil {
+		t.Fatalf("DispatchInteraction: %v", err)
+	}
+
+	calls := sk.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("SpawnKickoff calls = %d, want 1", len(calls))
+	}
+	zero := saga.SpawnClaim{}
+	if calls[0].Claim.OrganizationID != zero.OrganizationID {
+		t.Errorf("Claim.OrganizationID = %q, want zero (no resolver)", calls[0].Claim.OrganizationID)
+	}
+	if len(calls[0].Claim.AuthorityMatrix) != 0 {
+		t.Errorf("Claim.AuthorityMatrix size = %d, want 0 (no resolver)", len(calls[0].Claim.AuthorityMatrix))
+	}
+}
+
+// TestDispatch_ProposeSpawn_ResolverError_AuditsReplayFailed pins the
+// M7.1.c.c iter-1 codex-review error path: a non-nil
+// [approval.SpawnClaimResolver] error MUST surface as
+// `approval_replay_failed` (not as `approval_replay_succeeded`) and
+// MUST NOT call SpawnKickoff.
+func TestDispatch_ProposeSpawn_ResolverError_AuditsReplayFailed(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryPendingApprovalDAO(nil)
+	tool := spawn.PendingApprovalToolProposeSpawn
+	mvID := uuid.New()
+	params := `{"agent_id":"a-1","manifest_version_id":"` + mvID.String() + `"}`
+	token := seedPending(t, dao, tool, params)
+
+	resolveErr := errors.New("manifest_version row not found for tenant")
+	resolver := approval.SpawnClaimResolver(func(_ context.Context, _ uuid.UUID) (saga.SpawnClaim, error) {
+		return saga.SpawnClaim{}, resolveErr
+	})
+
+	rp := &fakeReplayer{}
+	sk := &fakeSpawnKickoff{}
+	d, fkc := newDispatcherWithKickoff(t, dao, rp, sk, approval.WithSpawnClaimResolver(resolver))
+
+	actionID := cards.EncodeActionID(tool, token)
+	err := d.DispatchInteraction(context.Background(), inbound.Interaction{
+		Type: "block_actions",
+		Raw:  blockActionsPayloadJSON(actionID, cards.ButtonValueApprove),
+	})
+	if err == nil {
+		t.Fatal("DispatchInteraction: err = nil, want wrapped resolver error")
+	}
+	if !errors.Is(err, resolveErr) {
+		t.Errorf("errors.Is(err, resolveErr) = false; got %v", err)
+	}
+
+	// SpawnKickoff MUST NOT be invoked when the resolver fails — the
+	// claim is required for the saga's authority gate to pass.
+	if calls := sk.recorded(); len(calls) != 0 {
+		t.Errorf("SpawnKickoff calls = %d, want 0 (resolver failure must short-circuit kickoff)", len(calls))
+	}
+
+	// Audit chain: action_received → resolved → replay_failed.
+	wantEvents := []string{
+		"approval_card_action_received",
+		"approval_resolved",
+		"approval_replay_failed",
 	}
 	if got := fkc.eventTypes(); !equalStringSlice(got, wantEvents) {
 		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)

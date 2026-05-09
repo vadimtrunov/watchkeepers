@@ -126,6 +126,33 @@ func newKickoffer(t *testing.T, dao saga.SpawnSagaDAO, keep *fakeLocalKeepClient
 	})
 }
 
+// testSpawnClaim is the canonical claim used across the kickoff
+// tests. The matrix entry is the M6.1.a "slack_app_create=lead_approval"
+// pair the M7.1.c.a CreateApp step's gate consults.
+func testSpawnClaim() saga.SpawnClaim {
+	return saga.SpawnClaim{
+		OrganizationID: "org-test",
+		AgentID:        "agent-watchmaster",
+		AuthorityMatrix: map[string]string{
+			"slack_app_create": "lead_approval",
+		},
+	}
+}
+
+// kickoffWithDefaults invokes the M7.1.c.c-extended Kickoff signature
+// with a fresh watchkeeperID and the canonical [testSpawnClaim]. Lets
+// existing M7.1.b tests stay focused on their specific assertions
+// (audit ordering, payload PII discipline) without re-stating the
+// per-call values on every line.
+func kickoffWithDefaults(
+	ctx context.Context,
+	k *spawn.SpawnKickoffer,
+	sagaID, manifestVersionID uuid.UUID,
+	approvalToken string,
+) error {
+	return k.Kickoff(ctx, sagaID, manifestVersionID, uuid.New(), testSpawnClaim(), approvalToken)
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Constructor panics
 // ────────────────────────────────────────────────────────────────────────
@@ -199,7 +226,7 @@ func TestSpawnKickoff_HappyPath_EmitsTwoEventsInOrder(t *testing.T) {
 	mvID := uuid.New()
 	token := strings.Repeat("ZZ", 16)
 
-	if err := k.Kickoff(context.Background(), sagaID, mvID, token); err != nil {
+	if err := kickoffWithDefaults(context.Background(), k, sagaID, mvID, token); err != nil {
 		t.Fatalf("Kickoff: %v", err)
 	}
 
@@ -247,7 +274,7 @@ func TestSpawnKickoff_InsertPrecedesRun(t *testing.T) {
 		AgentID: "bot",
 	})
 
-	if err := k.Kickoff(context.Background(), uuid.New(), uuid.New(), "tok-test"); err != nil {
+	if err := kickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), "tok-test"); err != nil {
 		t.Fatalf("Kickoff: %v", err)
 	}
 
@@ -287,7 +314,7 @@ func TestSpawnKickoff_AppendError_StopsBeforeInsert(t *testing.T) {
 		AgentID: "bot",
 	})
 
-	err := k.Kickoff(context.Background(), uuid.New(), uuid.New(), "tok-test")
+	err := kickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), "tok-test")
 	if err == nil {
 		t.Fatal("Kickoff returned nil, want non-nil error")
 	}
@@ -325,7 +352,7 @@ func TestSpawnKickoff_InsertError_AuditAlreadyEmitted(t *testing.T) {
 		AgentID: "bot",
 	})
 
-	err := k.Kickoff(context.Background(), uuid.New(), uuid.New(), "tok-test")
+	err := kickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), "tok-test")
 	if err == nil {
 		t.Fatal("Kickoff returned nil, want non-nil error")
 	}
@@ -369,7 +396,7 @@ func TestSpawnKickoff_PayloadPIIDiscipline(t *testing.T) {
 	mvID := uuid.New()
 	token := strings.Repeat("ZZ", 16) // 32-char canary
 
-	if err := k.Kickoff(context.Background(), sagaID, mvID, token); err != nil {
+	if err := kickoffWithDefaults(context.Background(), k, sagaID, mvID, token); err != nil {
 		t.Fatalf("Kickoff: %v", err)
 	}
 
@@ -448,7 +475,7 @@ func TestSpawnKickoff_TokenPrefixDiscipline(t *testing.T) {
 	fullToken := strings.Repeat("ZZ", 16) // 32-char canary
 	const wantPrefix = "tok-ZZZZZZ"
 
-	if err := k.Kickoff(context.Background(), uuid.New(), uuid.New(), fullToken); err != nil {
+	if err := kickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), fullToken); err != nil {
 		t.Fatalf("Kickoff: %v", err)
 	}
 
@@ -481,7 +508,7 @@ func TestSpawnKickoff_TokenPrefixShortToken(t *testing.T) {
 	k := newKickoffer(t, dao, keep, "bot")
 
 	const shortToken = "abc"
-	if err := k.Kickoff(context.Background(), uuid.New(), uuid.New(), shortToken); err != nil {
+	if err := kickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), shortToken); err != nil {
 		t.Fatalf("Kickoff: %v", err)
 	}
 	row := keep.recorded()[0]
@@ -525,4 +552,308 @@ func TestEventTypeManifestApprovedForSpawn_NoPrefixCollision(t *testing.T) {
 // the stdlib so the bounds-checking discipline lives in one place.
 func equalStrings(a, b []string) bool {
 	return slices.Equal(a, b)
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// M7.1.c.c step-list registration: SpawnContext seeded on ctx; the
+// runner walks the configured step list in order.
+// ────────────────────────────────────────────────────────────────────────
+
+// recordingSagaStep is a hand-rolled [saga.Step] that records the
+// per-call SpawnContext (read off the supplied ctx) plus an order tick
+// so a multi-step happy-path test can assert (a) every step received
+// the same SpawnContext and (b) the runner invoked them in the
+// registered order.
+type recordingSagaStep struct {
+	name string
+	mu   *sync.Mutex
+	seq  *atomic.Int32
+	rec  *recordingStepLog
+}
+
+type recordingStepLog struct {
+	mu      sync.Mutex
+	entries []recordingStepEntry
+}
+
+type recordingStepEntry struct {
+	stepName     string
+	tickOrder    int32
+	spawnContext saga.SpawnContext
+	hadContext   bool
+}
+
+func newRecordingStepLog() *recordingStepLog { return &recordingStepLog{} }
+
+func (l *recordingStepLog) recorded() []recordingStepEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]recordingStepEntry, len(l.entries))
+	copy(out, l.entries)
+	return out
+}
+
+func (s *recordingSagaStep) Name() string { return s.name }
+
+func (s *recordingSagaStep) Execute(ctx context.Context) error {
+	sc, ok := saga.SpawnContextFromContext(ctx)
+	tick := s.seq.Add(1)
+	s.rec.mu.Lock()
+	s.rec.entries = append(s.rec.entries, recordingStepEntry{
+		stepName:     s.name,
+		tickOrder:    tick,
+		spawnContext: sc,
+		hadContext:   ok,
+	})
+	s.rec.mu.Unlock()
+	return nil
+}
+
+// TestSpawnKickoff_RegisteredSteps_RunInOrderWithSeededContext pins the
+// M7.1.c.c contract: the kickoffer hands [saga.Runner.Run] its
+// registered step list (no longer hard-coded `[]saga.Step{}`); each
+// step sees a SpawnContext seeded with the per-call manifest_version
+// id, watchkeeper id (= AgentID), and Watchmaster claim. The assertion
+// suite is the wire-shape regression test M7.1.d / M7.1.e will lean
+// on when adding their own steps.
+func TestSpawnKickoff_RegisteredSteps_RunInOrderWithSeededContext(t *testing.T) {
+	t.Parallel()
+
+	rec := newRecordingStepLog()
+	tick := &atomic.Int32{}
+	mu := &sync.Mutex{}
+	step1 := &recordingSagaStep{name: "step_one", mu: mu, seq: tick, rec: rec}
+	step2 := &recordingSagaStep{name: "step_two", mu: mu, seq: tick, rec: rec}
+	step3 := &recordingSagaStep{name: "step_three", mu: mu, seq: tick, rec: rec}
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+	k := spawn.NewSpawnKickoffer(spawn.SpawnKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot-watchmaster",
+		Steps:   []saga.Step{step1, step2, step3},
+	})
+
+	sagaID := uuid.New()
+	mvID := uuid.New()
+	wkID := uuid.New()
+	claim := testSpawnClaim()
+	const token = "tok-stepwiring"
+
+	if err := k.Kickoff(context.Background(), sagaID, mvID, wkID, claim, token); err != nil {
+		t.Fatalf("Kickoff: %v", err)
+	}
+
+	entries := rec.recorded()
+	if len(entries) != 3 {
+		t.Fatalf("recorded step entries = %d, want 3", len(entries))
+	}
+
+	// Order pin — ticks are monotonically increasing per Execute call.
+	wantNames := []string{"step_one", "step_two", "step_three"}
+	for i, want := range wantNames {
+		if entries[i].stepName != want {
+			t.Errorf("step #%d name = %q, want %q", i, entries[i].stepName, want)
+		}
+	}
+	if entries[0].tickOrder >= entries[1].tickOrder || entries[1].tickOrder >= entries[2].tickOrder {
+		t.Errorf("step tick order = %v, want strictly ascending", []int32{entries[0].tickOrder, entries[1].tickOrder, entries[2].tickOrder})
+	}
+
+	// SpawnContext pin — every step saw the same per-saga values.
+	for _, entry := range entries {
+		if !entry.hadContext {
+			t.Errorf("%s: SpawnContextFromContext(ctx) ok = false; want true", entry.stepName)
+			continue
+		}
+		if entry.spawnContext.ManifestVersionID != mvID {
+			t.Errorf("%s: SpawnContext.ManifestVersionID = %q, want %q",
+				entry.stepName, entry.spawnContext.ManifestVersionID, mvID)
+		}
+		if entry.spawnContext.AgentID != wkID {
+			t.Errorf("%s: SpawnContext.AgentID = %q, want %q (watchkeeperID)",
+				entry.stepName, entry.spawnContext.AgentID, wkID)
+		}
+		if entry.spawnContext.Claim.OrganizationID != claim.OrganizationID {
+			t.Errorf("%s: SpawnContext.Claim.OrganizationID = %q, want %q",
+				entry.stepName, entry.spawnContext.Claim.OrganizationID, claim.OrganizationID)
+		}
+		if entry.spawnContext.Claim.AuthorityMatrix["slack_app_create"] != "lead_approval" {
+			t.Errorf("%s: SpawnContext.Claim.AuthorityMatrix[slack_app_create] = %q, want lead_approval",
+				entry.stepName, entry.spawnContext.Claim.AuthorityMatrix["slack_app_create"])
+		}
+	}
+
+	// Saga reaches terminal state — three steps + one completed event
+	// surface as one manifest_approved_for_spawn + three pairs of
+	// (started, completed) + one saga_completed.
+	wantEvents := []string{
+		spawn.EventTypeManifestApprovedForSpawn,
+		saga.EventTypeSagaStepStarted, saga.EventTypeSagaStepCompleted,
+		saga.EventTypeSagaStepStarted, saga.EventTypeSagaStepCompleted,
+		saga.EventTypeSagaStepStarted, saga.EventTypeSagaStepCompleted,
+		saga.EventTypeSagaCompleted,
+	}
+	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
+}
+
+// TestSpawnKickoff_NilSteps_RetainsZeroStepBehaviour pins backward
+// compatibility: a nil / empty Steps slice keeps the M7.1.b zero-step
+// behaviour (one `manifest_approved_for_spawn` + one `saga_completed`),
+// so callers that have not yet wired their step list still produce a
+// completing saga.
+func TestSpawnKickoff_NilSteps_RetainsZeroStepBehaviour(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+	k := spawn.NewSpawnKickoffer(spawn.SpawnKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot",
+		// Steps deliberately omitted — nil slice.
+	})
+
+	if err := kickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), "tok-nil"); err != nil {
+		t.Fatalf("Kickoff: %v", err)
+	}
+
+	wantEvents := []string{
+		spawn.EventTypeManifestApprovedForSpawn,
+		saga.EventTypeSagaCompleted,
+	}
+	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
+}
+
+// TestSpawnKickoff_StepFailure_AuditsSagaFailed pins the failure
+// pathway: a registered step returning an error surfaces as
+// `saga_failed` on the audit chain (the saga.Runner owns this) AND
+// the kickoffer returns the wrapped error. Confirms the M7.1.c.c
+// wiring does not swallow step failures.
+func TestSpawnKickoff_StepFailure_AuditsSagaFailed(t *testing.T) {
+	t.Parallel()
+
+	stepErr := errors.New("simulated step failure")
+	failing := &errSagaStep{name: "boom", err: stepErr}
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+	k := spawn.NewSpawnKickoffer(spawn.SpawnKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot",
+		Steps:   []saga.Step{failing},
+	})
+
+	err := k.Kickoff(context.Background(), uuid.New(), uuid.New(), uuid.New(), testSpawnClaim(), "tok-fail")
+	if err == nil {
+		t.Fatal("Kickoff returned nil, want wrapped step error")
+	}
+	if !errors.Is(err, stepErr) {
+		t.Errorf("errors.Is(err, stepErr) = false; got %v", err)
+	}
+
+	wantEvents := []string{
+		spawn.EventTypeManifestApprovedForSpawn,
+		saga.EventTypeSagaStepStarted,
+		saga.EventTypeSagaFailed,
+	}
+	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
+}
+
+// errSagaStep is a one-method [saga.Step] that always returns the
+// configured error. Used to drive the failure-path test above.
+type errSagaStep struct {
+	name string
+	err  error
+}
+
+func (s *errSagaStep) Name() string                    { return s.name }
+func (s *errSagaStep) Execute(_ context.Context) error { return s.err }
+
+// ────────────────────────────────────────────────────────────────────────
+// M7.1.c.c iter-1 codex-review fix: fail-fast validation rejects
+// uuid.Nil kickoff args BEFORE Append/Insert side effects.
+// ────────────────────────────────────────────────────────────────────────
+
+func TestSpawnKickoff_FailsFastOnNilArgs(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name              string
+		sagaID            uuid.UUID
+		manifestVersionID uuid.UUID
+		watchkeeperID     uuid.UUID
+	}{
+		{
+			name:              "nil sagaID",
+			sagaID:            uuid.Nil,
+			manifestVersionID: uuid.New(),
+			watchkeeperID:     uuid.New(),
+		},
+		{
+			name:              "nil manifestVersionID",
+			sagaID:            uuid.New(),
+			manifestVersionID: uuid.Nil,
+			watchkeeperID:     uuid.New(),
+		},
+		{
+			name:              "nil watchkeeperID",
+			sagaID:            uuid.New(),
+			manifestVersionID: uuid.New(),
+			watchkeeperID:     uuid.Nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := newRecordingDAO()
+			keep := &fakeLocalKeepClient{}
+			writer := keeperslog.New(keep)
+			runner := saga.NewRunner(saga.Dependencies{DAO: rec, Logger: writer})
+			k := spawn.NewSpawnKickoffer(spawn.SpawnKickoffDeps{
+				Logger:  writer,
+				DAO:     rec,
+				Runner:  runner,
+				AgentID: "bot",
+			})
+
+			err := k.Kickoff(context.Background(), tc.sagaID, tc.manifestVersionID, tc.watchkeeperID, testSpawnClaim(), "tok-fail-fast")
+			if err == nil {
+				t.Fatalf("Kickoff: err = nil, want wrapped ErrInvalidKickoffArgs")
+			}
+			if !errors.Is(err, spawn.ErrInvalidKickoffArgs) {
+				t.Errorf("errors.Is(err, ErrInvalidKickoffArgs) = false; got %v", err)
+			}
+
+			// AC: NO audit row emitted; NO saga row inserted; NO Run.
+			if got := keep.recorded(); len(got) != 0 {
+				t.Errorf("keep rows = %d, want 0 (fail-fast must precede audit)", len(got))
+			}
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			if len(rec.insertSeq) != 0 {
+				t.Errorf("Insert calls = %d, want 0 (fail-fast must precede persistence)", len(rec.insertSeq))
+			}
+			if len(rec.getSeq) != 0 {
+				t.Errorf("Get calls = %d, want 0 (Run must not fire on fail-fast)", len(rec.getSeq))
+			}
+		})
+	}
 }

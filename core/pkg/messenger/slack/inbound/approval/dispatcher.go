@@ -12,6 +12,7 @@ import (
 	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger/slack/cards"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger/slack/inbound"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/spawn"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/spawn/saga"
 )
 
 // keepers_log event_type values the dispatcher emits onto the audit
@@ -113,6 +114,45 @@ func WithAuditAppender(a AuditAppender) Option {
 	}
 }
 
+// SpawnClaimResolver returns the [saga.SpawnClaim] the dispatcher
+// forwards into [SpawnKickoff.Kickoff] for the per-call
+// `manifestVersionID`. The resolver runs INSIDE the dispatch path so
+// the resolved claim reflects the current manifest_version's tenant /
+// authority tuple — multi-tenant correctness pin (M7.1.c.c iter-1
+// codex-review fix): a process-global static claim would replay
+// approvals under the wrong tenant when one bot serves multiple orgs.
+//
+// Returning a non-nil error surfaces on the dispatcher's audit chain
+// as `approval_replay_failed` (the existing kickoff-error branch); the
+// pending row stays in its `approved` terminal state and the operator
+// retries via a fresh approval flow. The resolver MUST be safe for
+// concurrent calls and MUST NOT mutate caller-owned state.
+//
+// Phase-1 production wiring backs this with a function that reads the
+// manifest_version row to find its tenant + Watchmaster claim. Test
+// wiring substitutes a hand-rolled function returning a fixture claim.
+type SpawnClaimResolver func(ctx context.Context, manifestVersionID uuid.UUID) (saga.SpawnClaim, error)
+
+// WithSpawnClaimResolver wires the [SpawnClaimResolver] consulted on
+// every `propose_spawn` approve to compute the per-call Watchmaster
+// claim forwarded to [SpawnKickoff.Kickoff]. Optional — dispatchers
+// without an explicit resolver forward the zero [saga.SpawnClaim],
+// which the M7.1.c.a CreateApp step rejects with
+// [spawn.ErrInvalidClaim] / [spawn.ErrUnauthorized]. The nil-resolver
+// default is intended only for unit tests that exercise non-spawn
+// branches and for back-compat with the M7.1.b dispatcher tests; every
+// production deployment MUST wire a resolver.
+//
+// A nil resolver argument is a no-op so callers can always pipe through
+// whatever they have.
+func WithSpawnClaimResolver(resolver SpawnClaimResolver) Option {
+	return func(d *Dispatcher) {
+		if resolver != nil {
+			d.spawnClaimResolver = resolver
+		}
+	}
+}
+
 // Dispatcher is the M6.3.b implementation of
 // [inbound.InteractionDispatcher]. Construct via [New]; the zero
 // value is NOT usable (DAO + Replayer + SpawnKickoff are required).
@@ -120,10 +160,11 @@ func WithAuditAppender(a AuditAppender) Option {
 // All fields are immutable after construction; the dispatcher is
 // safe for concurrent use across goroutines.
 type Dispatcher struct {
-	dao          spawn.PendingApprovalDAO
-	replayer     Replayer
-	spawnKickoff SpawnKickoff
-	audit        AuditAppender
+	dao                spawn.PendingApprovalDAO
+	replayer           Replayer
+	spawnKickoff       SpawnKickoff
+	audit              AuditAppender
+	spawnClaimResolver SpawnClaimResolver
 }
 
 // New constructs a [Dispatcher] backed by the supplied DAO, Replayer,
@@ -257,7 +298,19 @@ func (d *Dispatcher) DispatchInteraction(ctx context.Context, p inbound.Interact
 			d.appendReplayFailed(ctx, tool, token, err)
 			return fmt.Errorf("approval: extract manifest_version_id: %w", err)
 		}
-		if err := d.spawnKickoff.Kickoff(ctx, uuid.New(), manifestVersionID, token); err != nil {
+		claim, claimErr := d.resolveSpawnClaim(ctx, manifestVersionID)
+		if claimErr != nil {
+			d.appendReplayFailed(ctx, tool, token, claimErr)
+			return fmt.Errorf("approval: resolve spawn claim: %w", claimErr)
+		}
+		if err := d.spawnKickoff.Kickoff(
+			ctx,
+			uuid.New(),
+			manifestVersionID,
+			uuid.New(),
+			claim,
+			token,
+		); err != nil {
 			// Mirrors the replayer-error policy: emit the failed
 			// audit row and surface the error; do NOT roll back the
 			// DAO transition.
@@ -277,6 +330,19 @@ func (d *Dispatcher) DispatchInteraction(ctx context.Context, p inbound.Interact
 
 	d.appendReplaySucceeded(ctx, tool, token)
 	return nil
+}
+
+// resolveSpawnClaim invokes the configured [SpawnClaimResolver] for
+// `manifestVersionID`. Returns the zero [saga.SpawnClaim] (and a nil
+// error) when no resolver is wired, preserving the M7.1.b
+// no-resolver-zero-claim behaviour for unit tests that exercise
+// non-spawn branches. Production wiring MUST install a resolver via
+// [WithSpawnClaimResolver].
+func (d *Dispatcher) resolveSpawnClaim(ctx context.Context, manifestVersionID uuid.UUID) (saga.SpawnClaim, error) {
+	if d.spawnClaimResolver == nil {
+		return saga.SpawnClaim{}, nil
+	}
+	return d.spawnClaimResolver(ctx, manifestVersionID)
 }
 
 // decisionFromButtonValue maps the Slack button `value` to the

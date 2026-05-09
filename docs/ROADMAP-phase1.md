@@ -425,7 +425,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
     - [x] **M7.1.c.b** OAuthInstall saga step with encrypted bot-token storage
       - [x] **M7.1.c.b.a** Extend core/pkg/secrets with AES-GCM Encrypt/Decrypt primitive + KEK resolution
       - [x] **M7.1.c.b.b** OAuthInstall saga step + encrypted bot-token storage using secrets crypto primitive
-    - [ ] **M7.1.c.c** BotProfile saga step + register step list in spawn kickoff wiring
+    - [x] **M7.1.c.c** BotProfile saga step + register step list in spawn kickoff wiring
   - [ ] **M7.1.d** Notebook provision step: per-agent Notebook file with personality/language
   - [ ] **M7.1.e** Runtime launch + intro message step, wiring saga to completion
 - [ ] **M7.2** **Retire saga** — harness `Archive` runs; tarball lands in `ArchiveStore` (LocalFS or S3-compatible); `notebook_archived` event with archive URI logged; Watchkeeper row in Keep marked retired with archive reference.

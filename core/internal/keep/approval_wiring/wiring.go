@@ -61,6 +61,28 @@ type ApprovalDispatcherDeps struct {
 	// AgentID is the bot's stable agent identifier emitted on every
 	// `manifest_approved_for_spawn` audit row.
 	AgentID string
+
+	// SpawnClaimResolver is the per-call [approval.SpawnClaimResolver]
+	// the dispatcher consults on every `propose_spawn` approve to
+	// compute the [saga.SpawnClaim] forwarded into
+	// [spawn.SpawnKickoffer.Kickoff]. Multi-tenant correctness pin
+	// (M7.1.c.c iter-1 codex-review fix): a process-global static
+	// claim would replay approvals under the wrong tenant when one
+	// bot serves multiple orgs.
+	//
+	// Optional — a nil resolver forwards the zero
+	// [saga.SpawnClaim], which the M7.1.c.a CreateApp step rejects
+	// with [spawn.ErrInvalidClaim]. Production wiring MUST populate
+	// this with a function that resolves the manifest_version row's
+	// tenant + Watchmaster claim.
+	SpawnClaimResolver approval.SpawnClaimResolver
+
+	// Steps is the M7.1.c.c-introduced saga step list the kickoffer
+	// hands to [saga.Runner.Run] on every Kickoff. Optional — a nil
+	// / empty slice keeps the M7.1.b zero-step behaviour. The
+	// future Slack-bot binary populates this with the M7.1.c–.e
+	// concrete step instances when the binary takes over wiring.
+	Steps []saga.Step
 }
 
 // ComposeApprovalDispatcher composes the M7.1.b approval dispatcher
@@ -101,12 +123,14 @@ func ComposeApprovalDispatcher(deps ApprovalDispatcherDeps) (*approval.Dispatche
 		DAO:     sagaDAO,
 		Runner:  runner,
 		AgentID: deps.AgentID,
+		Steps:   deps.Steps,
 	})
 	dispatcher := approval.New(
 		deps.PendingApprovalDAO,
 		deps.Replayer,
 		kickoffer,
 		approval.WithAuditAppender(writer),
+		approval.WithSpawnClaimResolver(deps.SpawnClaimResolver),
 	)
 	return dispatcher, kickoffer, nil
 }
