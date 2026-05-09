@@ -85,10 +85,10 @@ type LastErrorClassed interface {
 // future M7.3 work.
 //
 // Naming: [Step.Name] returns a stable closed-set identifier (e.g.
-// "slack_app_create", "notebook_provision") used as the `current_step`
-// DAO field AND as the `step_name` audit payload key. MUST NOT carry
-// PII or per-saga state — the same step instance may serve multiple
-// sagas concurrently.
+// "slack_app_create", "notebook_provision", "runtime_launch") used
+// as the `current_step` DAO field AND as the `step_name` audit
+// payload key. MUST NOT carry PII or per-saga state — the same step
+// instance may serve multiple sagas concurrently.
 //
 // Concurrency: implementations MUST be safe for concurrent calls
 // across distinct sagas (the [Runner] holds no per-saga step-level
