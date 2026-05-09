@@ -428,7 +428,7 @@ const (
 )
 
 // watchkeeperRow mirrors the JSON shape of one watchkeeper.watchkeeper row.
-// Nullable timestamps and the nullable foreign key use *time.Time / *string
+// Nullable timestamps and the nullable foreign keys use *time.Time / *string
 // so the wire shape carries `null` rather than the Go zero value when the
 // column was actually NULL in Postgres.
 type watchkeeperRow struct {
@@ -439,7 +439,12 @@ type watchkeeperRow struct {
 	Status                  string     `json:"status"`
 	SpawnedAt               *time.Time `json:"spawned_at"`
 	RetiredAt               *time.Time `json:"retired_at"`
-	CreatedAt               time.Time  `json:"created_at"`
+	// ArchiveURI is the M7.2.c archive storage URI recorded on the
+	// active→retired transition; nil when the column was NULL in Postgres
+	// (row was retired before M7.2.c shipped, or via the M6.2.c
+	// synchronous tool that does not carry an archive_uri).
+	ArchiveURI *string   `json:"archive_uri"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // listWatchkeepersResponse is the envelope returned by GET /v1/watchkeepers.
@@ -480,13 +485,13 @@ func handleGetWatchkeeper(r scopedRunner) http.Handler {
 			return tx.QueryRow(ctx, `
                 SELECT id, manifest_id, lead_human_id,
                        active_manifest_version_id, status,
-                       spawned_at, retired_at, created_at
+                       spawned_at, retired_at, archive_uri, created_at
                 FROM watchkeeper.watchkeeper
                 WHERE id = $1
             `, id).Scan(
 				&out.ID, &out.ManifestID, &out.LeadHumanID,
 				&out.ActiveManifestVersionID, &out.Status,
-				&out.SpawnedAt, &out.RetiredAt, &out.CreatedAt,
+				&out.SpawnedAt, &out.RetiredAt, &out.ArchiveURI, &out.CreatedAt,
 			)
 		})
 		if err != nil {
@@ -553,7 +558,7 @@ func handleListWatchkeepers(r scopedRunner) http.Handler {
 				rows, err = tx.Query(ctx, `
                     SELECT id, manifest_id, lead_human_id,
                            active_manifest_version_id, status,
-                           spawned_at, retired_at, created_at
+                           spawned_at, retired_at, archive_uri, created_at
                     FROM watchkeeper.watchkeeper
                     ORDER BY created_at DESC
                     LIMIT $1
@@ -562,7 +567,7 @@ func handleListWatchkeepers(r scopedRunner) http.Handler {
 				rows, err = tx.Query(ctx, `
                     SELECT id, manifest_id, lead_human_id,
                            active_manifest_version_id, status,
-                           spawned_at, retired_at, created_at
+                           spawned_at, retired_at, archive_uri, created_at
                     FROM watchkeeper.watchkeeper
                     WHERE status = $1
                     ORDER BY created_at DESC
@@ -578,7 +583,7 @@ func handleListWatchkeepers(r scopedRunner) http.Handler {
 				if err := rows.Scan(
 					&rec.ID, &rec.ManifestID, &rec.LeadHumanID,
 					&rec.ActiveManifestVersionID, &rec.Status,
-					&rec.SpawnedAt, &rec.RetiredAt, &rec.CreatedAt,
+					&rec.SpawnedAt, &rec.RetiredAt, &rec.ArchiveURI, &rec.CreatedAt,
 				); err != nil {
 					return fmt.Errorf("list_watchkeepers scan: %w", err)
 				}

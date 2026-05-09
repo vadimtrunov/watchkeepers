@@ -771,13 +771,53 @@ func handleInsertWatchkeeper(r scopedRunner) http.Handler {
 // intentionally absent: those columns are stamped server-side on each
 // documented transition. Any of those keys in the body is rejected by
 // DisallowUnknownFields.
+//
+// `archive_uri` is the M7.2.c extension the MarkRetired saga step uses to
+// record the storage URI of the archived per-agent notebook. Permitted
+// only on the active→retired transition; the parser rejects it pre-tx
+// when supplied alongside `status:"active"` so a misuse cannot smuggle a
+// value into the column on the spawn-side path.
+//
+// Pointer-typed (`*string`) so the JSON decoder distinguishes ABSENT
+// (`nil`) from PRESENT-BUT-EMPTY (`*""`). Iter-1 codex finding (Major):
+// a plain `string` field collapses both cases on `body.ArchiveURI != ""`,
+// which would silently let `{"status":"retired","archive_uri":""}`
+// take the no-archive SQL branch instead of being rejected — hiding an
+// upstream empty-URI wiring bug as a legacy M6.2.c-equivalent NULL
+// write. Pointer presence makes the empty-string case observable so
+// the parser can reject it explicitly while still letting the omitted-
+// field case fall through to the no-archive UPDATE branch.
 type updateWatchkeeperStatusRequest struct {
-	Status string `json:"status"`
+	Status     string  `json:"status"`
+	ArchiveURI *string `json:"archive_uri,omitempty"`
 }
 
 // parseUpdateWatchkeeperStatusRequest validates the envelope and the
 // requested target status. It does NOT validate the transition rule: that
 // requires reading the current row, which happens inside the scoped tx.
+//
+// Pre-tx archive_uri rules (M7.2.c):
+//
+//   - When PRESENT (`body.ArchiveURI != nil`, regardless of value), the
+//     field MUST be paired with status:"retired". A `archive_uri` key on
+//     the pending→active path is a wiring bug (M7.2.c MarkRetired step
+//     is the sole producer; pending→active runs pre-archive) and
+//     surfaces as 400 invalid_request.
+//   - When PRESENT and paired with status:"retired", the value MUST be
+//     non-blank (after TrimSpace). The saga step pre-validates URI shape
+//     before it reaches the wire (RFC 3986 with non-empty scheme; see
+//     the M7.2.b ErrInvalidArchiveURI gate); the server's defense-in-depth
+//     check rejects empty (`""`) and whitespace-only values explicitly so
+//     a buggy upstream cannot launder an empty value into a "no archive"
+//     NULL write. Iter-1 codex finding (Major): with a `string` field
+//     `body.ArchiveURI != ""` could not detect the present-but-empty
+//     case, so a `{"status":"retired","archive_uri":""}` body would
+//     silently take the no-archive SQL branch — pointer-typed field
+//     plus this check closes that gap.
+//   - When ABSENT (`body.ArchiveURI == nil`), the active→retired
+//     transition still succeeds with a SQL NULL archive_uri so the
+//     M6.2.c synchronous retire tool stays wire-compatible (it
+//     predates the saga family and omits the field entirely).
 func parseUpdateWatchkeeperStatusRequest(w http.ResponseWriter, req *http.Request) (updateWatchkeeperStatusRequest, bool) {
 	var body updateWatchkeeperStatusRequest
 
@@ -801,6 +841,16 @@ func parseUpdateWatchkeeperStatusRequest(w http.ResponseWriter, req *http.Reques
 	if body.Status != "active" && body.Status != "retired" {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return body, false
+	}
+	if body.ArchiveURI != nil {
+		if body.Status != "retired" {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return body, false
+		}
+		if strings.TrimSpace(*body.ArchiveURI) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return body, false
+		}
 	}
 	return body, true
 }
@@ -908,8 +958,20 @@ func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
 
 			// Allowed transitions only:
 			//   pending → active
-			//   active  → retired
+			//   active  → retired   (optional archive_uri stamps the
+			//                        archive_uri column when supplied)
 			// Everything else is rejected without touching the row.
+			//
+			// archive_uri persistence (M7.2.c):
+			//   - body.ArchiveURI is non-nil → stamp the value on the
+			//     column alongside retired_at. The pre-tx parser already
+			//     rejected the (status="active", archive_uri present)
+			//     combination AND the present-but-blank case, so a
+			//     non-nil pointer here is guaranteed paired with
+			//     status:"retired" and a non-blank URI.
+			//   - body.ArchiveURI is nil → leave the column as NULL.
+			//     Wire-compatible with the M6.2.c synchronous tool that
+			//     predates the saga family and omits the field entirely.
 			switch {
 			case current == "pending" && body.Status == "active":
 				_, err := tx.Exec(ctx, `
@@ -919,6 +981,14 @@ func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
                 `, id)
 				return err
 			case current == "active" && body.Status == "retired":
+				if body.ArchiveURI != nil {
+					_, err := tx.Exec(ctx, `
+                        UPDATE watchkeeper.watchkeeper
+                        SET status = 'retired', retired_at = now(), archive_uri = $2
+                        WHERE id = $1
+                    `, id, *body.ArchiveURI)
+					return err
+				}
 				_, err := tx.Exec(ctx, `
                     UPDATE watchkeeper.watchkeeper
                     SET status = 'retired', retired_at = now()
