@@ -85,6 +85,19 @@ type SpawnContext struct {
 	// kickoff time. Forwarded verbatim to the privileged RPC so the
 	// step does not re-mint or re-validate it.
 	Claim SpawnClaim
+
+	// OAuthCode is the Slack-issued single-use authorization code the
+	// M7.1.c.b.b OAuthInstall step exchanges for bot/user tokens via
+	// `oauth.v2.access`. Phase-1 admin-grant flow: the operator pastes
+	// the code captured from Slack's admin install UI when seeding the
+	// saga; future M7.x will replace this with an auto-install callback
+	// HTTP route. Empty until the operator supplies it; the install
+	// step short-circuits with a wrapped sentinel BEFORE contacting
+	// Slack when this field is empty (resolution failure is a security
+	// boundary — see `core/pkg/spawn/oauthinstall_step.go`). Steps that
+	// do not consume this field continue to ignore it (additive change
+	// — every previously-zero usage stays valid).
+	OAuthCode string
 }
 
 // WithSpawnContext returns a new context carrying `sc` under
