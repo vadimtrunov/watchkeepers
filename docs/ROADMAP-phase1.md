@@ -426,7 +426,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
       - [x] **M7.1.c.b.a** Extend core/pkg/secrets with AES-GCM Encrypt/Decrypt primitive + KEK resolution
       - [x] **M7.1.c.b.b** OAuthInstall saga step + encrypted bot-token storage using secrets crypto primitive
     - [x] **M7.1.c.c** BotProfile saga step + register step list in spawn kickoff wiring
-  - [ ] **M7.1.d** Notebook provision step: per-agent Notebook file with personality/language
+  - [x] **M7.1.d** Notebook provision step: per-agent Notebook file with personality/language
   - [ ] **M7.1.e** Runtime launch + intro message step, wiring saga to completion
 - [ ] **M7.2** **Retire saga** — harness `Archive` runs; tarball lands in `ArchiveStore` (LocalFS or S3-compatible); `notebook_archived` event with archive URI logged; Watchkeeper row in Keep marked retired with archive reference.
 - [ ] **M7.3** **Robustness** — saga compensations (install failure rolls back Slack App creation, removes the freshly-provisioned Notebook file, marks Manifest rejected; runtime boot failure tears down the app and **archives** — never deletes — any Notebook data written, flagged for review) plus idempotency keys so retried approvals never double-create apps.
