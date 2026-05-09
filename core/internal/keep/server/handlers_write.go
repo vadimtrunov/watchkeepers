@@ -855,6 +855,37 @@ func parseUpdateWatchkeeperStatusRequest(w http.ResponseWriter, req *http.Reques
 	return body, true
 }
 
+// execRetireUpdate runs the active→retired UPDATE inside the supplied
+// scoped tx. Extracted from handleUpdateWatchkeeperStatus to keep that
+// function below gocyclo's complexity ceiling (15) after the M7.2.c
+// optional archive_uri ride-along landed.
+//
+// archive_uri persistence (M7.2.c):
+//   - archiveURI is non-nil → stamp the value on the column alongside
+//     retired_at. The pre-tx parser already rejected the
+//     (status="active", archive_uri present) combination AND the
+//     present-but-blank case, so a non-nil pointer here is guaranteed
+//     paired with status:"retired" and a non-blank URI.
+//   - archiveURI is nil → leave the column as NULL. Wire-compatible
+//     with the M6.2.c synchronous tool that predates the saga family
+//     and omits the field entirely.
+func execRetireUpdate(ctx context.Context, tx pgx.Tx, id string, archiveURI *string) error {
+	if archiveURI != nil {
+		_, err := tx.Exec(ctx, `
+            UPDATE watchkeeper.watchkeeper
+            SET status = 'retired', retired_at = now(), archive_uri = $2
+            WHERE id = $1
+        `, id, *archiveURI)
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+        UPDATE watchkeeper.watchkeeper
+        SET status = 'retired', retired_at = now()
+        WHERE id = $1
+    `, id)
+	return err
+}
+
 // handleUpdateWatchkeeperStatus serves PATCH /v1/watchkeepers/{id}/status.
 // It enforces the watchkeeper lifecycle:
 //
@@ -962,16 +993,12 @@ func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
 			//                        archive_uri column when supplied)
 			// Everything else is rejected without touching the row.
 			//
-			// archive_uri persistence (M7.2.c):
-			//   - body.ArchiveURI is non-nil → stamp the value on the
-			//     column alongside retired_at. The pre-tx parser already
-			//     rejected the (status="active", archive_uri present)
-			//     combination AND the present-but-blank case, so a
-			//     non-nil pointer here is guaranteed paired with
-			//     status:"retired" and a non-blank URI.
-			//   - body.ArchiveURI is nil → leave the column as NULL.
-			//     Wire-compatible with the M6.2.c synchronous tool that
-			//     predates the saga family and omits the field entirely.
+			// Allowed transitions only:
+			//   pending → active
+			//   active  → retired
+			// Everything else is rejected without touching the row.
+			// archive_uri persistence is handled inside execRetireUpdate
+			// to keep this handler under gocyclo's complexity ceiling.
 			switch {
 			case current == "pending" && body.Status == "active":
 				_, err := tx.Exec(ctx, `
@@ -981,20 +1008,7 @@ func handleUpdateWatchkeeperStatus(r scopedRunner) http.Handler {
                 `, id)
 				return err
 			case current == "active" && body.Status == "retired":
-				if body.ArchiveURI != nil {
-					_, err := tx.Exec(ctx, `
-                        UPDATE watchkeeper.watchkeeper
-                        SET status = 'retired', retired_at = now(), archive_uri = $2
-                        WHERE id = $1
-                    `, id, *body.ArchiveURI)
-					return err
-				}
-				_, err := tx.Exec(ctx, `
-                    UPDATE watchkeeper.watchkeeper
-                    SET status = 'retired', retired_at = now()
-                    WHERE id = $1
-                `, id)
-				return err
+				return execRetireUpdate(ctx, tx, id, body.ArchiveURI)
 			default:
 				res.invalidTransition = true
 				return nil
