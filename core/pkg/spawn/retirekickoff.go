@@ -221,7 +221,14 @@ func NewRetireKickoffer(deps RetireKickoffDeps) *RetireKickoffer {
 //     SpawnContext), and the supplied claim. M7.2.b NotebookArchive
 //     and M7.2.c MarkRetired steps read these values via
 //     [saga.SpawnContextFromContext].
-//  5. Call [saga.Runner.Run] with the registered step list. A
+//  5. Seed a fresh [saga.RetireResult] outbox on `ctx` via
+//     [saga.WithRetireResult]. The M7.2.b NotebookArchive step
+//     publishes its `archive_uri` here on success; the M7.2.c
+//     MarkRetired step reads it back. The pointer is fresh per
+//     Kickoff call so concurrent retire sagas have isolated
+//     outboxes. The spawn flow has no equivalent — only the retire
+//     family seeds RetireResult.
+//  6. Call [saga.Runner.Run] with the registered step list. A
 //     nil / empty step list completes immediately and emits a
 //     single `saga_completed` event (matches the M7.1.b zero-step
 //     behaviour).
@@ -280,6 +287,13 @@ func (k *RetireKickoffer) Kickoff(
 		AgentID:           watchkeeperID,
 		Claim:             claim,
 	})
+
+	// Seed a fresh outbox per Kickoff so concurrent retire sagas have
+	// isolated [saga.RetireResult] pointers — the M7.2.b NotebookArchive
+	// step writes ArchiveURI here; the M7.2.c MarkRetired step reads
+	// it back. The spawn-side kickoffer has no equivalent because no
+	// spawn step needs an inter-step outbox today.
+	ctx = saga.WithRetireResult(ctx, &saga.RetireResult{})
 
 	if err := k.runner.Run(ctx, sagaID, k.steps); err != nil {
 		return fmt.Errorf("spawn: retire kickoff: run saga: %w", err)

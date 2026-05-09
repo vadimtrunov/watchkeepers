@@ -1051,3 +1051,148 @@ func containsOutsideComments(src, needle string) bool {
 	}
 	return false
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// M7.2.b RetireResult seeding pin — every retire saga's per-call ctx
+// MUST carry a fresh, non-nil [saga.RetireResult] pointer when the
+// kickoffer's registered steps execute. This is what makes the M7.2.b
+// NotebookArchive step's URI publish reach the M7.2.c MarkRetired step.
+// ────────────────────────────────────────────────────────────────────────
+
+// retireResultProbeStep is a hand-rolled [saga.Step] that captures the
+// [saga.RetireResult] pointer (and its presence boolean) it observes
+// off the per-call ctx. The pointer is recorded — NOT a snapshot of
+// its fields — so a downstream test can mutate via the captured
+// pointer and re-read to confirm pointer-identity-stability across
+// step boundaries (mirrors the M7.2.b NotebookArchive→MarkRetired
+// inter-step write-then-read protocol).
+type retireResultProbeStep struct {
+	name       string
+	mu         sync.Mutex
+	captured   *saga.RetireResult
+	hadResult  bool
+	executed   bool
+	mutateURI  string // when non-empty, Execute writes this to captured.ArchiveURI
+	executions atomic.Int32
+}
+
+func (s *retireResultProbeStep) Name() string { return s.name }
+
+func (s *retireResultProbeStep) Execute(ctx context.Context) error {
+	s.executions.Add(1)
+	r, ok := saga.RetireResultFromContext(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.captured = r
+	s.hadResult = ok
+	s.executed = true
+	if s.mutateURI != "" && r != nil {
+		r.ArchiveURI = s.mutateURI
+	}
+	return nil
+}
+
+// TestRetireKickoff_SeedsFreshRetireResultOnCtx pins the M7.2.b
+// kickoffer-side seeding contract: every Kickoff stamps a fresh,
+// non-nil [saga.RetireResult] onto the per-call ctx before
+// dispatching the registered step list. Without this seeding, the
+// M7.2.b NotebookArchive step has nowhere to publish its archive_uri
+// for the M7.2.c MarkRetired step to consume; the step would
+// fail-closed with [spawn.ErrMissingRetireResult].
+func TestRetireKickoff_SeedsFreshRetireResultOnCtx(t *testing.T) {
+	t.Parallel()
+
+	probe := &retireResultProbeStep{name: "retire_result_probe"}
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+	k := spawn.NewRetireKickoffer(spawn.RetireKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot-watchmaster",
+		Steps:   []saga.Step{probe},
+	})
+
+	if err := retireKickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), "tok-seed"); err != nil {
+		t.Fatalf("Kickoff: %v", err)
+	}
+
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	if !probe.executed {
+		t.Fatal("probe step did not execute")
+	}
+	if !probe.hadResult {
+		t.Errorf("RetireResultFromContext(ctx) ok = false; want true (kickoffer must seed RetireResult before Run)")
+	}
+	if probe.captured == nil {
+		t.Errorf("captured RetireResult = nil; want non-nil (kickoffer must stamp a fresh &RetireResult{} per Kickoff)")
+	}
+	if probe.captured != nil && probe.captured.ArchiveURI != "" {
+		t.Errorf("captured.ArchiveURI = %q; want \"\" (the seeded outbox must be a fresh zero-value, not carry stale data)",
+			probe.captured.ArchiveURI)
+	}
+}
+
+// TestRetireKickoff_SeedsDistinctRetireResultPerKickoff pins
+// per-call isolation: two Kickoffs against the same kickoffer must
+// observe DISTINCT [saga.RetireResult] pointers. A regression that
+// stamps a single shared pointer at construction time would leak
+// state across concurrent retire sagas — Kickoff-N's archive_uri
+// would land on Kickoff-(N-1)'s outbox.
+func TestRetireKickoff_SeedsDistinctRetireResultPerKickoff(t *testing.T) {
+	t.Parallel()
+
+	probe := &retireResultProbeStep{name: "retire_result_isolation_probe"}
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+	k := spawn.NewRetireKickoffer(spawn.RetireKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot",
+		Steps:   []saga.Step{probe},
+	})
+
+	// Kickoff #1: probe captures an outbox + writes a sentinel URI.
+	probe.mutateURI = "file:///k1.tar.gz"
+	if err := retireKickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), "tok-k1"); err != nil {
+		t.Fatalf("Kickoff #1: %v", err)
+	}
+	probe.mu.Lock()
+	first := probe.captured
+	probe.mu.Unlock()
+	if first == nil {
+		t.Fatal("Kickoff #1 captured nil RetireResult")
+	}
+
+	// Kickoff #2: probe captures a SECOND outbox; pointer identity
+	// MUST differ from the first.
+	probe.mutateURI = "file:///k2.tar.gz"
+	if err := retireKickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), "tok-k2"); err != nil {
+		t.Fatalf("Kickoff #2: %v", err)
+	}
+	probe.mu.Lock()
+	second := probe.captured
+	probe.mu.Unlock()
+	if second == nil {
+		t.Fatal("Kickoff #2 captured nil RetireResult")
+	}
+	if first == second {
+		t.Errorf("Kickoff #1 and Kickoff #2 captured the same *RetireResult (%p) — kickoffer must seed a fresh outbox per call to isolate concurrent sagas", first)
+	}
+	// First outbox carries Kickoff #1's URI; second carries Kickoff #2's.
+	if first.ArchiveURI != "file:///k1.tar.gz" {
+		t.Errorf("first.ArchiveURI = %q, want %q (Kickoff #2 leaked a write back into Kickoff #1's outbox)",
+			first.ArchiveURI, "file:///k1.tar.gz")
+	}
+	if second.ArchiveURI != "file:///k2.tar.gz" {
+		t.Errorf("second.ArchiveURI = %q, want %q", second.ArchiveURI, "file:///k2.tar.gz")
+	}
+}
