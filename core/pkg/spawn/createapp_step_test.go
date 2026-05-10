@@ -310,6 +310,174 @@ func TestCreateAppStep_Execute_DAOPutError_ReturnsWrappedSinkError(t *testing.T)
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// M7.3.d in-Execute partial-success cleanup: when the sink fires +
+// captures `creds.AppID` then errors on the DAO Put, the post-RPC
+// failure branch dispatches a best-effort teardown carrying the
+// captured platform-side app id. The teardown error is silently
+// discarded so the operator's load-bearing signal stays the
+// original sink error.
+// ────────────────────────────────────────────────────────────────────────
+
+func TestCreateAppStep_Execute_DAOPutError_DispatchesInExecuteTeardownWithCapturedAppID(t *testing.T) {
+	t.Parallel()
+
+	creds := newTestCreds()
+	rpc := newFakeSlackAppRPC(creds)
+	dao := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	teardown := &recordingSlackAppTeardown{}
+
+	watchkeeperID := uuid.New()
+	// Pre-seed the DAO so the saga's Put surfaces ErrCredsAlreadyStored
+	// from inside the sink — same partial-success pattern as the
+	// previous test, but here we pin the in-Execute cleanup dispatch.
+	if err := dao.Put(context.Background(), watchkeeperID, creds); err != nil {
+		t.Fatalf("pre-seed Put: %v", err)
+	}
+
+	step := spawn.NewCreateAppStep(spawn.CreateAppStepDeps{
+		RPC:           rpc,
+		CredsDAO:      dao,
+		Teardown:      teardown,
+		AppName:       "test-app",
+		Scopes:        []string{"chat:write"},
+		ApprovalToken: "tok-test",
+	})
+	ctx := saga.WithSpawnContext(context.Background(), newSpawnContext(t, watchkeeperID))
+
+	err := step.Execute(ctx)
+	if err == nil {
+		t.Fatalf("Execute: err = nil, want wrapped ErrCredsAlreadyStored")
+	}
+	if !errors.Is(err, spawn.ErrCredsAlreadyStored) {
+		t.Errorf("errors.Is(err, ErrCredsAlreadyStored) = false; got %v", err)
+	}
+
+	// In-Execute teardown MUST have been dispatched exactly once —
+	// the sink captured creds.AppID before the DAO Put failed.
+	if got := teardown.callCount.Load(); got != 1 {
+		t.Fatalf("Teardown call count = %d, want 1 (in-Execute partial-success cleanup)", got)
+	}
+	calls := teardown.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("Teardown recorded calls = %v, want exactly 1", calls)
+	}
+	if calls[0].watchkeeperID != watchkeeperID {
+		t.Errorf("Teardown.watchkeeperID = %v, want %v", calls[0].watchkeeperID, watchkeeperID)
+	}
+	// The captured app id MUST be the platform-assigned id from the
+	// sink callback (creds.AppID). An empty knownAppID would mean
+	// the in-Execute path wired through the Compensate-style DAO-
+	// fallback contract — wrong direction.
+	if calls[0].knownAppID != creds.AppID {
+		t.Errorf("Teardown.knownAppID = %q, want %q (captured from sink)", calls[0].knownAppID, creds.AppID)
+	}
+}
+
+// TestCreateAppStep_Execute_CtxCancelledDuringSink_InExecuteTeardownStillRuns
+// pins the M7.3.d iter-1 codex+critic Major #1 fix: when ctx is
+// cancelled DURING the sink (after the platform call succeeded
+// but before the post-RPC failure branch decides to skip cleanup),
+// the in-Execute teardown MUST still dispatch. Mirrors the M7.3.b
+// iter-1 #2 saga.compensate context.WithoutCancel discipline. The
+// most likely real-world trigger is a request-bound parent ctx
+// that fired Cancel mid-saga (HTTP timeout, operator-initiated
+// abort) — without the WithoutCancel wrap the cleanup uniformly
+// fails on EXACTLY the scenario it exists to defend against.
+//
+// Test plumbing: a wrapping DAO cancels its own parent ctx INSIDE
+// the sink's Put callback (after capturedAppID was written, before
+// returning a non-nil error). The post-RPC failure branch then
+// dispatches teardown against a cancelled parent ctx; the
+// recording teardown's call count MUST be 1 — the WithoutCancel
+// wrap kept the dispatch alive.
+func TestCreateAppStep_Execute_CtxCancelledDuringSink_InExecuteTeardownStillRuns(t *testing.T) {
+	t.Parallel()
+
+	creds := newTestCreds()
+	rpc := newFakeSlackAppRPC(creds)
+	memDAO := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	teardown := &recordingSlackAppTeardown{}
+
+	ctx, cancel := context.WithCancel(saga.WithSpawnContext(context.Background(), newSpawnContext(t, uuid.New())))
+	defer cancel()
+	cancellingDAO := &cancellingPutDAO{
+		MemoryWatchkeeperSlackAppCredsDAO: memDAO,
+		cancel:                            cancel,
+		err:                               errors.New("simulated DAO Put failure after cancel"),
+	}
+
+	step := spawn.NewCreateAppStep(spawn.CreateAppStepDeps{
+		RPC:           rpc,
+		CredsDAO:      cancellingDAO,
+		Teardown:      teardown,
+		AppName:       "test-app",
+		Scopes:        []string{"chat:write"},
+		ApprovalToken: "tok-test",
+	})
+
+	if err := step.Execute(ctx); err == nil {
+		t.Fatalf("Execute: err = nil, want wrapped DAO error")
+	}
+
+	// The teardown MUST have been dispatched once even though the
+	// parent ctx was cancelled inside the sink. Validates
+	// context.WithoutCancel wrap on the in-Execute cleanup branch.
+	if got := teardown.callCount.Load(); got != 1 {
+		t.Errorf("Teardown call count under in-sink-cancellation = %d, want 1 (WithoutCancel discipline)", got)
+	}
+}
+
+// cancellingPutDAO embeds [MemoryWatchkeeperSlackAppCredsDAO] and
+// overrides [Put] to (a) cancel its supplied `cancel` func before
+// returning, (b) return the configured error. Pinpoint test fixture
+// for the M7.3.d in-Execute WithoutCancel test — a real Put would
+// not normally cancel ctx, but a real downstream cause of a Put
+// failure (HTTP deadline, operator abort) WOULD have already
+// cancelled the saga's parent ctx by the time control returns to
+// the step body.
+type cancellingPutDAO struct {
+	*spawn.MemoryWatchkeeperSlackAppCredsDAO
+	cancel context.CancelFunc
+	err    error
+}
+
+func (d *cancellingPutDAO) Put(_ context.Context, _ uuid.UUID, _ slackmessenger.CreateAppCredentials) error {
+	d.cancel()
+	return d.err
+}
+
+// TestCreateAppStep_Execute_RPCErrorBeforeSink_NoInExecuteTeardown
+// pins the inverse: when the platform call (rpc.CreateApp) fails
+// BEFORE the sink ever runs, capturedAppID stays empty and the
+// in-Execute teardown is intentionally NOT dispatched (no platform
+// state to clean up).
+func TestCreateAppStep_Execute_RPCErrorBeforeSink_NoInExecuteTeardown(t *testing.T) {
+	t.Parallel()
+
+	rpc := newFakeSlackAppRPC(newTestCreds())
+	rpc.returnErr = spawn.ErrUnauthorized // RPC fails synchronously; sink never fires
+	dao := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	teardown := &recordingSlackAppTeardown{}
+
+	step := spawn.NewCreateAppStep(spawn.CreateAppStepDeps{
+		RPC:           rpc,
+		CredsDAO:      dao,
+		Teardown:      teardown,
+		AppName:       "test-app",
+		Scopes:        []string{"chat:write"},
+		ApprovalToken: "tok-test",
+	})
+	ctx := saga.WithSpawnContext(context.Background(), newSpawnContext(t, uuid.New()))
+
+	if err := step.Execute(ctx); err == nil || !errors.Is(err, spawn.ErrUnauthorized) {
+		t.Fatalf("Execute: err = %v, want wrapped ErrUnauthorized", err)
+	}
+	if got := teardown.callCount.Load(); got != 0 {
+		t.Errorf("Teardown call count = %d, want 0 (no platform-side state to clean up)", got)
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Negative: SpawnContext missing (test-plan §"Negative — Context missing")
 // ────────────────────────────────────────────────────────────────────────
 

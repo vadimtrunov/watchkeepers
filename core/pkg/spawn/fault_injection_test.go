@@ -27,20 +27,38 @@
 // a single test loop covering the cross-step rollback contract that
 // per-step unit tests can't observe in isolation.
 //
-// # Out of scope: post-side-effect Execute failures
+// # Out of scope: post-side-effect Execute failures (now covered per-step)
 //
 // The harness intentionally injects only TOP-LEVEL Execute failures
 // (the seam fake's returnErr fires BEFORE the platform call). The
 // M7.3.b "failed step is NOT compensated" runner discipline means a
 // platform-call-then-sink-failure path leaves orphaned platform
-// state (Slack App created but no `slack_app_creds` row; OAuth
-// install live but no encrypted tokens). That partial-success
-// surface is deferred to a future M7.3.d-or-M7.4 reconciler
-// (widened [SlackAppTeardown] / [OAuthInstallRevoker] seam
-// signatures taking the in-process platform ids OR a sweep of
-// `slack_app_creds` rows for app-creds without companion install-
-// tokens). See docs/lessons/M7.md M7.3.c iter-1 patterns #1 for
-// the full rationale.
+// state UNLESS the step's Execute body itself dispatches a best-
+// effort cleanup before returning the error.
+//
+// M7.3.d closed this gap: the [CreateAppStep.Execute] and
+// [OAuthInstallStep.Execute] bodies now capture the in-process
+// platform identifier (creds.AppID for CreateApp, plaintext bot
+// token for OAuthInstall) inside the sink callback, and on the
+// post-platform-call failure branch dispatch a best-effort
+// [SlackAppTeardown.TeardownApp] / [OAuthInstallRevoker.Revoke]
+// before returning. The seams' widened signatures (knownAppID /
+// knownToken parameters) accept the in-process value directly;
+// empty values fall back to the M7.3.c rollback-path DAO lookup.
+//
+// The post-side-effect failure cases are pinned at the per-step
+// unit-test level (see TestCreateAppStep_Execute_DAOPutError_DispatchesInExecuteTeardownWithCapturedAppID
+// in createapp_step_test.go and
+// TestOAuthInstallStep_Execute_DAOPutInstallTokensError_DispatchesInExecuteRevokeWithCapturedToken
+// in oauthinstall_step_test.go) rather than duplicated into the
+// cross-step harness — the harness's value is cross-step
+// rollback-ordering observability, which a sink-failure case
+// would NOT add coverage to (the failed step still fails, the
+// runner still skips its Compensate, prior steps still get the
+// reverse-rollback walk).
+//
+// See docs/lessons/M7.md M7.3.c iter-1 patterns #1 + the M7.3.d
+// patch notes for the full rationale.
 package spawn_test
 
 import (

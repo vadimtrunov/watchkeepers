@@ -47,11 +47,13 @@ import (
 
 type nopSlackAppTeardown struct{}
 
-func (nopSlackAppTeardown) TeardownApp(_ context.Context, _ uuid.UUID) error { return nil }
+func (nopSlackAppTeardown) TeardownApp(_ context.Context, _ uuid.UUID, _ messenger.AppID) error {
+	return nil
+}
 
 type nopOAuthInstallRevoker struct{}
 
-func (nopOAuthInstallRevoker) Revoke(_ context.Context, _ uuid.UUID) error { return nil }
+func (nopOAuthInstallRevoker) Revoke(_ context.Context, _ uuid.UUID, _ string) error { return nil }
 
 type nopNotebookProvisionArchiver struct{}
 
@@ -77,42 +79,79 @@ func (nopRuntimeTeardown) Teardown(_ context.Context, _ uuid.UUID, _ uuid.UUID) 
 // shape, sequencing, and per-call argument forwarding.
 // ────────────────────────────────────────────────────────────────────────
 
+// recordedTeardownCall captures the watchkeeperID + knownAppID
+// each TeardownApp invocation received so the M7.3.d in-Execute
+// partial-success cleanup tests can pin both the dispatch count
+// AND the captured platform-side app id.
+type recordedTeardownCall struct {
+	watchkeeperID uuid.UUID
+	knownAppID    messenger.AppID
+}
+
 type recordingSlackAppTeardown struct {
 	mu        sync.Mutex
-	calls     []uuid.UUID
+	calls     []recordedTeardownCall
 	callCount atomic.Int32
 	returnErr error
 }
 
-func (r *recordingSlackAppTeardown) TeardownApp(_ context.Context, watchkeeperID uuid.UUID) error {
+func (r *recordingSlackAppTeardown) TeardownApp(
+	_ context.Context, watchkeeperID uuid.UUID, knownAppID messenger.AppID,
+) error {
 	r.callCount.Add(1)
 	r.mu.Lock()
-	r.calls = append(r.calls, watchkeeperID)
+	r.calls = append(r.calls, recordedTeardownCall{
+		watchkeeperID: watchkeeperID,
+		knownAppID:    knownAppID,
+	})
 	r.mu.Unlock()
 	return r.returnErr
 }
 
-func (r *recordingSlackAppTeardown) recorded() []uuid.UUID {
+func (r *recordingSlackAppTeardown) recorded() []recordedTeardownCall {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]uuid.UUID, len(r.calls))
+	out := make([]recordedTeardownCall, len(r.calls))
 	copy(out, r.calls)
 	return out
 }
 
+// recordedRevokeCall captures the watchkeeperID + knownToken each
+// Revoke invocation received so the M7.3.d in-Execute partial-
+// success cleanup tests can pin both the dispatch count AND the
+// captured plaintext bot token (canary-substring asserted to NEVER
+// leak into any returned error string per the M2b.7 PII discipline).
+type recordedRevokeCall struct {
+	watchkeeperID uuid.UUID
+	knownToken    string
+}
+
 type recordingOAuthInstallRevoker struct {
 	mu        sync.Mutex
-	calls     []uuid.UUID
+	calls     []recordedRevokeCall
 	callCount atomic.Int32
 	returnErr error
 }
 
-func (r *recordingOAuthInstallRevoker) Revoke(_ context.Context, watchkeeperID uuid.UUID) error {
+func (r *recordingOAuthInstallRevoker) Revoke(
+	_ context.Context, watchkeeperID uuid.UUID, knownToken string,
+) error {
 	r.callCount.Add(1)
 	r.mu.Lock()
-	r.calls = append(r.calls, watchkeeperID)
+	r.calls = append(r.calls, recordedRevokeCall{
+		watchkeeperID: watchkeeperID,
+		knownToken:    knownToken,
+	})
 	r.mu.Unlock()
 	return r.returnErr
+}
+
+func (r *recordingOAuthInstallRevoker) recorded() []recordedRevokeCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]recordedRevokeCall, len(r.calls))
+	copy(out, r.calls)
+	return out
 }
 
 // recordingArchiveCall captures both the watchkeeperID + the URI the
@@ -261,8 +300,16 @@ func TestCreateAppStep_Compensate_HappyPath_DispatchesTeardownWithWatchkeeperID(
 	if got := teardown.callCount.Load(); got != 1 {
 		t.Fatalf("Teardown call count = %d, want 1", got)
 	}
-	if calls := teardown.recorded(); len(calls) != 1 || calls[0] != watchkeeperID {
-		t.Errorf("Teardown calls = %v, want [%v]", calls, watchkeeperID)
+	calls := teardown.recorded()
+	if len(calls) != 1 || calls[0].watchkeeperID != watchkeeperID {
+		t.Errorf("Teardown calls = %v, want [{%v, ...}]", calls, watchkeeperID)
+	}
+	// Compensate path passes empty knownAppID — the seam impl is
+	// expected to fall back to a DAO lookup. Pinned here to catch
+	// a future regression that accidentally threads a non-empty
+	// app id through Compensate.
+	if calls[0].knownAppID != "" {
+		t.Errorf("Compensate path knownAppID = %q, want empty (DAO-fallback contract)", calls[0].knownAppID)
 	}
 }
 
@@ -415,11 +462,11 @@ func TestCreateAppStep_Compensate_ConcurrentSagas_IsolatedTeardownPerWatchkeeper
 		t.Fatalf("Teardown call count = %d, want %d", got, sagas)
 	}
 	seen := make(map[uuid.UUID]bool, sagas)
-	for _, id := range teardown.recorded() {
-		if seen[id] {
-			t.Errorf("watchkeeperID %v compensated twice; sagas must isolate", id)
+	for _, call := range teardown.recorded() {
+		if seen[call.watchkeeperID] {
+			t.Errorf("watchkeeperID %v compensated twice; sagas must isolate", call.watchkeeperID)
 		}
-		seen[id] = true
+		seen[call.watchkeeperID] = true
 	}
 	for _, id := range ids {
 		if !seen[id] {
@@ -457,6 +504,18 @@ func TestOAuthInstallStep_Compensate_HappyPath_RevokeThenWipeAndReturnsNil(t *te
 	}
 	if got := revoker.callCount.Load(); got != 1 {
 		t.Errorf("Revoke call count = %d, want 1", got)
+	}
+	// M7.3.d iter-1 codex Minor: pin the empty-knownToken contract
+	// from the Compensate side. The Compensate path passes empty
+	// knownToken — the seam impl is expected to fall back to a
+	// DAO lookup + decryption. Mirrors the CreateApp Compensate
+	// happy-path test's empty-knownAppID assertion.
+	calls := revoker.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("Revoke recorded calls = %v, want exactly 1", calls)
+	}
+	if calls[0].knownToken != "" {
+		t.Errorf("Compensate path knownToken = %q, want empty (DAO-fallback contract)", calls[0].knownToken)
 	}
 	if _, _, _, _, _, ok := dao.GetInstallTokens(watchkeeperID); ok {
 		t.Errorf("install tokens still present after Wipe; expected absent")
