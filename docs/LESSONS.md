@@ -19,6 +19,7 @@ milestone file based on the closed TASK's roadmap id. At Phase 2 it reads
 | [`lessons/M5.md`](lessons/M5.md)                       | Runtime + LLM: `AgentRuntime`, `LLMProvider`, TS harness, JSON-RPC stdio framing, tool isolation.                                                                                                |
 | [`lessons/M6.md`](lessons/M6.md)                       | Watchmaster meta-agent: manifest-seed migration pattern, privilege-boundary phrase contract, authority matrix enum reuse.                                                                        |
 | [`lessons/M7.md`](lessons/M7.md)                       | Spawn flow end-to-end: saga skeleton, Slack interaction, App provisioning, Notebook provision, runtime launch.                                                                                   |
+| [`lessons/M8.md`](lessons/M8.md)                       | Coordinator Watchkeeper: Jira adapter (REST API v3, ADF wrap, fail-closed field whitelist), Coordinator manifest + toolset, Watch Orders + scheduled work.                                       |
 | [`lessons/cross-cutting.md`](lessons/cross-cutting.md) | Multi-milestone or process lessons: verification-batch discipline, autonomous-loop behaviour, PR-evidence rules.                                                                                 |
 
 ## How to use this index
