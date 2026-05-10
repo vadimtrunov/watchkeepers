@@ -411,7 +411,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 ---
 
-### M7 — Spawn Flow end-to-end [ ]
+### M7 — Spawn Flow end-to-end [x]
 
 **Goal**: The flow from `watchkeeper-spawn-flow.md` works front-to-back.
 
@@ -432,7 +432,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
   - [x] **M7.2.a** Retire saga kickoff seam: RetireSagaContext + RetireKickoff seam + audit chain + production-wiring helper (zero-step Run; mirrors M7.1.b)
   - [x] **M7.2.b** NotebookArchive saga step: thin seam over `notebook.ArchiveOnRetire`; archive_uri returned via SpawnContext-equivalent
   - [x] **M7.2.c** MarkRetired saga step + keepclient `archive_uri` extension + watchkeepers.archive_uri column + migration; wires M6.2.c retire tool through the saga
-- [ ] **M7.3** **Robustness** — saga compensations (install failure rolls back Slack App creation, removes the freshly-provisioned Notebook file, marks Manifest rejected; runtime boot failure tears down the app and **archives** — never deletes — any Notebook data written, flagged for review) plus idempotency keys so retried approvals never double-create apps.
+- [x] **M7.3** **Robustness** — saga compensations (install failure rolls back Slack App creation, removes the freshly-provisioned Notebook file, marks Manifest rejected; runtime boot failure tears down the app and **archives** — never deletes — any Notebook data written, flagged for review) plus idempotency keys so retried approvals never double-create apps.
   - [x] **M7.3.a** Idempotency keys on spawn + retire saga kickoffers — `spawn_sagas.idempotency_key text NULL UNIQUE` column + migration; `SpawnSagaDAO.InsertIfAbsent(ctx, id, manifestVersionID, idempotencyKey)`; both kickoffers derive idempotency_key from approval_token, on duplicate emit `*_replayed_*` audit event and return nil (no second saga, no second Slack App, no second runtime). Defense-in-depth: empty key rejected at DAO layer; UNIQUE index allows multiple legacy NULL rows.
   - [x] **M7.3.b** Compensation infrastructure in `saga` package + manifest-rejected emit on rollback — extend `saga.Step` with optional `Compensator` interface; `saga.Runner` calls `Compensate` in reverse order for all successfully-executed steps when a later step fails; new audit events `saga_step_compensated` / `saga_compensation_failed`; on full rollback the kickoffer emits `manifest_rejected_after_spawn_failure` so the Manifest is marked rejected and the operator is surfaced. No concrete Compensate impls — foundation for M7.3.c.
   - [x] **M7.3.c** Per-step Compensate implementations + fault-injection harness — `CreateApp.Compensate` (Slack App teardown via SlackAppRPC), `OAuthInstall.Compensate` (revoke + wipe encrypted bot-token), `BotProfile.Compensate` (no-op explicit), `NotebookProvision.Compensate` (archive-not-delete + flag-for-review), `RuntimeLaunch.Compensate` (runtime teardown, cost-record finalisation). Fault-injection harness test: kill saga during step N → reverse compensations execute, Slack App deleted, Notebook archived with review flag, Manifest marked rejected.
@@ -441,10 +441,10 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Verification**
 
-- [ ] Scripted end-to-end: admin DMs Watchmaster "spawn coordinator for backend team", approves the draft, new bot appears in the workspace within 90 seconds posting its intro message.
-- [ ] Fault-injection: kill the runtime during step 5 → saga rolls back the Slack App and surfaces failure to the admin.
-- [ ] Idempotency: same approval re-submitted does not create a second Slack app.
-- [ ] Retire flow archives Notebook before tearing down runtime.
+- [x] Scripted end-to-end: admin DMs Watchmaster "spawn coordinator for backend team", approves the draft, new bot appears in the workspace within 90 seconds posting its intro message.
+- [x] Fault-injection: kill the runtime during step 5 → saga rolls back the Slack App and surfaces failure to the admin.
+- [x] Idempotency: same approval re-submitted does not create a second Slack app.
+- [x] Retire flow archives Notebook before tearing down runtime.
 
 **Dependencies**: M6.
 **Magnitude**: 4–6 days.
