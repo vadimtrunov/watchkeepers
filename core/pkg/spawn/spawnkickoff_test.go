@@ -83,11 +83,14 @@ func (f *fakeLocalKeepClient) eventTypes() []string {
 type recordingDAO struct {
 	inner *saga.MemorySpawnSagaDAO
 
-	mu        sync.Mutex
-	seq       uint64
-	insertSeq []uint64
-	getSeq    []uint64
-	insertErr error
+	mu                 sync.Mutex
+	seq                uint64
+	insertSeq          []uint64
+	insertIfAbsentSeq  []uint64
+	getSeq             []uint64
+	insertErr          error
+	insertIfAbsentErr  error
+	insertIfAbsentKeys []string
 }
 
 func newRecordingDAO() *recordingDAO {
@@ -105,6 +108,24 @@ func (r *recordingDAO) Insert(ctx context.Context, id uuid.UUID, mvID uuid.UUID)
 		return r.insertErr
 	}
 	return r.inner.Insert(ctx, id, mvID)
+}
+
+func (r *recordingDAO) InsertIfAbsent(
+	ctx context.Context,
+	id uuid.UUID,
+	mvID uuid.UUID,
+	wkID uuid.UUID,
+	idempotencyKey string,
+) (saga.IdempotentInsertResult, error) {
+	t := r.tick()
+	r.mu.Lock()
+	r.insertIfAbsentSeq = append(r.insertIfAbsentSeq, t)
+	r.insertIfAbsentKeys = append(r.insertIfAbsentKeys, idempotencyKey)
+	r.mu.Unlock()
+	if r.insertIfAbsentErr != nil {
+		return saga.IdempotentInsertResult{}, r.insertIfAbsentErr
+	}
+	return r.inner.InsertIfAbsent(ctx, id, mvID, wkID, idempotencyKey)
 }
 
 func (r *recordingDAO) Get(ctx context.Context, id uuid.UUID) (saga.Saga, error) {
@@ -273,9 +294,10 @@ func TestSpawnKickoff_HappyPath_EmitsTwoEventsInOrder(t *testing.T) {
 // ────────────────────────────────────────────────────────────────────────
 
 // TestSpawnKickoff_InsertPrecedesRun pins the AC6 ordering pin: the
-// recording DAO captures Insert and Get sequences; the runner's first
-// action is Get(sagaID), so Insert.seq < Get.seq is the wire-shape
-// regression test for "Insert before Run".
+// recording DAO captures InsertIfAbsent and Get sequences; the runner's
+// first action is Get(sagaID), so InsertIfAbsent.seq < Get.seq is the
+// wire-shape regression test for "Insert before Run". Mirrors the
+// M7.1.b assertion under the M7.3.a-renamed DAO method.
 func TestSpawnKickoff_InsertPrecedesRun(t *testing.T) {
 	t.Parallel()
 
@@ -296,15 +318,22 @@ func TestSpawnKickoff_InsertPrecedesRun(t *testing.T) {
 
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	if len(rec.insertSeq) != 1 {
-		t.Fatalf("Insert call count = %d, want 1", len(rec.insertSeq))
+	if len(rec.insertIfAbsentSeq) != 1 {
+		t.Fatalf("InsertIfAbsent call count = %d, want 1", len(rec.insertIfAbsentSeq))
 	}
 	if len(rec.getSeq) != 1 {
 		t.Fatalf("Get call count = %d, want 1 (saga.Runner.Run resolves the row first)", len(rec.getSeq))
 	}
-	if rec.insertSeq[0] >= rec.getSeq[0] {
-		t.Errorf("Insert.seq=%d, Get.seq=%d — Insert MUST precede Run (Get is the runner's first action)",
-			rec.insertSeq[0], rec.getSeq[0])
+	if rec.insertIfAbsentSeq[0] >= rec.getSeq[0] {
+		t.Errorf("InsertIfAbsent.seq=%d, Get.seq=%d — InsertIfAbsent MUST precede Run (Get is the runner's first action)",
+			rec.insertIfAbsentSeq[0], rec.getSeq[0])
+	}
+	// Insert (legacy method) MUST NOT be called by the kickoffer —
+	// every M7.3.a kickoff routes through InsertIfAbsent. Pinned so
+	// a future regression that swaps back to Insert (silently
+	// disabling idempotency dedup) is caught.
+	if len(rec.insertSeq) != 0 {
+		t.Errorf("Insert (legacy) call count = %d, want 0 (M7.3.a routes through InsertIfAbsent)", len(rec.insertSeq))
 	}
 }
 
@@ -312,10 +341,17 @@ func TestSpawnKickoff_InsertPrecedesRun(t *testing.T) {
 // Negative paths — append + insert error propagation.
 // ────────────────────────────────────────────────────────────────────────
 
-// TestSpawnKickoff_AppendError_StopsBeforeInsert pins the test plan
-// "Kickoff propagates keeperslog.Append error → returned wrapped error;
-// Insert/Run NOT called; no orphan saga row".
-func TestSpawnKickoff_AppendError_StopsBeforeInsert(t *testing.T) {
+// TestSpawnKickoff_AppendError_StopsBeforeRun pins the test plan
+// "Kickoff propagates keeperslog.Append error → returned wrapped
+// error; Run NOT called; no orphan saga state-write past
+// InsertIfAbsent". M7.3.a inverts the M7.1.b ordering: InsertIfAbsent
+// runs FIRST so the kickoffer can choose insert-vs-replay event_type.
+// On the insert branch, the row IS persisted before Append fires (no
+// way around — the result.Inserted bool comes from the DAO call); the
+// caller's retry hits the replay branch and surfaces the error there.
+// On the replay branch, no extra state-write happens — the existing
+// row is unaffected.
+func TestSpawnKickoff_AppendError_StopsBeforeRun(t *testing.T) {
 	t.Parallel()
 
 	rec := newRecordingDAO()
@@ -340,24 +376,29 @@ func TestSpawnKickoff_AppendError_StopsBeforeInsert(t *testing.T) {
 
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	if len(rec.insertSeq) != 0 {
-		t.Errorf("Insert calls = %d, want 0 (audit failure must stop before persistence)", len(rec.insertSeq))
+	if len(rec.insertIfAbsentSeq) != 1 {
+		t.Errorf("InsertIfAbsent calls = %d, want 1 (decides insert-vs-replay before Append)", len(rec.insertIfAbsentSeq))
 	}
 	if len(rec.getSeq) != 0 {
 		t.Errorf("Get calls = %d, want 0 (Run must not fire after audit failure)", len(rec.getSeq))
 	}
 }
 
-// TestSpawnKickoff_InsertError_AuditAlreadyEmitted pins the test plan
-// "Kickoff propagates SpawnSagaDAO.Insert error → returned wrapped
-// error; Run NOT called; audit event already emitted (acceptable —
-// emit-before-state is the M6.3.e + M7.1.a pattern; the audit row is
-// the canonical 'we tried' signal even when state-persistence fails)".
-func TestSpawnKickoff_InsertError_AuditAlreadyEmitted(t *testing.T) {
+// TestSpawnKickoff_InsertIfAbsentError_NoAuditRow pins the M7.3.a
+// inversion of the M7.1.b "audit-emit precedes Insert" invariant: the
+// kickoffer no longer emits manifest_approved_for_spawn BEFORE the
+// DAO call, because the event_type depends on whether the row is a
+// fresh insert or an idempotency replay. On a transient
+// InsertIfAbsent error the kickoffer surfaces the wrapped error and
+// emits NO audit row; the operator's retry on the same idempotency
+// key (approval_token) will dedup cleanly via the partial UNIQUE
+// index. The downstream dispatcher's existing `approval_replay_failed`
+// audit row covers the operator-visible failure surface.
+func TestSpawnKickoff_InsertIfAbsentError_NoAuditRow(t *testing.T) {
 	t.Parallel()
 
 	rec := newRecordingDAO()
-	rec.insertErr = errors.New("postgres unreachable")
+	rec.insertIfAbsentErr = errors.New("postgres unreachable")
 	keep := &fakeLocalKeepClient{}
 	writer := keeperslog.New(keep)
 	runner := saga.NewRunner(saga.Dependencies{DAO: rec, Logger: writer})
@@ -372,22 +413,22 @@ func TestSpawnKickoff_InsertError_AuditAlreadyEmitted(t *testing.T) {
 	if err == nil {
 		t.Fatal("Kickoff returned nil, want non-nil error")
 	}
-	if !errors.Is(err, rec.insertErr) {
-		t.Errorf("errors.Is(err, insertErr) = false; want wrapped chain (got %v)", err)
+	if !errors.Is(err, rec.insertIfAbsentErr) {
+		t.Errorf("errors.Is(err, insertIfAbsentErr) = false; want wrapped chain (got %v)", err)
 	}
 
-	// Audit row already emitted; the manifest_approved_for_spawn event
-	// is the canonical "we tried" signal.
-	wantEvents := []string{spawn.EventTypeManifestApprovedForSpawn}
-	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
-		t.Errorf("event_type chain = %v, want %v", got, wantEvents)
+	// NO audit row was emitted — the kickoffer cannot know whether
+	// the call was an original or a replay until InsertIfAbsent
+	// returns, so a transient error short-circuits cleanly.
+	if got := keep.eventTypes(); len(got) != 0 {
+		t.Errorf("event_type chain = %v, want empty (transient DAO error must not leak partial audit)", got)
 	}
 
 	// Run was NOT called (no Get on the recording DAO).
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if len(rec.getSeq) != 0 {
-		t.Errorf("Get calls = %d, want 0 (Run must not fire after Insert failure)", len(rec.getSeq))
+		t.Errorf("Get calls = %d, want 0 (Run must not fire after InsertIfAbsent failure)", len(rec.getSeq))
 	}
 }
 
@@ -421,8 +462,10 @@ func TestSpawnKickoff_PayloadPIIDiscipline(t *testing.T) {
 		t.Fatalf("recorded rows = 0; expected the audit chain")
 	}
 
-	// Pick out the manifest_approved_for_spawn row (always row 0 per
-	// the audit-emit-before-Insert pattern).
+	// Pick out the manifest_approved_for_spawn row (always row 0 —
+	// it's the first event the kickoffer emits after a successful
+	// InsertIfAbsent on the insert branch; the saga_completed row
+	// follows for the zero-step kickoff).
 	row := rows[0]
 	if row.EventType != spawn.EventTypeManifestApprovedForSpawn {
 		t.Fatalf("row[0].EventType = %q, want %q", row.EventType, spawn.EventTypeManifestApprovedForSpawn)
@@ -816,24 +859,41 @@ func TestSpawnKickoff_FailsFastOnNilArgs(t *testing.T) {
 		sagaID            uuid.UUID
 		manifestVersionID uuid.UUID
 		watchkeeperID     uuid.UUID
+		approvalToken     string
 	}{
 		{
 			name:              "nil sagaID",
 			sagaID:            uuid.Nil,
 			manifestVersionID: uuid.New(),
 			watchkeeperID:     uuid.New(),
+			approvalToken:     "tok-fail-fast",
 		},
 		{
 			name:              "nil manifestVersionID",
 			sagaID:            uuid.New(),
 			manifestVersionID: uuid.Nil,
 			watchkeeperID:     uuid.New(),
+			approvalToken:     "tok-fail-fast",
 		},
 		{
 			name:              "nil watchkeeperID",
 			sagaID:            uuid.New(),
 			manifestVersionID: uuid.New(),
 			watchkeeperID:     uuid.Nil,
+			approvalToken:     "tok-fail-fast",
+		},
+		{
+			// M7.3.a: empty approvalToken would silently bypass the
+			// idempotency dedup at the DAO layer
+			// (saga.ErrEmptyIdempotencyKey). The kickoffer pins the
+			// non-empty contract upstream so a future caller cannot
+			// supply "" and re-introduce the double-create regression
+			// the M7.3.a column was introduced to prevent.
+			name:              "empty approvalToken",
+			sagaID:            uuid.New(),
+			manifestVersionID: uuid.New(),
+			watchkeeperID:     uuid.New(),
+			approvalToken:     "",
 		},
 	}
 	for _, tc := range cases {
@@ -850,7 +910,7 @@ func TestSpawnKickoff_FailsFastOnNilArgs(t *testing.T) {
 				AgentID: "bot",
 			})
 
-			err := k.Kickoff(context.Background(), tc.sagaID, tc.manifestVersionID, tc.watchkeeperID, testSpawnClaim(), "tok-fail-fast")
+			err := k.Kickoff(context.Background(), tc.sagaID, tc.manifestVersionID, tc.watchkeeperID, testSpawnClaim(), tc.approvalToken)
 			if err == nil {
 				t.Fatalf("Kickoff: err = nil, want wrapped ErrInvalidKickoffArgs")
 			}
@@ -864,12 +924,403 @@ func TestSpawnKickoff_FailsFastOnNilArgs(t *testing.T) {
 			}
 			rec.mu.Lock()
 			defer rec.mu.Unlock()
-			if len(rec.insertSeq) != 0 {
-				t.Errorf("Insert calls = %d, want 0 (fail-fast must precede persistence)", len(rec.insertSeq))
+			if len(rec.insertIfAbsentSeq) != 0 {
+				t.Errorf("InsertIfAbsent calls = %d, want 0 (fail-fast must precede persistence)", len(rec.insertIfAbsentSeq))
 			}
 			if len(rec.getSeq) != 0 {
 				t.Errorf("Get calls = %d, want 0 (Run must not fire on fail-fast)", len(rec.getSeq))
 			}
 		})
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// M7.3.a — idempotency replay flow.
+// ────────────────────────────────────────────────────────────────────────
+
+// TestSpawnKickoff_ReplayedCall_EmitsReplayedEvent_NoSecondRun pins
+// the M7.3.a replay path: a second Kickoff with the same approval_token
+// emits exactly one `manifest_approval_replayed_for_spawn` row,
+// short-circuits before [saga.Runner.Run] (no second Get on the DAO),
+// returns nil, and does NOT re-emit `manifest_approved_for_spawn`. The
+// underlying saga row's id is stable across the two Kickoff calls
+// (the supplied second-call sagaID is discarded by the partial UNIQUE
+// index, so the first-call sagaID wins).
+func TestSpawnKickoff_ReplayedCall_EmitsReplayedEvent_NoSecondRun(t *testing.T) {
+	t.Parallel()
+
+	rec := newRecordingDAO()
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: rec, Logger: writer})
+	k := spawn.NewSpawnKickoffer(spawn.SpawnKickoffDeps{
+		Logger:  writer,
+		DAO:     rec,
+		Runner:  runner,
+		AgentID: "bot-watchmaster",
+	})
+
+	firstSagaID := uuid.New()
+	secondSagaID := uuid.New() // discarded by the dedup index
+	mvID := uuid.New()
+	//nolint:gosec // G101: synthetic test idempotency-key constant, not a real credential.
+	const token = "tok-replay-dedup"
+
+	if err := kickoffWithDefaults(context.Background(), k, firstSagaID, mvID, token); err != nil {
+		t.Fatalf("first Kickoff: %v", err)
+	}
+	// Second Kickoff with the SAME approvalToken simulates a Slack
+	// retry / double-click: the dispatcher mints a fresh sagaID +
+	// watchkeeperID via uuid.New() but supplies the SAME token. The
+	// kickoffer routes through InsertIfAbsent and surfaces the replay.
+	if err := kickoffWithDefaults(context.Background(), k, secondSagaID, mvID, token); err != nil {
+		t.Fatalf("second Kickoff (replay): %v", err)
+	}
+
+	wantEvents := []string{
+		spawn.EventTypeManifestApprovedForSpawn,         // 1st kickoff insert
+		saga.EventTypeSagaCompleted,                     // 1st kickoff zero-step run completes
+		spawn.EventTypeManifestApprovalReplayedForSpawn, // 2nd kickoff replay
+	}
+	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.insertIfAbsentSeq) != 2 {
+		t.Errorf("InsertIfAbsent calls = %d, want 2 (one per Kickoff)", len(rec.insertIfAbsentSeq))
+	}
+	if !equalStrings(rec.insertIfAbsentKeys, []string{token, token}) {
+		t.Errorf("InsertIfAbsent idempotency_keys = %v, want both %q", rec.insertIfAbsentKeys, token)
+	}
+	if len(rec.getSeq) != 1 {
+		t.Errorf("Get calls = %d, want 1 (Runner.Run fired only on 1st Kickoff)", len(rec.getSeq))
+	}
+}
+
+// TestSpawnKickoff_ReplayedCall_PayloadShape pins the M7.3.a
+// `manifest_approval_replayed_for_spawn` payload's closed-set keys:
+// saga_id, manifest_version_id, approval_token_prefix, agent_id,
+// previous_status. NEVER carries the full token, the original step's
+// params, or any error string.
+func TestSpawnKickoff_ReplayedCall_PayloadShape(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	k := newKickoffer(t, dao, keep, "bot-watchmaster")
+
+	firstSagaID := uuid.New()
+	mvID := uuid.New()
+	token := strings.Repeat("XX", 16) // 32-char canary
+
+	if err := kickoffWithDefaults(context.Background(), k, firstSagaID, mvID, token); err != nil {
+		t.Fatalf("first Kickoff: %v", err)
+	}
+	if err := kickoffWithDefaults(context.Background(), k, uuid.New(), mvID, token); err != nil {
+		t.Fatalf("second Kickoff (replay): %v", err)
+	}
+
+	replayRow := findEventRow(t, keep, spawn.EventTypeManifestApprovalReplayedForSpawn)
+	data := decodePayloadData(t, replayRow.Payload)
+
+	assertReplayedPayloadKeys(t, data, []string{
+		"saga_id", "manifest_version_id", "watchkeeper_id",
+		"approval_token_prefix", "agent_id", "previous_status",
+	})
+	assertReplayedPayloadPII(t, replayRow.Payload, token)
+
+	if got := data["previous_status"]; got != string(saga.SagaStateCompleted) {
+		t.Errorf("previous_status = %v, want %q", got, saga.SagaStateCompleted)
+	}
+	if got := data["saga_id"]; got != firstSagaID.String() {
+		t.Errorf("saga_id = %v, want first-call %q", got, firstSagaID)
+	}
+}
+
+// findEventRow returns the first recorded row whose EventType matches
+// `wantType`. Hoisted from the M7.3.a payload-shape tests so the
+// per-test cyclomatic complexity stays under the project's 15-cap.
+func findEventRow(t *testing.T, keep *fakeLocalKeepClient, wantType string) *keepclient.LogAppendRequest {
+	t.Helper()
+	rows := keep.recorded()
+	for i := range rows {
+		if rows[i].EventType == wantType {
+			return &rows[i]
+		}
+	}
+	t.Fatalf("no %q row in %v", wantType, keep.eventTypes())
+	return nil
+}
+
+// decodePayloadData JSON-decodes the keeperslog envelope's `data`
+// sub-object. Hoisted so the M7.3.a payload-shape tests share the
+// envelope-unwrap discipline without inflating gocyclo.
+func decodePayloadData(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(envelope["data"], &data); err != nil {
+		t.Fatalf("data not JSON: %v", err)
+	}
+	return data
+}
+
+// assertReplayedPayloadKeys pins the closed-set replay-payload key
+// vocabulary.
+func assertReplayedPayloadKeys(t *testing.T, data map[string]any, want []string) {
+	t.Helper()
+	allowed := make(map[string]bool, len(want))
+	for _, k := range want {
+		allowed[k] = true
+	}
+	if len(data) != len(allowed) {
+		t.Errorf("replayed payload key count = %d, want %d (keys=%v)", len(data), len(allowed), data)
+	}
+	for k := range data {
+		if !allowed[k] {
+			t.Errorf("replayed payload contains forbidden key %q", k)
+		}
+	}
+	for k := range allowed {
+		if _, ok := data[k]; !ok {
+			t.Errorf("replayed payload missing required key %q", k)
+		}
+	}
+}
+
+// assertReplayedPayloadPII pins the M2b.7 PII discipline on the replay
+// row: full approval_token absent, no `approval_token` key, no `error`
+// substring.
+func assertReplayedPayloadPII(t *testing.T, raw []byte, fullToken string) {
+	t.Helper()
+	s := string(raw)
+	if strings.Contains(s, fullToken) {
+		t.Errorf("replayed payload leaked full approval_token: %s", s)
+	}
+	if strings.Contains(s, `"approval_token"`) {
+		t.Errorf("replayed payload contains forbidden `approval_token` key: %s", s)
+	}
+	if strings.Contains(s, `"error"`) {
+		t.Errorf("replayed payload contains forbidden `error` key: %s", s)
+	}
+}
+
+// TestSpawnKickoff_ReplayedPayload_UsesExistingIDs pins codex iter-1
+// Major: the replayed-event payload sources `manifest_version_id` and
+// `watchkeeper_id` from the existing saga row, NOT the second-call's
+// discarded args. A retried approval that supplied a different
+// manifestVersionID or watchkeeperID would otherwise produce a
+// self-contradictory row.
+func TestSpawnKickoff_ReplayedPayload_UsesExistingIDs(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	k := newKickoffer(t, dao, keep, "bot-watchmaster")
+
+	firstSagaID := uuid.New()
+	firstMvID := uuid.New()
+	firstWkID := uuid.New()
+	const token = "tok-existing-ids"
+
+	// First call seeds the row with the FIRST-call's ids.
+	if err := k.Kickoff(context.Background(), firstSagaID, firstMvID, firstWkID, testSpawnClaim(), token); err != nil {
+		t.Fatalf("first Kickoff: %v", err)
+	}
+	// Second call (replay) supplies DIFFERENT ids; the kickoffer
+	// MUST emit the FIRST-call's ids on the replay row, not the
+	// second-call's discarded values.
+	secondSagaID := uuid.New()
+	secondMvID := uuid.New()
+	secondWkID := uuid.New()
+	if err := k.Kickoff(context.Background(), secondSagaID, secondMvID, secondWkID, testSpawnClaim(), token); err != nil {
+		t.Fatalf("second Kickoff (replay): %v", err)
+	}
+
+	rows := keep.recorded()
+	var replayRow *keepclient.LogAppendRequest
+	for i := range rows {
+		if rows[i].EventType == spawn.EventTypeManifestApprovalReplayedForSpawn {
+			replayRow = &rows[i]
+			break
+		}
+	}
+	if replayRow == nil {
+		t.Fatalf("no replay row in %v", keep.eventTypes())
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(replayRow.Payload, &envelope); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(envelope["data"], &data); err != nil {
+		t.Fatalf("data not JSON: %v", err)
+	}
+
+	if got := data["saga_id"]; got != firstSagaID.String() {
+		t.Errorf("saga_id = %v, want FIRST-call %q (not second-call %q)", got, firstSagaID, secondSagaID)
+	}
+	if got := data["manifest_version_id"]; got != firstMvID.String() {
+		t.Errorf("manifest_version_id = %v, want FIRST-call %q (not second-call %q)", got, firstMvID, secondMvID)
+	}
+	if got := data["watchkeeper_id"]; got != firstWkID.String() {
+		t.Errorf("watchkeeper_id = %v, want FIRST-call %q (not second-call %q)", got, firstWkID, secondWkID)
+	}
+}
+
+// TestSpawnKickoff_PendingStatus_CatchUpResumesSaga pins codex iter-1
+// Critical: when the original Kickoff's audit-append failed AFTER the
+// InsertIfAbsent succeeded, the saga is left in `pending` status. A
+// retry call MUST detect the pending state and resume — emit the
+// missed `manifest_approved_for_spawn`, seed SpawnContext from the
+// persisted row, and call saga.Runner.Run for the existing sagaID.
+// Without the catch-up branch the row would be stuck forever (the
+// approval_token cannot be re-resolved through the upstream
+// pending_approvals state machine).
+func TestSpawnKickoff_PendingStatus_CatchUpResumesSaga(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+
+	// First Kickoff: pre-seed a `pending` saga DIRECTLY via the DAO so
+	// the test has full control over the partial state. This mirrors
+	// the production failure mode: InsertIfAbsent succeeded but the
+	// keeperslog Append failed before saga.Runner.Run could run.
+	firstSagaID := uuid.New()
+	firstMvID := uuid.New()
+	firstWkID := uuid.New()
+	const token = "tok-catch-up"
+	if _, err := dao.InsertIfAbsent(context.Background(), firstSagaID, firstMvID, firstWkID, token); err != nil {
+		t.Fatalf("seed InsertIfAbsent: %v", err)
+	}
+	// Sanity — the seed row is in `pending`.
+	if got, _ := dao.Get(context.Background(), firstSagaID); got.Status != saga.SagaStatePending {
+		t.Fatalf("seeded saga status = %q, want %q", got.Status, saga.SagaStatePending)
+	}
+
+	// Second Kickoff: the operator retry. Catch-up branch should
+	// emit manifest_approved_for_spawn AND run the saga (zero-step
+	// saga completes immediately, so saga_completed follows).
+	k := newKickoffer(t, dao, keep, "bot-watchmaster")
+	if err := kickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), token); err != nil {
+		t.Fatalf("retry Kickoff (catch-up): %v", err)
+	}
+
+	wantEvents := []string{
+		spawn.EventTypeManifestApprovedForSpawn,
+		saga.EventTypeSagaCompleted,
+	}
+	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v (catch-up emits original audit chain)", got, wantEvents)
+	}
+
+	// The persisted saga reaches `completed`; the catch-up uses the
+	// FIRST-call's sagaID (the second-call's id is discarded).
+	got, err := dao.Get(context.Background(), firstSagaID)
+	if err != nil {
+		t.Fatalf("Get firstSagaID: %v", err)
+	}
+	if got.Status != saga.SagaStateCompleted {
+		t.Errorf("Status = %q, want %q (catch-up resumes Run)", got.Status, saga.SagaStateCompleted)
+	}
+	if got.WatchkeeperID != firstWkID {
+		t.Errorf("Persisted WatchkeeperID = %v, want first-call %v (catch-up keeps original)",
+			got.WatchkeeperID, firstWkID)
+	}
+}
+
+// TestEventTypeManifestApprovalReplayedForSpawn_NoPrefixCollision pins
+// the closed-set vocabulary discipline for the M7.3.a replay event.
+// Mirrors TestEventTypeManifestApprovedForSpawn_NoPrefixCollision.
+func TestEventTypeManifestApprovalReplayedForSpawn_NoPrefixCollision(t *testing.T) {
+	t.Parallel()
+
+	et := spawn.EventTypeManifestApprovalReplayedForSpawn
+	const want = "manifest_approval_replayed_for_spawn"
+	if et != want {
+		t.Errorf("event_type = %q, want exact %q", et, want)
+	}
+	if strings.HasPrefix(et, "llm_turn_cost") {
+		t.Errorf("event_type %q has forbidden llm_turn_cost prefix (M6.3.e)", et)
+	}
+	if strings.HasPrefix(et, "saga_") {
+		t.Errorf("event_type %q has forbidden saga_ prefix (M7.1.a)", et)
+	}
+	if et == spawn.EventTypeManifestApprovedForSpawn {
+		t.Errorf("event_type %q must differ from EventTypeManifestApprovedForSpawn", et)
+	}
+}
+
+// TestSpawnKickoff_ConcurrentReplays_ExactlyOneRun hammers the
+// idempotency contract under contention: 16 goroutines call Kickoff
+// concurrently with the SAME approvalToken; exactly one of them is
+// the original (Runner.Run fires once), the other 15 are replays
+// (no Run, no second saga row, no second `manifest_approved_for_spawn`
+// audit). Pinned by the race-detector test invocation; the test
+// fails if a developer regresses the InsertIfAbsent dedup away from
+// a single-row commit.
+func TestSpawnKickoff_ConcurrentReplays_ExactlyOneRun(t *testing.T) {
+	t.Parallel()
+
+	rec := newRecordingDAO()
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: rec, Logger: writer})
+	k := spawn.NewSpawnKickoffer(spawn.SpawnKickoffDeps{
+		Logger:  writer,
+		DAO:     rec,
+		Runner:  runner,
+		AgentID: "bot",
+	})
+
+	const writers = 16
+	const token = "tok-concurrent"
+	mvID := uuid.New()
+
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Each goroutine mints its own candidate sagaID + watchkeeperID
+			// (mirrors the dispatcher's uuid.New() per call). The dedup
+			// index ensures only one of them wins the insert race.
+			if err := kickoffWithDefaults(context.Background(), k, uuid.New(), mvID, token); err != nil {
+				t.Errorf("Kickoff: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	approvedCount := 0
+	replayedCount := 0
+	for _, et := range keep.eventTypes() {
+		switch et {
+		case spawn.EventTypeManifestApprovedForSpawn:
+			approvedCount++
+		case spawn.EventTypeManifestApprovalReplayedForSpawn:
+			replayedCount++
+		}
+	}
+	if approvedCount != 1 {
+		t.Errorf("manifest_approved_for_spawn rows = %d, want 1 (the winner of the InsertIfAbsent race)", approvedCount)
+	}
+	if replayedCount != writers-1 {
+		t.Errorf("manifest_approval_replayed_for_spawn rows = %d, want %d", replayedCount, writers-1)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.insertIfAbsentSeq) != writers {
+		t.Errorf("InsertIfAbsent calls = %d, want %d (one per Kickoff)", len(rec.insertIfAbsentSeq), writers)
+	}
+	if len(rec.getSeq) != 1 {
+		t.Errorf("Get calls = %d, want 1 (Runner.Run fires exactly once)", len(rec.getSeq))
 	}
 }

@@ -245,15 +245,18 @@ func TestRetireKickoff_InsertPrecedesRun(t *testing.T) {
 
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	if len(rec.insertSeq) != 1 {
-		t.Fatalf("Insert call count = %d, want 1", len(rec.insertSeq))
+	if len(rec.insertIfAbsentSeq) != 1 {
+		t.Fatalf("InsertIfAbsent call count = %d, want 1", len(rec.insertIfAbsentSeq))
 	}
 	if len(rec.getSeq) != 1 {
 		t.Fatalf("Get call count = %d, want 1 (saga.Runner.Run resolves the row first)", len(rec.getSeq))
 	}
-	if rec.insertSeq[0] >= rec.getSeq[0] {
-		t.Errorf("Insert.seq=%d, Get.seq=%d — Insert MUST precede Run (Get is the runner's first action)",
-			rec.insertSeq[0], rec.getSeq[0])
+	if rec.insertIfAbsentSeq[0] >= rec.getSeq[0] {
+		t.Errorf("InsertIfAbsent.seq=%d, Get.seq=%d — InsertIfAbsent MUST precede Run (Get is the runner's first action)",
+			rec.insertIfAbsentSeq[0], rec.getSeq[0])
+	}
+	if len(rec.insertSeq) != 0 {
+		t.Errorf("Insert (legacy) call count = %d, want 0 (M7.3.a routes through InsertIfAbsent)", len(rec.insertSeq))
 	}
 }
 
@@ -261,7 +264,7 @@ func TestRetireKickoff_InsertPrecedesRun(t *testing.T) {
 // Negative paths — append + insert error propagation.
 // ────────────────────────────────────────────────────────────────────────
 
-func TestRetireKickoff_AppendError_StopsBeforeInsert(t *testing.T) {
+func TestRetireKickoff_AppendError_StopsBeforeRun(t *testing.T) {
 	t.Parallel()
 
 	rec := newRecordingDAO()
@@ -286,19 +289,19 @@ func TestRetireKickoff_AppendError_StopsBeforeInsert(t *testing.T) {
 
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	if len(rec.insertSeq) != 0 {
-		t.Errorf("Insert calls = %d, want 0 (audit failure must stop before persistence)", len(rec.insertSeq))
+	if len(rec.insertIfAbsentSeq) != 1 {
+		t.Errorf("InsertIfAbsent calls = %d, want 1 (decides insert-vs-replay before Append)", len(rec.insertIfAbsentSeq))
 	}
 	if len(rec.getSeq) != 0 {
 		t.Errorf("Get calls = %d, want 0 (Run must not fire after audit failure)", len(rec.getSeq))
 	}
 }
 
-func TestRetireKickoff_InsertError_AuditAlreadyEmitted(t *testing.T) {
+func TestRetireKickoff_InsertIfAbsentError_NoAuditRow(t *testing.T) {
 	t.Parallel()
 
 	rec := newRecordingDAO()
-	rec.insertErr = errors.New("postgres unreachable")
+	rec.insertIfAbsentErr = errors.New("postgres unreachable")
 	keep := &fakeLocalKeepClient{}
 	writer := keeperslog.New(keep)
 	runner := saga.NewRunner(saga.Dependencies{DAO: rec, Logger: writer})
@@ -313,19 +316,18 @@ func TestRetireKickoff_InsertError_AuditAlreadyEmitted(t *testing.T) {
 	if err == nil {
 		t.Fatal("Kickoff returned nil, want non-nil error")
 	}
-	if !errors.Is(err, rec.insertErr) {
-		t.Errorf("errors.Is(err, insertErr) = false; want wrapped chain (got %v)", err)
+	if !errors.Is(err, rec.insertIfAbsentErr) {
+		t.Errorf("errors.Is(err, insertIfAbsentErr) = false; want wrapped chain (got %v)", err)
 	}
 
-	wantEvents := []string{spawn.EventTypeRetireApprovedForWatchkeeper}
-	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
-		t.Errorf("event_type chain = %v, want %v", got, wantEvents)
+	if got := keep.eventTypes(); len(got) != 0 {
+		t.Errorf("event_type chain = %v, want empty (transient DAO error must not leak partial audit)", got)
 	}
 
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if len(rec.getSeq) != 0 {
-		t.Errorf("Get calls = %d, want 0 (Run must not fire after Insert failure)", len(rec.getSeq))
+		t.Errorf("Get calls = %d, want 0 (Run must not fire after InsertIfAbsent failure)", len(rec.getSeq))
 	}
 }
 
@@ -341,24 +343,38 @@ func TestRetireKickoff_FailsFastOnNilArgs(t *testing.T) {
 		sagaID            uuid.UUID
 		manifestVersionID uuid.UUID
 		watchkeeperID     uuid.UUID
+		approvalToken     string
 	}{
 		{
 			name:              "nil sagaID",
 			sagaID:            uuid.Nil,
 			manifestVersionID: uuid.New(),
 			watchkeeperID:     uuid.New(),
+			approvalToken:     "tok-fail-fast",
 		},
 		{
 			name:              "nil manifestVersionID",
 			sagaID:            uuid.New(),
 			manifestVersionID: uuid.Nil,
 			watchkeeperID:     uuid.New(),
+			approvalToken:     "tok-fail-fast",
 		},
 		{
 			name:              "nil watchkeeperID",
 			sagaID:            uuid.New(),
 			manifestVersionID: uuid.New(),
 			watchkeeperID:     uuid.Nil,
+			approvalToken:     "tok-fail-fast",
+		},
+		{
+			// M7.3.a: empty approvalToken would silently bypass the
+			// idempotency dedup at the DAO layer. Mirrors the spawn-side
+			// fail-fast pin.
+			name:              "empty approvalToken",
+			sagaID:            uuid.New(),
+			manifestVersionID: uuid.New(),
+			watchkeeperID:     uuid.New(),
+			approvalToken:     "",
 		},
 	}
 	for _, tc := range cases {
@@ -375,7 +391,7 @@ func TestRetireKickoff_FailsFastOnNilArgs(t *testing.T) {
 				AgentID: "bot",
 			})
 
-			err := k.Kickoff(context.Background(), tc.sagaID, tc.manifestVersionID, tc.watchkeeperID, testRetireClaim(), "tok-fail-fast")
+			err := k.Kickoff(context.Background(), tc.sagaID, tc.manifestVersionID, tc.watchkeeperID, testRetireClaim(), tc.approvalToken)
 			if err == nil {
 				t.Fatalf("Kickoff: err = nil, want wrapped ErrInvalidKickoffArgs")
 			}
@@ -388,13 +404,250 @@ func TestRetireKickoff_FailsFastOnNilArgs(t *testing.T) {
 			}
 			rec.mu.Lock()
 			defer rec.mu.Unlock()
-			if len(rec.insertSeq) != 0 {
-				t.Errorf("Insert calls = %d, want 0 (fail-fast must precede persistence)", len(rec.insertSeq))
+			if len(rec.insertIfAbsentSeq) != 0 {
+				t.Errorf("InsertIfAbsent calls = %d, want 0 (fail-fast must precede persistence)", len(rec.insertIfAbsentSeq))
 			}
 			if len(rec.getSeq) != 0 {
 				t.Errorf("Get calls = %d, want 0 (Run must not fire on fail-fast)", len(rec.getSeq))
 			}
 		})
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// M7.3.a — idempotency replay flow (retire-side mirror of the
+// spawn-side replay tests).
+// ────────────────────────────────────────────────────────────────────────
+
+func TestRetireKickoff_ReplayedCall_EmitsReplayedEvent_NoSecondRun(t *testing.T) {
+	t.Parallel()
+
+	rec := newRecordingDAO()
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: rec, Logger: writer})
+	k := spawn.NewRetireKickoffer(spawn.RetireKickoffDeps{
+		Logger:  writer,
+		DAO:     rec,
+		Runner:  runner,
+		AgentID: "bot-watchmaster",
+	})
+
+	firstSagaID := uuid.New()
+	secondSagaID := uuid.New()
+	mvID := uuid.New()
+	//nolint:gosec // G101: synthetic test idempotency-key constant, not a real credential.
+	const token = "tok-retire-replay-dedup"
+
+	if err := retireKickoffWithDefaults(context.Background(), k, firstSagaID, mvID, token); err != nil {
+		t.Fatalf("first Kickoff: %v", err)
+	}
+	if err := retireKickoffWithDefaults(context.Background(), k, secondSagaID, mvID, token); err != nil {
+		t.Fatalf("second Kickoff (replay): %v", err)
+	}
+
+	wantEvents := []string{
+		spawn.EventTypeRetireApprovedForWatchkeeper,
+		saga.EventTypeSagaCompleted,
+		spawn.EventTypeRetireApprovalReplayedForWatchkeeper,
+	}
+	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.insertIfAbsentSeq) != 2 {
+		t.Errorf("InsertIfAbsent calls = %d, want 2 (one per Kickoff)", len(rec.insertIfAbsentSeq))
+	}
+	if !equalStrings(rec.insertIfAbsentKeys, []string{token, token}) {
+		t.Errorf("InsertIfAbsent idempotency_keys = %v, want both %q", rec.insertIfAbsentKeys, token)
+	}
+	if len(rec.getSeq) != 1 {
+		t.Errorf("Get calls = %d, want 1 (Runner.Run fired only on 1st Kickoff)", len(rec.getSeq))
+	}
+}
+
+func TestRetireKickoff_ReplayedCall_PayloadShape(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+	k := spawn.NewRetireKickoffer(spawn.RetireKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot-watchmaster",
+	})
+
+	firstSagaID := uuid.New()
+	mvID := uuid.New()
+	token := strings.Repeat("YY", 16)
+
+	if err := retireKickoffWithDefaults(context.Background(), k, firstSagaID, mvID, token); err != nil {
+		t.Fatalf("first Kickoff: %v", err)
+	}
+	if err := retireKickoffWithDefaults(context.Background(), k, uuid.New(), mvID, token); err != nil {
+		t.Fatalf("second Kickoff (replay): %v", err)
+	}
+
+	replayRow := findEventRow(t, keep, spawn.EventTypeRetireApprovalReplayedForWatchkeeper)
+	data := decodePayloadData(t, replayRow.Payload)
+
+	assertReplayedPayloadKeys(t, data, []string{
+		"saga_id", "manifest_version_id", "watchkeeper_id",
+		"approval_token_prefix", "agent_id", "previous_status",
+	})
+	assertReplayedPayloadPII(t, replayRow.Payload, token)
+
+	if got := data["previous_status"]; got != string(saga.SagaStateCompleted) {
+		t.Errorf("previous_status = %v, want %q", got, saga.SagaStateCompleted)
+	}
+	if got := data["saga_id"]; got != firstSagaID.String() {
+		t.Errorf("saga_id = %v, want first-call %q", got, firstSagaID)
+	}
+}
+
+// TestRetireKickoff_ReplayedPayload_UsesExistingIDs pins codex iter-1
+// Major (retire-side mirror of the spawn-side test): the replayed
+// payload sources `manifest_version_id` and `watchkeeper_id` from
+// the existing saga row, NOT the second-call's discarded args.
+func TestRetireKickoff_ReplayedPayload_UsesExistingIDs(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+	k := spawn.NewRetireKickoffer(spawn.RetireKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot-watchmaster",
+	})
+
+	firstSagaID := uuid.New()
+	firstMvID := uuid.New()
+	firstWkID := uuid.New()
+	const token = "tok-retire-existing-ids"
+
+	if err := k.Kickoff(context.Background(), firstSagaID, firstMvID, firstWkID, testRetireClaim(), token); err != nil {
+		t.Fatalf("first Kickoff: %v", err)
+	}
+	secondSagaID := uuid.New()
+	secondMvID := uuid.New()
+	secondWkID := uuid.New()
+	if err := k.Kickoff(context.Background(), secondSagaID, secondMvID, secondWkID, testRetireClaim(), token); err != nil {
+		t.Fatalf("second Kickoff (replay): %v", err)
+	}
+
+	rows := keep.recorded()
+	var replayRow *keepclient.LogAppendRequest
+	for i := range rows {
+		if rows[i].EventType == spawn.EventTypeRetireApprovalReplayedForWatchkeeper {
+			replayRow = &rows[i]
+			break
+		}
+	}
+	if replayRow == nil {
+		t.Fatalf("no replay row in %v", keep.eventTypes())
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(replayRow.Payload, &envelope); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(envelope["data"], &data); err != nil {
+		t.Fatalf("data not JSON: %v", err)
+	}
+
+	if got := data["saga_id"]; got != firstSagaID.String() {
+		t.Errorf("saga_id = %v, want FIRST-call %q (not second-call %q)", got, firstSagaID, secondSagaID)
+	}
+	if got := data["manifest_version_id"]; got != firstMvID.String() {
+		t.Errorf("manifest_version_id = %v, want FIRST-call %q (not second-call %q)", got, firstMvID, secondMvID)
+	}
+	if got := data["watchkeeper_id"]; got != firstWkID.String() {
+		t.Errorf("watchkeeper_id = %v, want FIRST-call %q (not second-call %q)", got, firstWkID, secondWkID)
+	}
+}
+
+// TestRetireKickoff_PendingStatus_CatchUpResumesSaga pins codex iter-1
+// Critical (retire-side mirror): a pending saga left by a partial
+// first-call resumes on the next Kickoff via the catch-up branch.
+func TestRetireKickoff_PendingStatus_CatchUpResumesSaga(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+
+	firstSagaID := uuid.New()
+	firstMvID := uuid.New()
+	firstWkID := uuid.New()
+	const token = "tok-retire-catch-up"
+	if _, err := dao.InsertIfAbsent(context.Background(), firstSagaID, firstMvID, firstWkID, token); err != nil {
+		t.Fatalf("seed InsertIfAbsent: %v", err)
+	}
+	if got, _ := dao.Get(context.Background(), firstSagaID); got.Status != saga.SagaStatePending {
+		t.Fatalf("seeded saga status = %q, want %q", got.Status, saga.SagaStatePending)
+	}
+
+	k := spawn.NewRetireKickoffer(spawn.RetireKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot-watchmaster",
+	})
+	if err := retireKickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), token); err != nil {
+		t.Fatalf("retry Kickoff (catch-up): %v", err)
+	}
+
+	wantEvents := []string{
+		spawn.EventTypeRetireApprovedForWatchkeeper,
+		saga.EventTypeSagaCompleted,
+	}
+	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
+		t.Fatalf("event_type chain = %v, want %v (catch-up emits original audit chain)", got, wantEvents)
+	}
+
+	got, err := dao.Get(context.Background(), firstSagaID)
+	if err != nil {
+		t.Fatalf("Get firstSagaID: %v", err)
+	}
+	if got.Status != saga.SagaStateCompleted {
+		t.Errorf("Status = %q, want %q (catch-up resumes Run)", got.Status, saga.SagaStateCompleted)
+	}
+	if got.WatchkeeperID != firstWkID {
+		t.Errorf("Persisted WatchkeeperID = %v, want first-call %v", got.WatchkeeperID, firstWkID)
+	}
+}
+
+func TestEventTypeRetireApprovalReplayedForWatchkeeper_NoPrefixCollision(t *testing.T) {
+	t.Parallel()
+
+	et := spawn.EventTypeRetireApprovalReplayedForWatchkeeper
+	const want = "retire_approval_replayed_for_watchkeeper"
+	if et != want {
+		t.Errorf("event_type = %q, want exact %q", et, want)
+	}
+	if strings.HasPrefix(et, "llm_turn_cost") {
+		t.Errorf("event_type %q has forbidden llm_turn_cost prefix (M6.3.e)", et)
+	}
+	if strings.HasPrefix(et, "saga_") {
+		t.Errorf("event_type %q has forbidden saga_ prefix (M7.1.a)", et)
+	}
+	if strings.HasPrefix(et, "manifest_") {
+		t.Errorf("event_type %q has forbidden manifest_ prefix (M7.1.b spawn-family)", et)
+	}
+	if strings.HasPrefix(et, "watchmaster_retire_watchkeeper") {
+		t.Errorf("event_type %q has forbidden watchmaster_retire_watchkeeper prefix (M6.2.c synchronous tool)", et)
+	}
+	if et == spawn.EventTypeRetireApprovedForWatchkeeper {
+		t.Errorf("event_type %q must differ from EventTypeRetireApprovedForWatchkeeper", et)
 	}
 }
 
@@ -524,28 +777,31 @@ func TestRetireKickoff_PayloadPIIRedaction(t *testing.T) {
 	}
 }
 
-// TestRetireKickoff_EmptyApprovalToken_RendersBareTokPrefix pins the
-// observable shape when the upstream gate forwards an empty
-// `approvalToken`: the payload renders `approval_token_prefix =
-// "tok-"` (just the bare prefix, no padding). The kickoffer itself
-// does NOT validate `approvalToken` — that's the M6.2.c gate's
-// upstream responsibility (M7.2.a iter-1: the contract is documented
-// here so a future maintainer who removes the upstream gate sees the
-// kickoffer-side leakshape that results, rather than discovering it
-// in a production audit chain).
-func TestRetireKickoff_EmptyApprovalToken_RendersBareTokPrefix(t *testing.T) {
+// TestRetireKickoff_EmptyApprovalToken_RejectedAtFailFast pins the
+// M7.3.a inversion of the M7.2.a "kickoffer does not validate
+// approvalToken" contract. The token now serves as the
+// idempotency_key for [saga.SpawnSagaDAO.InsertIfAbsent]; an empty
+// key would silently bypass the partial UNIQUE-WHERE-NOT-NULL dedup
+// index, so the kickoffer rejects empty tokens at fail-fast (BEFORE
+// audit / state-write side effects). The "bare tok- prefix payload
+// shape" the M7.2.a iter-1 lesson documented is now structurally
+// unreachable on the production path.
+func TestRetireKickoff_EmptyApprovalToken_RejectedAtFailFast(t *testing.T) {
 	t.Parallel()
 
 	dao := saga.NewMemorySpawnSagaDAO(nil)
 	keep := &fakeLocalKeepClient{}
 	k := newRetireKickoffer(t, dao, keep, "bot")
 
-	if err := retireKickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), ""); err != nil {
-		t.Fatalf("Kickoff: %v", err)
+	err := retireKickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), "")
+	if err == nil {
+		t.Fatal("Kickoff returned nil, want wrapped ErrInvalidKickoffArgs")
 	}
-	row := keep.recorded()[0]
-	if !strings.Contains(string(row.Payload), `"approval_token_prefix":"tok-"`) {
-		t.Errorf("payload missing bare tok- prefix on empty token: %s", row.Payload)
+	if !errors.Is(err, spawn.ErrInvalidKickoffArgs) {
+		t.Errorf("errors.Is(err, ErrInvalidKickoffArgs) = false; got %v", err)
+	}
+	if got := keep.recorded(); len(got) != 0 {
+		t.Errorf("keep rows = %d, want 0 (fail-fast must precede audit)", len(got))
 	}
 }
 
@@ -925,10 +1181,14 @@ func TestRetireKickoff_PreCancelledCtx_StillCompletes(t *testing.T) {
 
 // TestRetireKickoff_ConcurrentKickoffs pins the kickoffer's
 // concurrency contract (mirrors the M7.1.c.c 16-goroutine pattern):
-// 16 goroutines invoke Kickoff with distinct saga ids on a shared
-// kickoffer. Race detector verifies no shared-state corruption; the
-// audit chain count must equal 16 × (1 retire_approved + 1
-// saga_completed) = 32 events.
+// 16 goroutines invoke Kickoff with distinct saga ids AND distinct
+// approval_tokens (each kickoff is a unique upstream retire request,
+// not 16 replays of the same one) on a shared kickoffer. Race
+// detector verifies no shared-state corruption; the audit chain
+// count must equal 16 × (1 retire_approved + 1 saga_completed) =
+// 32 events. Concurrent replays of the SAME token are exercised in
+// the M7.3.a-introduced replay-flow test instead — a kickoff under
+// distinct tokens MUST still produce 16 independent sagas.
 func TestRetireKickoff_ConcurrentKickoffs(t *testing.T) {
 	t.Parallel()
 
@@ -948,12 +1208,13 @@ func TestRetireKickoff_ConcurrentKickoffs(t *testing.T) {
 	wg.Add(goroutines)
 	errCh := make(chan error, goroutines)
 	for i := 0; i < goroutines; i++ {
-		go func() {
+		token := "tok-concurrent-" + uuid.New().String()
+		go func(tok string) {
 			defer wg.Done()
-			if err := retireKickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), "tok-concurrent"); err != nil {
+			if err := retireKickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), tok); err != nil {
 				errCh <- err
 			}
-		}()
+		}(token)
 	}
 	wg.Wait()
 	close(errCh)

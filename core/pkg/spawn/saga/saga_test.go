@@ -104,6 +104,21 @@ func (r *recordingDAO) Insert(ctx context.Context, id uuid.UUID, mvID uuid.UUID)
 	return r.inner.Insert(ctx, id, mvID)
 }
 
+// InsertIfAbsent is the M7.3.a interface-satisfaction pass-through;
+// the saga.Runner tests do not exercise this method (the kickoffer
+// owns the idempotency seam, not the runner). The real
+// [saga.MemorySpawnSagaDAO] still gets a chance to enforce the
+// non-empty-key contract if a future runner test invokes it directly.
+func (r *recordingDAO) InsertIfAbsent(
+	ctx context.Context,
+	id uuid.UUID,
+	mvID uuid.UUID,
+	wkID uuid.UUID,
+	idempotencyKey string,
+) (saga.IdempotentInsertResult, error) {
+	return r.inner.InsertIfAbsent(ctx, id, mvID, wkID, idempotencyKey)
+}
+
 func (r *recordingDAO) Get(ctx context.Context, id uuid.UUID) (saga.Saga, error) {
 	return r.inner.Get(ctx, id)
 }

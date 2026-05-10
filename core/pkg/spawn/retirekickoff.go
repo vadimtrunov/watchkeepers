@@ -41,6 +41,7 @@ package spawn
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -78,10 +79,11 @@ var (
 )
 
 // EventTypeRetireApprovedForWatchkeeper is the M7.2.a audit event type
-// the retire kickoffer emits BEFORE inserting the saga row. Hoisted to
-// a constant so the payload-shape regression test pins the wire
-// vocabulary AND so a downstream consumer can match by string equality
-// without a typo risk.
+// the retire kickoffer emits AFTER persisting a freshly-inserted saga
+// row via [saga.SpawnSagaDAO.InsertIfAbsent]. Hoisted to a constant so
+// the payload-shape regression test pins the wire vocabulary AND so a
+// downstream consumer can match by string equality without a typo
+// risk.
 //
 // Distinct prefix (`retire_`) so it does NOT collide with the
 // `manifest_*` family established in M7.1.b, the `saga_*` family
@@ -93,6 +95,19 @@ var (
 // remain distinguishable on the audit chain).
 const EventTypeRetireApprovedForWatchkeeper = "retire_approved_for_watchkeeper"
 
+// EventTypeRetireApprovalReplayedForWatchkeeper is the M7.3.a audit
+// event type the retire kickoffer emits when the supplied
+// approval_token's idempotency_key already names a row (the upstream
+// retire approval was resubmitted). Distinct from
+// `retire_approved_for_watchkeeper` so a downstream consumer can
+// branch on the wire `event_type` without parsing payload structure.
+//
+// The payload carries the SAME closed-set keys as
+// `retire_approved_for_watchkeeper` plus a `saga_id` (the existing
+// saga's id) and a `previous_status` key naming the existing saga's
+// [saga.SagaState] at replay time.
+const EventTypeRetireApprovalReplayedForWatchkeeper = "retire_approval_replayed_for_watchkeeper"
+
 // Closed-set audit payload keys for the retire kickoff event. Hoisted
 // to constants so the payload-shape regression test pins the wire
 // vocabulary (M2b.7 PII discipline). The kickoffer is the SOLE
@@ -102,6 +117,8 @@ const (
 	retireKickoffPayloadKeyWatchkeeperID       = "watchkeeper_id"
 	retireKickoffPayloadKeyApprovalTokenPrefix = "approval_token_prefix"
 	retireKickoffPayloadKeyAgentID             = "agent_id"
+	retireKickoffPayloadKeySagaID              = "saga_id"
+	retireKickoffPayloadKeyPreviousStatus      = "previous_status"
 )
 
 // RetireKickoffer is the production implementation of the retire-saga
@@ -200,38 +217,33 @@ func NewRetireKickoffer(deps RetireKickoffDeps) *RetireKickoffer {
 }
 
 // Kickoff seeds the retire saga and runs it through the
-// construction-time-registered step list.
+// construction-time-registered step list, OR short-circuits with a
+// `retire_approval_replayed_for_watchkeeper` audit event when the
+// supplied `approvalToken` already names a persisted saga past
+// `pending` (the M7.3.a idempotency replay path), OR resumes a
+// `pending` saga whose original audit-append failed mid-flight (the
+// M7.3.a catch-up path; mirrors the spawn-side codex iter-1 Critical
+// fix).
 //
 // Sequence (load-bearing — the order is pinned by an ordering test):
 //
 //  1. Fail-fast validation rejects `uuid.Nil` sagaID /
-//     manifestVersionID / watchkeeperID with [ErrInvalidKickoffArgs]
-//     BEFORE any audit-emit / state-write side effect. The sentinel
-//     is reused from [SpawnKickoffer.Kickoff] (M7.1.c.c lesson:
-//     one sentinel per error class across the saga-kickoff family).
-//  2. Emit `retire_approved_for_watchkeeper` audit event (audit-emit
-//     precedes state-write per the M6.3.e + M7.1.a + M7.1.b pattern;
-//     the audit row is the canonical "we tried" signal even when
-//     state-persistence fails afterwards).
-//  3. Call [saga.SpawnSagaDAO.Insert] to persist the saga row
-//     (Insert MUST precede Run — the runner's first action is
-//     [saga.SpawnSagaDAO.Get], which would fail without the row).
-//  4. Seed the per-call [saga.SpawnContext] on `ctx` with the
-//     manifest_version id, the watchkeeperID (=AgentID in
-//     SpawnContext), and the supplied claim. M7.2.b NotebookArchive
-//     and M7.2.c MarkRetired steps read these values via
-//     [saga.SpawnContextFromContext].
-//  5. Seed a fresh [saga.RetireResult] outbox on `ctx` via
-//     [saga.WithRetireResult]. The M7.2.b NotebookArchive step
-//     publishes its `archive_uri` here on success; the M7.2.c
-//     MarkRetired step reads it back. The pointer is fresh per
-//     Kickoff call so concurrent retire sagas have isolated
-//     outboxes. The spawn flow has no equivalent — only the retire
-//     family seeds RetireResult.
-//  6. Call [saga.Runner.Run] with the registered step list. A
-//     nil / empty step list completes immediately and emits a
-//     single `saga_completed` event (matches the M7.1.b zero-step
-//     behaviour).
+//     manifestVersionID / watchkeeperID and an empty / whitespace-
+//     only `approvalToken` with [ErrInvalidKickoffArgs] BEFORE any
+//     audit-emit / state-write side effect.
+//  2. Call [saga.SpawnSagaDAO.InsertIfAbsent] with `approvalToken`
+//     as the idempotency_key, persisting `watchkeeperID` so the
+//     replay-payload contract can emit the FIRST-call's id.
+//  3. On INSERT or CATCH-UP-ON-PENDING: emit
+//     `retire_approved_for_watchkeeper` (using the FIRST-call's ids
+//     via `result.Existing` — same ids as the new call on the
+//     insert path), seed [saga.SpawnContext] + a fresh
+//     [saga.RetireResult] outbox via [saga.WithRetireResult], and
+//     call [saga.Runner.Run] for the existing saga id.
+//  4. On REPLAY of an ALREADY-RUN saga: emit
+//     `retire_approval_replayed_for_watchkeeper` carrying the
+//     FIRST-call's `saga_id` / `manifest_version_id` /
+//     `watchkeeper_id` / `previous_status`, then return nil.
 //
 // Errors are wrapped with the `spawn:` prefix; the underlying
 // keeperslog / saga sentinels remain matchable via [errors.Is]
@@ -253,16 +265,40 @@ func (k *RetireKickoffer) Kickoff(
 	if watchkeeperID == uuid.Nil {
 		return fmt.Errorf("%w: empty watchkeeperID", ErrInvalidKickoffArgs)
 	}
-
-	if _, err := k.logger.Append(ctx, keeperslog.Event{
-		EventType: EventTypeRetireApprovedForWatchkeeper,
-		Payload:   retireApprovedPayload(manifestVersionID, watchkeeperID, approvalToken, k.agentID),
-	}); err != nil {
-		return fmt.Errorf("spawn: retire kickoff: append retire_approved_for_watchkeeper: %w", err)
+	if strings.TrimSpace(approvalToken) == "" {
+		return fmt.Errorf("%w: empty approvalToken", ErrInvalidKickoffArgs)
 	}
 
-	if err := k.dao.Insert(ctx, sagaID, manifestVersionID); err != nil {
+	result, err := k.dao.InsertIfAbsent(ctx, sagaID, manifestVersionID, watchkeeperID, approvalToken)
+	if err != nil {
 		return fmt.Errorf("spawn: retire kickoff: insert saga: %w", err)
+	}
+
+	if !result.Inserted && result.Existing.Status != saga.SagaStatePending {
+		if _, replayErr := k.logger.Append(ctx, keeperslog.Event{
+			EventType: EventTypeRetireApprovalReplayedForWatchkeeper,
+			Payload: retireApprovalReplayedPayload(
+				result.Existing.ID,
+				result.Existing.ManifestVersionID,
+				result.Existing.WatchkeeperID,
+				approvalToken,
+				k.agentID,
+				result.Existing.Status,
+			),
+		}); replayErr != nil {
+			return fmt.Errorf("spawn: retire kickoff: append retire_approval_replayed_for_watchkeeper: %w", replayErr)
+		}
+		return nil
+	}
+
+	emitSagaID := result.Existing.ID
+	emitManifestVersionID := result.Existing.ManifestVersionID
+	emitWatchkeeperID := result.Existing.WatchkeeperID
+	if _, err := k.logger.Append(ctx, keeperslog.Event{
+		EventType: EventTypeRetireApprovedForWatchkeeper,
+		Payload:   retireApprovedPayload(emitManifestVersionID, emitWatchkeeperID, approvalToken, k.agentID),
+	}); err != nil {
+		return fmt.Errorf("spawn: retire kickoff: append retire_approved_for_watchkeeper: %w", err)
 	}
 
 	// Three "agent" identifiers flow through this kickoff and are
@@ -270,10 +306,11 @@ func (k *RetireKickoffer) Kickoff(
 	//
 	//   - `k.agentID` — the WATCHMASTER bot id; lands on the audit
 	//     payload's `agent_id` key as the EMITTER of the row.
-	//   - `watchkeeperID` — the RETIRE TARGET; lands on
-	//     [saga.SpawnContext.AgentID] (M7.1.c.a saga convention names
-	//     the watchkeeper-being-acted-on as `AgentID`) and on the
-	//     audit payload's `watchkeeper_id` key.
+	//   - `emitWatchkeeperID` — the RETIRE TARGET (sourced from the
+	//     persisted row so a catch-up call uses the FIRST-call's id);
+	//     lands on [saga.SpawnContext.AgentID] (M7.1.c.a saga
+	//     convention names the watchkeeper-being-acted-on as
+	//     `AgentID`) and on the audit payload's `watchkeeper_id` key.
 	//   - `claim.AgentID` — the ACTING agent id (Watchmaster's claim
 	//     mint); used by downstream M7.2.b/.c steps for authority
 	//     gates, not by this kickoffer.
@@ -283,8 +320,8 @@ func (k *RetireKickoffer) Kickoff(
 	// audit row uses its own bot identifier (NOT
 	// [saga.SpawnContext.AgentID]).
 	ctx = saga.WithSpawnContext(ctx, saga.SpawnContext{
-		ManifestVersionID: manifestVersionID,
-		AgentID:           watchkeeperID,
+		ManifestVersionID: emitManifestVersionID,
+		AgentID:           emitWatchkeeperID,
 		Claim:             claim,
 	})
 
@@ -295,7 +332,7 @@ func (k *RetireKickoffer) Kickoff(
 	// spawn step needs an inter-step outbox today.
 	ctx = saga.WithRetireResult(ctx, &saga.RetireResult{})
 
-	if err := k.runner.Run(ctx, sagaID, k.steps); err != nil {
+	if err := k.runner.Run(ctx, emitSagaID, k.steps); err != nil {
 		return fmt.Errorf("spawn: retire kickoff: run saga: %w", err)
 	}
 	return nil
@@ -321,5 +358,41 @@ func retireApprovedPayload(
 		retireKickoffPayloadKeyWatchkeeperID:       watchkeeperID.String(),
 		retireKickoffPayloadKeyApprovalTokenPrefix: approvalTokenPrefix(approvalToken),
 		retireKickoffPayloadKeyAgentID:             agentID,
+	}
+}
+
+// retireApprovalReplayedPayload composes the closed-set
+// `retire_approval_replayed_for_watchkeeper` payload. Carries the
+// prior saga's id, watchkeeper id, manifest version, and status so a
+// downstream consumer can distinguish "replayed mid-flight" from
+// "replayed after terminal state" AND correlate the replay row to
+// the saga's persisted target without a follow-up DAO read.
+//
+// All ids are sourced from [saga.IdempotentInsertResult.Existing] —
+// codex iter-1 Major fix: pre-iter-1 the payload accepted the
+// SECOND-call's `manifestVersionID` and `watchkeeperID` and emitted
+// them verbatim, which would produce a self-contradictory row when
+// a retried approval supplied different ids than the original. The
+// DAO discards the second-call values; the audit emit must too.
+//
+// PII guard: this function is the SOLE composer of the payload; the
+// closed-set keys mirror `retire_approved_for_watchkeeper` plus the
+// two replay-only fields (`saga_id`, `previous_status`). NEVER
+// carries the full approval token, the original step's params, or
+// any error string.
+func retireApprovalReplayedPayload(
+	existingSagaID uuid.UUID,
+	existingManifestVersionID uuid.UUID,
+	existingWatchkeeperID uuid.UUID,
+	approvalToken, agentID string,
+	previousStatus saga.SagaState,
+) map[string]any {
+	return map[string]any{
+		retireKickoffPayloadKeySagaID:              existingSagaID.String(),
+		retireKickoffPayloadKeyManifestVersionID:   existingManifestVersionID.String(),
+		retireKickoffPayloadKeyWatchkeeperID:       existingWatchkeeperID.String(),
+		retireKickoffPayloadKeyApprovalTokenPrefix: approvalTokenPrefix(approvalToken),
+		retireKickoffPayloadKeyAgentID:             agentID,
+		retireKickoffPayloadKeyPreviousStatus:      string(previousStatus),
 	}
 }

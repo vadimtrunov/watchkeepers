@@ -208,6 +208,258 @@ func TestMemorySpawnSagaDAO_MarkFailed_UnknownID_ReturnsTypedSentinel(t *testing
 	}
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// M7.3.a — InsertIfAbsent idempotency contract.
+// ────────────────────────────────────────────────────────────────────────
+
+// TestMemorySpawnSagaDAO_InsertIfAbsent_FreshKey_PersistsRow pins the
+// happy path: a fresh idempotency_key produces `Inserted == true` and
+// the persisted row carries the supplied id, manifest_version_id, and
+// idempotency_key.
+func TestMemorySpawnSagaDAO_InsertIfAbsent_FreshKey_PersistsRow(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(fixedClock())
+	id := uuid.New()
+	mvID := uuid.New()
+	wkID := uuid.New()
+	const key = "tok-fresh"
+
+	result, err := dao.InsertIfAbsent(context.Background(), id, mvID, wkID, key)
+	if err != nil {
+		t.Fatalf("InsertIfAbsent: %v", err)
+	}
+	if !result.Inserted {
+		t.Errorf("Inserted = false, want true (fresh key)")
+	}
+	if result.Existing.ID != id {
+		t.Errorf("Existing.ID = %v, want %v", result.Existing.ID, id)
+	}
+	if result.Existing.IdempotencyKey != key {
+		t.Errorf("Existing.IdempotencyKey = %q, want %q", result.Existing.IdempotencyKey, key)
+	}
+	if result.Existing.ManifestVersionID != mvID {
+		t.Errorf("Existing.ManifestVersionID = %v, want %v", result.Existing.ManifestVersionID, mvID)
+	}
+	if result.Existing.WatchkeeperID != wkID {
+		t.Errorf("Existing.WatchkeeperID = %v, want %v", result.Existing.WatchkeeperID, wkID)
+	}
+
+	got, err := dao.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.IdempotencyKey != key {
+		t.Errorf("Get IdempotencyKey = %q, want %q", got.IdempotencyKey, key)
+	}
+	if got.WatchkeeperID != wkID {
+		t.Errorf("Get WatchkeeperID = %v, want %v", got.WatchkeeperID, wkID)
+	}
+}
+
+// TestMemorySpawnSagaDAO_InsertIfAbsent_DuplicateKey_ReturnsExisting
+// pins the replay path: a second InsertIfAbsent with the same
+// idempotency_key returns `Inserted == false` and the prior row's id
+// (NOT the second-call's supplied id).
+func TestMemorySpawnSagaDAO_InsertIfAbsent_DuplicateKey_ReturnsExisting(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(fixedClock())
+	firstID := uuid.New()
+	secondID := uuid.New()
+	mvID := uuid.New()
+	const key = "tok-replay"
+
+	if _, err := dao.InsertIfAbsent(context.Background(), firstID, mvID, uuid.New(), key); err != nil {
+		t.Fatalf("first InsertIfAbsent: %v", err)
+	}
+
+	result, err := dao.InsertIfAbsent(context.Background(), secondID, uuid.New(), uuid.New(), key)
+	if err != nil {
+		t.Fatalf("second InsertIfAbsent (replay): %v", err)
+	}
+	if result.Inserted {
+		t.Errorf("Inserted = true, want false (duplicate key)")
+	}
+	if result.Existing.ID != firstID {
+		t.Errorf("Existing.ID = %v, want first-call %v (second-call id must be discarded)", result.Existing.ID, firstID)
+	}
+	if result.Existing.IdempotencyKey != key {
+		t.Errorf("Existing.IdempotencyKey = %q, want %q", result.Existing.IdempotencyKey, key)
+	}
+}
+
+// TestMemorySpawnSagaDAO_InsertIfAbsent_EmptyKey_ReturnsTypedSentinel
+// pins the empty-key rejection: an empty idempotency_key returns
+// [saga.ErrEmptyIdempotencyKey] without any persistence side effect.
+// Defense-in-depth: the partial UNIQUE-WHERE-NOT-NULL index on the
+// SQL side allows multiple NULL rows; the DAO surface refuses to
+// produce them so a future caller cannot silently bypass dedup.
+func TestMemorySpawnSagaDAO_InsertIfAbsent_EmptyKey_ReturnsTypedSentinel(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	_, err := dao.InsertIfAbsent(context.Background(), uuid.New(), uuid.New(), uuid.New(), "")
+	if !errors.Is(err, saga.ErrEmptyIdempotencyKey) {
+		t.Errorf("InsertIfAbsent empty key: err = %v, want ErrEmptyIdempotencyKey", err)
+	}
+}
+
+// TestMemorySpawnSagaDAO_InsertIfAbsent_WhitespaceOnlyKey_ReturnsTypedSentinel
+// pins codex iter-1 Minor #4: a `"   "` sentinel must NOT smuggle a
+// bypass past the empty-key check. The DAO normalises whitespace-only
+// keys to empty before checking, returning the same typed sentinel as
+// the bare-empty case.
+func TestMemorySpawnSagaDAO_InsertIfAbsent_WhitespaceOnlyKey_ReturnsTypedSentinel(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	for _, key := range []string{" ", "\t", "\n", "  \t\n  "} {
+		_, err := dao.InsertIfAbsent(context.Background(), uuid.New(), uuid.New(), uuid.New(), key)
+		if !errors.Is(err, saga.ErrEmptyIdempotencyKey) {
+			t.Errorf("InsertIfAbsent whitespace-only key %q: err = %v, want ErrEmptyIdempotencyKey", key, err)
+		}
+	}
+}
+
+// TestMemorySpawnSagaDAO_InsertIfAbsent_EmptyWatchkeeperID_Errors pins
+// the watchkeeperID validation. An empty watchkeeperID would defeat the
+// M7.3.a replay-payload contract (the kickoffer reads
+// Existing.WatchkeeperID on the catch-up branch).
+func TestMemorySpawnSagaDAO_InsertIfAbsent_EmptyWatchkeeperID_Errors(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	_, err := dao.InsertIfAbsent(context.Background(), uuid.New(), uuid.New(), uuid.Nil, "tok-x")
+	if err == nil {
+		t.Fatalf("InsertIfAbsent empty watchkeeper_id: err = nil, want validation error")
+	}
+}
+
+// TestMemorySpawnSagaDAO_InsertIfAbsent_EmptyID_Errors pins that the
+// non-key shape validation matches Insert's discipline.
+func TestMemorySpawnSagaDAO_InsertIfAbsent_EmptyID_Errors(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	_, err := dao.InsertIfAbsent(context.Background(), uuid.Nil, uuid.New(), uuid.New(), "tok-x")
+	if err == nil {
+		t.Fatalf("InsertIfAbsent empty id: err = nil, want validation error")
+	}
+}
+
+// TestMemorySpawnSagaDAO_InsertIfAbsent_EmptyManifestVersionID_Errors
+// pins that the non-key shape validation matches Insert's discipline.
+func TestMemorySpawnSagaDAO_InsertIfAbsent_EmptyManifestVersionID_Errors(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	_, err := dao.InsertIfAbsent(context.Background(), uuid.New(), uuid.Nil, uuid.New(), "tok-x")
+	if err == nil {
+		t.Fatalf("InsertIfAbsent empty manifest_version_id: err = nil, want validation error")
+	}
+}
+
+// TestMemorySpawnSagaDAO_InsertIfAbsent_DuplicateIDDifferentKey_Errors
+// pins the wiring-bug branch: the same id supplied with a fresh
+// idempotency_key is rejected (the SQL `id` PRIMARY KEY would reject
+// it). Mirrors the duplicate-id behaviour of the legacy [Insert].
+func TestMemorySpawnSagaDAO_InsertIfAbsent_DuplicateIDDifferentKey_Errors(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	id := uuid.New()
+	if _, err := dao.InsertIfAbsent(context.Background(), id, uuid.New(), uuid.New(), "tok-a"); err != nil {
+		t.Fatalf("first InsertIfAbsent: %v", err)
+	}
+	_, err := dao.InsertIfAbsent(context.Background(), id, uuid.New(), uuid.New(), "tok-b")
+	if err == nil {
+		t.Fatalf("second InsertIfAbsent (same id, different key): err = nil, want duplicate-id error")
+	}
+}
+
+// TestMemorySpawnSagaDAO_InsertIfAbsent_IndexInconsistency_ReturnsTypedSentinel
+// pins critic iter-1 Minor #5: a future DAO bug that leaves the
+// idempotency map pointing at a missing row surfaces a typed sentinel
+// (saga.ErrIdempotencyIndexInconsistent) so callers can branch via
+// errors.Is. Reproducing the inconsistency requires bypassing the DAO
+// surface; the test does so by mutating the in-memory store directly
+// and asserting the typed sentinel survives the wrap chain.
+func TestMemorySpawnSagaDAO_InsertIfAbsent_IndexInconsistency_ReturnsTypedSentinel(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	id := uuid.New()
+	const key = "tok-inconsistent"
+
+	if _, err := dao.InsertIfAbsent(context.Background(), id, uuid.New(), uuid.New(), key); err != nil {
+		t.Fatalf("seed InsertIfAbsent: %v", err)
+	}
+	// Bypass the DAO surface to drop the row but leave the
+	// idempotency_key index pointing at it. Any subsequent
+	// InsertIfAbsent with the same key now hits the inconsistency
+	// branch.
+	saga.PurgeRowKeepingIdempotencyForTest(dao, id)
+
+	_, err := dao.InsertIfAbsent(context.Background(), uuid.New(), uuid.New(), uuid.New(), key)
+	if !errors.Is(err, saga.ErrIdempotencyIndexInconsistent) {
+		t.Errorf("InsertIfAbsent on inconsistent index: err = %v, want ErrIdempotencyIndexInconsistent", err)
+	}
+}
+
+// TestMemorySpawnSagaDAO_InsertIfAbsent_Concurrent_ExactlyOneInsert
+// hammers the dedup contract under contention: 16 goroutines call
+// InsertIfAbsent concurrently with the SAME idempotency_key. Exactly
+// one of them returns `Inserted == true`; the other 15 return
+// `Inserted == false` with the SAME persisted row. Pinned by the
+// race-detector test invocation; the test fails if a developer
+// regresses the mutex away from the per-instance guard or the
+// idempotency map away from atomic check-and-set.
+func TestMemorySpawnSagaDAO_InsertIfAbsent_Concurrent_ExactlyOneInsert(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	const writers = 16
+	const key = "tok-concurrent"
+	mvID := uuid.New()
+
+	var (
+		wg            sync.WaitGroup
+		mu            sync.Mutex
+		insertedCount int
+		replayedCount int
+		winnerIDs     []uuid.UUID
+	)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id := uuid.New()
+			result, err := dao.InsertIfAbsent(context.Background(), id, mvID, uuid.New(), key)
+			if err != nil {
+				t.Errorf("InsertIfAbsent: %v", err)
+				return
+			}
+			mu.Lock()
+			if result.Inserted {
+				insertedCount++
+				winnerIDs = append(winnerIDs, result.Existing.ID)
+			} else {
+				replayedCount++
+			}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if insertedCount != 1 {
+		t.Errorf("Inserted=true count = %d, want 1", insertedCount)
+	}
+	if replayedCount != writers-1 {
+		t.Errorf("Inserted=false count = %d, want %d", replayedCount, writers-1)
+	}
+}
+
 // TestMemorySpawnSagaDAO_Concurrency_DistinctIDs hammers the DAO with
 // a fan-out of writers operating on distinct ids. Pinned by the
 // race-detector test invocation in Phase 3 verification (`go test

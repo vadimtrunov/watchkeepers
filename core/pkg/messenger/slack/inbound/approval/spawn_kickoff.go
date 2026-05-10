@@ -30,13 +30,28 @@ import (
 // approval flow (mirrors the M6.3.b [Replayer] error policy).
 type SpawnKickoff interface {
 	// Kickoff seeds the spawn saga and runs it through the
-	// construction-time-configured step list. Implementations MUST
-	// emit a `manifest_approved_for_spawn` audit event BEFORE
-	// inserting the saga row, MUST insert the saga row BEFORE
-	// calling the saga runner, and MUST seed a [saga.SpawnContext]
-	// on `ctx` carrying `manifestVersionID` / `watchkeeperID` /
-	// `claim` so the registered steps can resolve the saga's
-	// per-call values.
+	// construction-time-configured step list, OR short-circuits
+	// when the supplied `approvalToken` already names a persisted
+	// saga (the M7.3.a idempotency replay contract).
+	//
+	// Implementations MUST persist the saga row keyed by
+	// `approvalToken` (idempotency_key) BEFORE running the saga;
+	// MUST emit either `manifest_approved_for_spawn` (insert path)
+	// OR `manifest_approval_replayed_for_spawn` (replay path) — but
+	// NEVER both for a single kickoff; MUST seed a
+	// [saga.SpawnContext] on `ctx` for the insert path AND for the
+	// M7.3.a `pending`-status catch-up path; MUST NOT call the
+	// saga runner on the replay path of an already-advanced saga.
+	//
+	// M7.1.b → M7.3.a invariant shift: pre-M7.3.a implementations
+	// emitted the audit row BEFORE the persistence call so the
+	// audit chain was canonical even on a transient Insert error.
+	// M7.3.a inverts the dependency at the kickoffer surface
+	// because the event_type depends on insert-vs-replay (which
+	// only the DAO knows). A transient persistence error
+	// short-circuits with a wrapped error and NO audit row; the
+	// dispatcher's `approval_replay_failed` row covers the
+	// operator-visible failure surface.
 	Kickoff(
 		ctx context.Context,
 		sagaID uuid.UUID,
