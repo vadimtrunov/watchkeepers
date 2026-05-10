@@ -75,6 +75,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -313,9 +314,37 @@ func (s *OAuthInstallStep) Execute(ctx context.Context) error {
 	// watchkeeperID is the saga's primary key). A non-nil sink return
 	// surfaces back up the installer's wrap chain; we capture it for
 	// preferred-error semantics consistent with M7.1.c.a.
+	//
+	// M7.3.d in-Execute partial-success cleanup: the sink also
+	// captures `tokens.AccessToken` (plaintext bot token) into a
+	// local `capturedToken` so the post-platform-call failure
+	// branch below can dispatch a best-effort revoke when the
+	// encrypt/DAO chain failed AFTER `oauth.v2.access` succeeded
+	// (the saga.Runner skips Compensate on failed steps per
+	// M7.3.b — without in-Execute cleanup the live install would
+	// survive).
+	//
+	// `sinkFired` is the load-bearing "did the platform-side state
+	// get created" signal — distinct from `capturedToken != ""`
+	// which would be correct-by-coincidence on the today's Slack
+	// contract ("AccessToken always non-empty on a successful
+	// exchange") but would silently skip the revoke if a future
+	// Slack response shape change OR a misbehaving fake supplied
+	// an empty token after a successful platform call. `sinkFired`
+	// is set regardless of the captured value, so the post-
+	// platform-call failure branch always dispatches when the
+	// platform side mutated. Iter-1 critic Minor.
+	//
+	// The plaintext lives only on the goroutine stack for the
+	// duration of the error path; no log / error string ever
+	// embeds it.
 	sinkErr := error(nil)
+	var capturedToken string
+	var sinkFired bool
 	sink := slackmessenger.InstallTokenSink(
 		func(sinkCtx context.Context, tokens slackmessenger.InstallTokens) error {
+			sinkFired = true
+			capturedToken = tokens.AccessToken
 			botCT, err := encryptIfNonEmpty(sinkCtx, s.encrypter, tokens.AccessToken)
 			if err != nil {
 				sinkErr = err
@@ -343,6 +372,49 @@ func (s *OAuthInstallStep) Execute(ctx context.Context) error {
 	)
 
 	if _, err := s.installer.InstallApp(ctx, creds.AppID, s.workspace, resolver, sink); err != nil {
+		// M7.3.d in-Execute partial-success cleanup: when the sink
+		// captured a non-empty bot token, `oauth.v2.access`
+		// succeeded platform-side but the encrypt/DAO chain failed
+		// (or the installer's wrap chain returned an error AFTER
+		// the sink ran). Best-effort revoke here so the
+		// saga.Runner's failed-step-not-compensated discipline
+		// (M7.3.b) does NOT leak the live install.
+		//
+		// The cleanup is dispatched under [context.WithoutCancel]
+		// (mirrors the M7.3.b iter-1 #2 saga.compensate discipline
+		// in saga.go): the most likely trigger for the sink-failure
+		// path is a request-bound parent ctx that fired Cancel mid-
+		// saga (HTTP timeout, operator-initiated abort, dispatcher
+		// tear-down). Passing the cancelled parent here would make
+		// the in-Execute cleanup uniformly fail on exactly the
+		// scenario this branch is designed to defend against,
+		// silently leaking the live install. The cleanup ctx
+		// inherits the parent's deadline + values but does NOT
+		// propagate the parent's cancellation; per-call timeouts
+		// belong to the seam impl.
+		//
+		// The revoke error is SILENTLY discarded — the operator's
+		// load-bearing signal is the original sink/installer
+		// error; an additional revoke failure is a pure
+		// observability loss handled by the production wrapper's
+		// own diagnostic sink.
+		if sinkFired {
+			cleanupCtx := context.WithoutCancel(ctx)
+			if cleanupErr := s.revoker.Revoke(cleanupCtx, sc.AgentID, capturedToken); cleanupErr != nil {
+				// Best-effort discard at the return-value layer
+				// PLUS structured-log emit at the call boundary
+				// (mirrors createapp_step.go in-Execute teardown
+				// + spawnkickoff.go rejection-emit). The
+				// plaintext bot token is INTENTIONALLY NOT
+				// included in the log fields — M2b.7 PII
+				// discipline. Iter-1 critic Minor.
+				slog.WarnContext(
+					cleanupCtx, "spawn: oauth_install step: in-Execute revoke failed",
+					"watchkeeper_id", sc.AgentID.String(),
+					"err_class", "oauth_install_in_execute_revoke_dropped",
+				)
+			}
+		}
 		// Prefer the sink error when both fired — sink errors carry
 		// the DAO / Encrypter sentinel callers branch on (e.g.
 		// [ErrCredsNotFound]); the installer's wrap chain already
@@ -432,7 +504,20 @@ type OAuthInstallRevoker interface {
 	// bot/user tokens stored on the DAO row keyed by `watchkeeperID`.
 	// Returns nil on successful revoke; returns a typed error chain
 	// on failure. MUST be idempotent (see type-level discipline).
-	Revoke(ctx context.Context, watchkeeperID uuid.UUID) error
+	//
+	// `knownToken` is the plaintext bot access token captured
+	// in-process by the M7.3.d in-Execute partial-success cleanup
+	// path (OAuthInstallStep.Execute on the post-platform-call
+	// failure branch where Slack `oauth.v2.access` succeeded but the
+	// encrypt/DAO chain failed; the install is live platform-side
+	// but no encrypted token row was persisted, so a DAO lookup
+	// would return [ErrCredsNotFound]). When non-empty, the seam
+	// impl uses it directly for `auth.revoke` (no decryption
+	// needed). When empty (the M7.3.c rollback-path-via-Compensate
+	// dispatch), the seam impl falls back to a DAO lookup +
+	// decryption to resolve the token from the persisted
+	// `bot_access_token` ciphertext.
+	Revoke(ctx context.Context, watchkeeperID uuid.UUID, knownToken string) error
 }
 
 // Compensate satisfies [saga.Compensator].
@@ -484,7 +569,11 @@ func (s *OAuthInstallStep) Compensate(ctx context.Context) error {
 		return fmt.Errorf("spawn: oauth_install step compensate: %w", ErrMissingAgentID)
 	}
 
-	revokeErr := s.revoker.Revoke(ctx, sc.AgentID)
+	// Compensate path: pass empty knownToken — the seam impl falls
+	// back to a DAO lookup + decryption to resolve the bot token.
+	// The in-Execute partial-success cleanup path (Execute body)
+	// supplies the captured plaintext token directly.
+	revokeErr := s.revoker.Revoke(ctx, sc.AgentID, "")
 
 	// The wipe ALWAYS runs — even on revoke failure — so a
 	// subsequent saga retry never observes stale ciphertext for a

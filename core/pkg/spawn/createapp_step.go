@@ -68,9 +68,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 
+	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger"
 	slackmessenger "github.com/vadimtrunov/watchkeepers/core/pkg/messenger/slack"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/spawn/saga"
 )
@@ -278,10 +280,33 @@ func (s *CreateAppStep) Execute(ctx context.Context) error {
 	// scenarios). The sink runs inside the underlying messenger
 	// adapter's success branch (M4.2.d.2 design); a non-nil return
 	// surfaces back up the RPC's wrap chain.
+	//
+	// M7.3.d in-Execute partial-success cleanup: the sink also
+	// captures `creds.AppID` into a local `capturedAppID` so the
+	// post-RPC failure branch below can dispatch a best-effort
+	// platform-side teardown when the sink errored AFTER the
+	// platform call succeeded (the saga.Runner skips Compensate on
+	// failed steps per M7.3.b — without in-Execute cleanup the
+	// orphaned Slack App would survive).
+	//
+	// `sinkFired` is the load-bearing "did the platform-side state
+	// get created" signal — distinct from `capturedAppID != ""`
+	// which would be correct-by-coincidence on the today's Slack
+	// contract ("AppID always non-empty on a successful exchange")
+	// but would silently skip the cleanup if a future Slack response
+	// shape change OR a misbehaving fake supplied an empty AppID
+	// after a successful platform call. `sinkFired` is set
+	// regardless of the captured value, so the post-RPC failure
+	// branch always dispatches when the platform side mutated.
+	// Iter-1 critic Minor.
 	watchkeeperID := sc.AgentID
 	sinkErr := error(nil)
+	var capturedAppID messenger.AppID
+	var sinkFired bool
 	sink := slackmessenger.CreateAppCredsSink(
 		func(sinkCtx context.Context, creds slackmessenger.CreateAppCredentials) error {
+			sinkFired = true
+			capturedAppID = creds.AppID
 			if err := s.credsDAO.Put(sinkCtx, watchkeeperID, creds); err != nil {
 				// Capture for diagnostic visibility on the
 				// returned wrap chain. We NEVER reflect any creds
@@ -313,6 +338,52 @@ func (s *CreateAppStep) Execute(ctx context.Context) error {
 	}
 
 	if _, err := rpc.CreateApp(ctx, req, claim); err != nil {
+		// M7.3.d in-Execute partial-success cleanup: when the sink
+		// captured an AppID, the platform-side app exists even
+		// though the local DAO write failed (or the RPC's wrap
+		// chain returned an error AFTER the sink ran). Best-effort
+		// teardown here so the saga.Runner's failed-step-not-
+		// compensated discipline (M7.3.b) does NOT leak the
+		// orphaned platform artefact.
+		//
+		// The cleanup is dispatched under [context.WithoutCancel]
+		// (mirrors the M7.3.b iter-1 #2 saga.compensate discipline
+		// in saga.go): the most likely trigger for the sink-failure
+		// path is a request-bound parent ctx that fired Cancel mid-
+		// saga (HTTP timeout, operator-initiated abort, dispatcher
+		// tear-down). Passing the cancelled parent here would make
+		// the in-Execute cleanup uniformly fail on exactly the
+		// scenario this branch is designed to defend against,
+		// silently leaking the orphaned Slack App. The cleanup ctx
+		// inherits the parent's deadline + values but does NOT
+		// propagate the parent's cancellation; per-call timeouts
+		// belong to the seam impl.
+		//
+		// The teardown error is SILENTLY discarded — the operator's
+		// load-bearing signal is the original sink/RPC error; an
+		// additional teardown failure is a pure observability loss
+		// handled by the production wrapper's own diagnostic sink.
+		if sinkFired {
+			cleanupCtx := context.WithoutCancel(ctx)
+			if cleanupErr := s.teardown.TeardownApp(cleanupCtx, sc.AgentID, capturedAppID); cleanupErr != nil {
+				// Best-effort discard at the return-value layer
+				// (the original sink/RPC error is the operator's
+				// load-bearing signal — see iter-3 #3 lesson)
+				// PLUS a structured-log emit at the call boundary
+				// so an ops investigation has a discoverable
+				// signal that the in-Execute teardown was
+				// attempted and dropped. Mirrors the M7.3.b
+				// kickoffer rejection-emit slog.WarnContext
+				// pattern in spawnkickoff.go. Iter-1 critic
+				// Minor: the silent discard otherwise leaves NO
+				// observability surface for the cleanup attempt.
+				slog.WarnContext(
+					cleanupCtx, "spawn: create_app step: in-Execute teardown failed",
+					"watchkeeper_id", sc.AgentID.String(),
+					"err_class", "create_app_in_execute_teardown_dropped",
+				)
+			}
+		}
 		// Prefer the sink error when both fired — sink errors carry
 		// the DAO sentinel callers branch on (e.g.
 		// [ErrCredsAlreadyStored]); the RPC's wrap chain already
@@ -389,11 +460,24 @@ type CreateAppCredsSinkInstaller interface {
 // [CreateAppStep.Compensate] preserves the underlying chain so
 // `errors.As` walks through.
 type SlackAppTeardown interface {
-	// TeardownApp undoes the side effect of a prior successful
+	// TeardownApp undoes the side effect of a prior
 	// [CreateAppStep.Execute] for `watchkeeperID`. Returns nil on
 	// successful teardown; returns a typed error chain on failure.
 	// MUST be idempotent (see type-level discipline above).
-	TeardownApp(ctx context.Context, watchkeeperID uuid.UUID) error
+	//
+	// `knownAppID` is the platform-assigned app id captured
+	// in-process by the M7.3.d in-Execute partial-success cleanup
+	// path (CreateAppStep.Execute on the post-RPC failure branch
+	// where the Slack `apps.manifest.create` call succeeded but the
+	// sink/DAO write failed; the app exists platform-side but no
+	// `slack_app_creds` row was persisted, so a DAO lookup would
+	// return [ErrCredsNotFound]). When non-empty, the seam impl
+	// uses it directly for the platform-side teardown call. When
+	// empty (the M7.3.c rollback-path-via-Compensate dispatch),
+	// the seam impl falls back to a DAO lookup keyed by
+	// `watchkeeperID` to resolve the app id from the persisted
+	// `slack_app_creds` row.
+	TeardownApp(ctx context.Context, watchkeeperID uuid.UUID, knownAppID messenger.AppID) error
 }
 
 // Compensate satisfies [saga.Compensator].
@@ -442,7 +526,12 @@ func (s *CreateAppStep) Compensate(ctx context.Context) error {
 	if sc.AgentID == uuid.Nil {
 		return fmt.Errorf("spawn: create_app step compensate: %w", ErrMissingAgentID)
 	}
-	if err := s.teardown.TeardownApp(ctx, sc.AgentID); err != nil {
+	// Compensate path: pass empty knownAppID — the seam impl falls
+	// back to a DAO lookup keyed by watchkeeperID. The in-Execute
+	// partial-success cleanup path (Execute body) supplies the
+	// captured platform-side app id directly; see the M7.3.d
+	// "in-Execute partial-success cleanup" wiring below.
+	if err := s.teardown.TeardownApp(ctx, sc.AgentID, ""); err != nil {
 		return fmt.Errorf("spawn: create_app step compensate: %w", err)
 	}
 	return nil

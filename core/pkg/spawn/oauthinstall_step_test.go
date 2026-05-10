@@ -643,6 +643,217 @@ func TestOAuthInstallStep_Execute_DAOPutInstallTokensError_WrapsAndReturns(t *te
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// M7.3.d in-Execute partial-success cleanup: when the sink fires +
+// captures the plaintext bot token then errors on the DAO Put, the
+// post-platform-call failure branch dispatches a best-effort revoke
+// carrying the captured plaintext token. The revoke error is silently
+// discarded so the operator's load-bearing signal stays the original
+// sink error.
+// ────────────────────────────────────────────────────────────────────────
+
+func TestOAuthInstallStep_Execute_DAOPutInstallTokensError_DispatchesInExecuteRevokeWithCapturedToken(t *testing.T) {
+	t.Parallel()
+
+	memDAO := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	wrapped := &putInstallTokensErrDAO{
+		MemoryWatchkeeperSlackAppCredsDAO: memDAO,
+		err:                               errors.New("simulated DAO write failure"),
+	}
+	revoker := &recordingOAuthInstallRevoker{}
+
+	installer := newFakeInstaller(canonicalInstallTokens())
+	enc := newTestEncrypter(t)
+	step := spawn.NewOAuthInstallStep(spawn.OAuthInstallStepDeps{
+		Installer:   installer,
+		CredsDAO:    wrapped,
+		Encrypter:   enc,
+		Revoker:     revoker,
+		Workspace:   messenger.WorkspaceRef{ID: "T0123", Name: "Test"},
+		RedirectURI: "https://example.com/oauth/callback",
+	})
+
+	watchkeeperID := uuid.New()
+	seedCredsRow(t, memDAO, watchkeeperID)
+	ctx := saga.WithSpawnContext(context.Background(), newOAuthSpawnContext(t, watchkeeperID, "code-test"))
+
+	err := step.Execute(ctx)
+	if err == nil {
+		t.Fatalf("Execute: err = nil, want wrapped DAO error")
+	}
+	if !errors.Is(err, wrapped.err) {
+		t.Errorf("errors.Is(err, wrapped.err) = false; got %v", err)
+	}
+
+	// In-Execute revoke MUST have been dispatched exactly once —
+	// the sink captured tokens.AccessToken before the DAO Put failed.
+	if got := revoker.callCount.Load(); got != 1 {
+		t.Fatalf("Revoke call count = %d, want 1 (in-Execute partial-success cleanup)", got)
+	}
+	calls := revoker.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("Revoke recorded calls = %v, want exactly 1", calls)
+	}
+	if calls[0].watchkeeperID != watchkeeperID {
+		t.Errorf("Revoke.watchkeeperID = %v, want %v", calls[0].watchkeeperID, watchkeeperID)
+	}
+	// Captured plaintext token MUST be the platform-issued bot token
+	// from the sink callback. Empty knownToken would mean the
+	// in-Execute path wired through the Compensate-style DAO-fallback
+	// contract — wrong direction.
+	if calls[0].knownToken != "xoxb-test-bot-token" {
+		t.Errorf("Revoke.knownToken = %q, want %q (captured plaintext from sink)",
+			calls[0].knownToken, "xoxb-test-bot-token")
+	}
+}
+
+// TestOAuthInstallStep_Execute_CtxCancelledDuringSink_InExecuteRevokeStillRuns
+// pins the M7.3.d iter-1 codex+critic Major #1 fix: when ctx is
+// cancelled DURING the sink (after the platform call succeeded
+// but before the post-platform-call failure branch decides to skip
+// cleanup), the in-Execute revoke MUST still dispatch. Mirrors the
+// M7.3.b iter-1 #2 saga.compensate context.WithoutCancel discipline.
+// Realistic trigger: HTTP timeout / operator abort firing during
+// the sink's encrypt/DAO chain.
+//
+// Test plumbing: a wrapping DAO cancels its own parent ctx INSIDE
+// the sink's PutInstallTokens callback (after capturedToken was
+// written, before returning a non-nil error). The post-platform-
+// call failure branch then dispatches revoke against a cancelled
+// parent ctx; the recording revoker's call count MUST be 1 — the
+// WithoutCancel wrap kept the dispatch alive.
+func TestOAuthInstallStep_Execute_CtxCancelledDuringSink_InExecuteRevokeStillRuns(t *testing.T) {
+	t.Parallel()
+
+	memDAO := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	revoker := &recordingOAuthInstallRevoker{}
+	installer := newFakeInstaller(canonicalInstallTokens())
+
+	watchkeeperID := uuid.New()
+	seedCredsRow(t, memDAO, watchkeeperID)
+	ctx, cancel := context.WithCancel(saga.WithSpawnContext(context.Background(), newOAuthSpawnContext(t, watchkeeperID, "code-test")))
+	defer cancel()
+
+	cancelling := &cancellingPutInstallTokensDAO{
+		MemoryWatchkeeperSlackAppCredsDAO: memDAO,
+		cancel:                            cancel,
+		err:                               errors.New("simulated DAO write failure after cancel"),
+	}
+
+	step := spawn.NewOAuthInstallStep(spawn.OAuthInstallStepDeps{
+		Installer:   installer,
+		CredsDAO:    cancelling,
+		Encrypter:   newTestEncrypter(t),
+		Revoker:     revoker,
+		Workspace:   messenger.WorkspaceRef{ID: "T0123", Name: "Test"},
+		RedirectURI: "https://example.com/oauth/callback",
+	})
+
+	if err := step.Execute(ctx); err == nil {
+		t.Fatalf("Execute: err = nil, want wrapped DAO error")
+	}
+
+	// Revoke MUST have been dispatched once even though the parent
+	// ctx was cancelled inside the sink. Validates
+	// context.WithoutCancel wrap on the in-Execute cleanup branch.
+	if got := revoker.callCount.Load(); got != 1 {
+		t.Errorf("Revoke call count under in-sink-cancellation = %d, want 1 (WithoutCancel discipline)", got)
+	}
+}
+
+// cancellingPutInstallTokensDAO mirrors cancellingPutDAO from
+// createapp_step_test.go but for the OAuthInstall path:
+// PutInstallTokens cancels its supplied `cancel` func then returns
+// the configured error. Used to test the M7.3.d in-Execute
+// WithoutCancel discipline on the OAuth side.
+type cancellingPutInstallTokensDAO struct {
+	*spawn.MemoryWatchkeeperSlackAppCredsDAO
+	cancel context.CancelFunc
+	err    error
+}
+
+func (d *cancellingPutInstallTokensDAO) PutInstallTokens(
+	_ context.Context, _ uuid.UUID, _, _, _ []byte, _ time.Time,
+) error {
+	d.cancel()
+	return d.err
+}
+
+func TestOAuthInstallStep_Execute_InstallerError_NoInExecuteRevoke(t *testing.T) {
+	t.Parallel()
+
+	installer := newFakeInstaller(canonicalInstallTokens())
+	installer.returnErr = errors.New("simulated install error before sink")
+	dao := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	revoker := &recordingOAuthInstallRevoker{}
+
+	step := spawn.NewOAuthInstallStep(spawn.OAuthInstallStepDeps{
+		Installer: installer,
+		CredsDAO:  dao,
+		Encrypter: newTestEncrypter(t),
+		Revoker:   revoker,
+		Workspace: messenger.WorkspaceRef{ID: "T0123", Name: "Test"},
+	})
+
+	watchkeeperID := uuid.New()
+	seedCredsRow(t, dao, watchkeeperID)
+	ctx := saga.WithSpawnContext(context.Background(), newOAuthSpawnContext(t, watchkeeperID, "code-test"))
+
+	if err := step.Execute(ctx); err == nil {
+		t.Fatalf("Execute: err = nil, want wrapped installer error")
+	}
+	// Installer fake's returnErr fires AFTER the resolver but BEFORE
+	// the sink — capturedToken stays empty, so the in-Execute revoke
+	// MUST NOT dispatch.
+	if got := revoker.callCount.Load(); got != 0 {
+		t.Errorf("Revoke call count = %d, want 0 (no platform-side state to clean up)", got)
+	}
+}
+
+func TestOAuthInstallStep_Execute_PIICanary_InExecuteRevokeDoesNotLeakPlaintextToken(t *testing.T) {
+	t.Parallel()
+
+	memDAO := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	// PII canary err embeds a synthetic substring; assert it does
+	// NOT leak through the in-Execute revoke discard path. The
+	// canary is the DAO error string — the revoke seam returns
+	// nil so its plaintext token argument never reaches an error
+	// path on the wrap chain.
+	canary := "x-canary-dao-err-do-not-leak-3F7A1C9D"
+	wrapped := &putInstallTokensErrDAO{
+		MemoryWatchkeeperSlackAppCredsDAO: memDAO,
+		err:                               errors.New(canary),
+	}
+	revoker := &recordingOAuthInstallRevoker{} // returnErr = nil
+
+	step := spawn.NewOAuthInstallStep(spawn.OAuthInstallStepDeps{
+		Installer:   newFakeInstaller(canonicalInstallTokens()),
+		CredsDAO:    wrapped,
+		Encrypter:   newTestEncrypter(t),
+		Revoker:     revoker,
+		Workspace:   messenger.WorkspaceRef{ID: "T0123"},
+		RedirectURI: "https://example.com/oauth/callback",
+	})
+
+	watchkeeperID := uuid.New()
+	seedCredsRow(t, memDAO, watchkeeperID)
+	ctx := saga.WithSpawnContext(context.Background(), newOAuthSpawnContext(t, watchkeeperID, "code-test"))
+
+	err := step.Execute(ctx)
+	if err == nil {
+		t.Fatalf("Execute: err = nil, want wrapped DAO err")
+	}
+	// The DAO error string IS the canary; canary survives via %w —
+	// pin to confirm the wrap chain is intact (defensive).
+	if !strings.Contains(err.Error(), canary) {
+		t.Fatalf("wrap chain dropped the underlying canary: %q", err.Error())
+	}
+	// The plaintext bot token MUST NOT leak into the wrap.
+	if strings.Contains(err.Error(), "xoxb-test-bot-token") {
+		t.Errorf("plaintext bot token leaked into wrap chain: %q", err.Error())
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Negative: Missing SpawnContext → wrapped error; no install; no DAO call
 // (test-plan §"Negative — Missing SpawnContext")
 // ────────────────────────────────────────────────────────────────────────
