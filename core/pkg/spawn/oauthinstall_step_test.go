@@ -213,6 +213,7 @@ func newOAuthStep(
 		Installer:   installer,
 		CredsDAO:    dao,
 		Encrypter:   enc,
+		Revoker:     nopOAuthInstallRevoker{},
 		Workspace:   messenger.WorkspaceRef{ID: "T0123", Name: "Test"},
 		RedirectURI: "https://example.com/oauth/callback",
 	})
@@ -253,6 +254,7 @@ func TestNewOAuthInstallStep_PanicsOnRequiredFields(t *testing.T) {
 		{"nil Installer", func(d *spawn.OAuthInstallStepDeps) { d.Installer = nil }},
 		{"nil CredsDAO", func(d *spawn.OAuthInstallStepDeps) { d.CredsDAO = nil }},
 		{"nil Encrypter", func(d *spawn.OAuthInstallStepDeps) { d.Encrypter = nil }},
+		{"nil Revoker", func(d *spawn.OAuthInstallStepDeps) { d.Revoker = nil }},
 		{"empty Workspace.ID", func(d *spawn.OAuthInstallStepDeps) { d.Workspace = messenger.WorkspaceRef{} }},
 	}
 	for _, tc := range cases {
@@ -266,6 +268,7 @@ func TestNewOAuthInstallStep_PanicsOnRequiredFields(t *testing.T) {
 				Installer: newFakeInstaller(canonicalInstallTokens()),
 				CredsDAO:  spawn.NewMemoryWatchkeeperSlackAppCredsDAO(),
 				Encrypter: newTestEncrypter(t),
+				Revoker:   nopOAuthInstallRevoker{},
 				Workspace: messenger.WorkspaceRef{ID: "T0123"},
 			}
 			tc.mut(&deps)

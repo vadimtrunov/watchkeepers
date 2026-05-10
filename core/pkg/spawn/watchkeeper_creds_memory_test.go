@@ -210,3 +210,98 @@ func TestMemoryWatchkeeperSlackAppCredsDAO_Concurrency_DistinctIDs(t *testing.T)
 		}
 	}
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// M7.3.c: WipeInstallTokens unit tests (iter-1 critic Major #2 fix).
+//
+// The interface contract pins idempotency-on-missing-row; without
+// these tests the contract is a doc-comment-only claim. The
+// OAuthInstallStep.Compensate happy-path test in compensators_test.go
+// exercises Wipe via the step body but does NOT call Wipe twice on
+// the same id, NOR call Wipe on a never-seeded id — both are pinned
+// here directly.
+// ────────────────────────────────────────────────────────────────────────
+
+func TestMemoryWatchkeeperSlackAppCredsDAO_WipeInstallTokens_IdempotentOnMissingRow(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	watchkeeperID := uuid.New()
+
+	// First call against a never-seeded id MUST return nil — the
+	// rollback chain is best-effort and a missing row is treated as
+	// already-wiped per the interface contract.
+	if err := dao.WipeInstallTokens(context.Background(), watchkeeperID); err != nil {
+		t.Errorf("WipeInstallTokens on missing row: err = %v, want nil", err)
+	}
+	if _, _, _, _, _, ok := dao.GetInstallTokens(watchkeeperID); ok {
+		t.Errorf("install tokens present after Wipe on missing row; expected absent")
+	}
+}
+
+func TestMemoryWatchkeeperSlackAppCredsDAO_WipeInstallTokens_DoubleCallReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	watchkeeperID := uuid.New()
+	if err := dao.Put(context.Background(), watchkeeperID, newTestCreds()); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	expiresAt, _ := time.Parse(time.RFC3339, "2026-05-10T00:00:00Z")
+	if err := dao.PutInstallTokens(
+		context.Background(), watchkeeperID, []byte("ct-bot"), nil, nil, expiresAt,
+	); err != nil {
+		t.Fatalf("PutInstallTokens: %v", err)
+	}
+
+	// First Wipe clears the install row.
+	if err := dao.WipeInstallTokens(context.Background(), watchkeeperID); err != nil {
+		t.Fatalf("WipeInstallTokens (1st call): %v", err)
+	}
+	if _, _, _, _, _, ok := dao.GetInstallTokens(watchkeeperID); ok {
+		t.Errorf("install tokens still present after first Wipe")
+	}
+
+	// Second Wipe on the same id MUST also return nil — double-
+	// Compensate is allowed (transient operator retry).
+	if err := dao.WipeInstallTokens(context.Background(), watchkeeperID); err != nil {
+		t.Errorf("WipeInstallTokens (2nd call on already-wiped id): err = %v, want nil", err)
+	}
+}
+
+func TestMemoryWatchkeeperSlackAppCredsDAO_WipeInstallTokens_PreservesAppCredsRow(t *testing.T) {
+	t.Parallel()
+
+	dao := spawn.NewMemoryWatchkeeperSlackAppCredsDAO()
+	watchkeeperID := uuid.New()
+	creds := newTestCreds()
+	if err := dao.Put(context.Background(), watchkeeperID, creds); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	expiresAt, _ := time.Parse(time.RFC3339, "2026-05-10T00:00:00Z")
+	if err := dao.PutInstallTokens(
+		context.Background(), watchkeeperID, []byte("ct-bot"), nil, nil, expiresAt,
+	); err != nil {
+		t.Fatalf("PutInstallTokens: %v", err)
+	}
+
+	if err := dao.WipeInstallTokens(context.Background(), watchkeeperID); err != nil {
+		t.Fatalf("WipeInstallTokens: %v", err)
+	}
+
+	// The app-creds row (M7.1.c.a slack_app_creds columns) MUST
+	// survive Wipe — the future SlackAppTeardown production wrapper
+	// reads `app_id` from this row before its own platform-side
+	// teardown.
+	got, err := dao.Get(context.Background(), watchkeeperID)
+	if err != nil {
+		t.Fatalf("Get after Wipe: err = %v, want nil (Wipe must NOT remove the app-creds row)", err)
+	}
+	if got != creds {
+		t.Errorf("app-creds row mutated by WipeInstallTokens: got %+v, want %+v", got, creds)
+	}
+	// And the install-tokens row IS gone.
+	if _, _, _, _, _, ok := dao.GetInstallTokens(watchkeeperID); ok {
+		t.Errorf("install tokens still present after Wipe; expected absent")
+	}
+}
