@@ -125,20 +125,74 @@ func coordinatorSeedV2Fixture() *keepclient.ManifestVersion {
 	return v1
 }
 
-// TestCoordinatorSeed_LoadsViaLoadManifest is the happy-path proof:
-// pipe the V2 fixture mirroring `025_coordinator_manifest_v2_seed.sql`
-// through [LoadManifest] and assert the projected fields the M8.2.b
-// sub-item calls out — SystemPrompt still contains the reassignment-
-// boundary and lead-deferral phrases (unchanged from V1), Toolset
-// carries BOTH `update_ticket_field` and `find_overdue_tickets`,
-// AuthorityMatrix grants `self` on both, and Autonomy is `autonomous`.
+// coordinatorSeedV3Fixture mirrors the manifest_version row written by
+// `deploy/migrations/026_coordinator_manifest_v3_seed.sql` (M8.2.c).
+// Supersedes [coordinatorSeedV2Fixture] for production boot.
 //
-// V2 is the right baseline for "what production loads" because
+// Shape diff vs V2: extends `Tools` with `fetch_watch_orders`,
+// `nudge_reviewer`, `post_daily_briefing`; extends `AuthorityMatrix`
+// granting `self` on each; appends three narrative paragraphs to
+// `SystemPrompt` documenting the new tools. Personality, model,
+// autonomy, and notebook recall tunables are unchanged from V2.
+func coordinatorSeedV3Fixture() *keepclient.ManifestVersion {
+	v2 := coordinatorSeedV2Fixture()
+	const v3AuthorityMatrix = `{
+		"update_ticket_field": "self",
+		"find_overdue_tickets": "self",
+		"fetch_watch_orders": "self",
+		"nudge_reviewer": "self",
+		"post_daily_briefing": "self",
+		"manifest_version_bump": "lead"
+	}`
+	const v3PromptAppendix = "\n\nSlack inbox: use fetch_watch_orders to read recent" +
+		" direct messages from the lead. Required args: lead_user_id" +
+		" (Slack user id matching [UWB][A-Z0-9]+), lookback_minutes" +
+		" (integer 1..1440). The handler resolves the 1:1 IM channel" +
+		" via conversations.open and reads the history; caps at 200" +
+		" messages across 10 pages. Use this when the lead has" +
+		" likely DM'd new orders since your last turn." +
+		"\n\nReviewer nudges: use nudge_reviewer to DM a teammate" +
+		" about a stale review. Required args: reviewer_user_id" +
+		" (Slack user id), text (≤2000 chars). Optional: title (≤200" +
+		" chars). Slack auto-opens the DM; you do NOT need to resolve" +
+		" the channel id first. Compose the nudge as a SINGLE," +
+		" actionable message — link to the PR + the asked action." +
+		" Avoid daily spam: nudge at most once per reviewer per PR" +
+		" per 24h window." +
+		"\n\nDaily briefing: use post_daily_briefing to post a" +
+		" structured daily summary to a configured channel." +
+		" Required args: channel_id (Slack C…/G…/D… channel)," +
+		" title (≤200 chars, non-empty), sections (array of" +
+		" {heading, bullets}, ≤20 sections, each ≤20 bullets ≤1000" +
+		" chars). The handler caps the rendered text at 8000 chars" +
+		" and refuses overflow; trim sections when the limit fires."
+	v2.ID = CoordinatorManifestVersionV3ID
+	v2.VersionNo = 3
+	v2.SystemPrompt += v3PromptAppendix
+	v2.Tools = json.RawMessage(`[
+		{"name": "update_ticket_field"},
+		{"name": "find_overdue_tickets"},
+		{"name": "fetch_watch_orders"},
+		{"name": "nudge_reviewer"},
+		{"name": "post_daily_briefing"}
+	]`)
+	v2.AuthorityMatrix = json.RawMessage(v3AuthorityMatrix)
+	return v2
+}
+
+// TestCoordinatorSeed_LoadsViaLoadManifest is the happy-path proof:
+// pipe the V3 fixture mirroring `026_coordinator_manifest_v3_seed.sql`
+// through [LoadManifest] and assert the projected fields the M8.2.c
+// sub-item calls out — SystemPrompt still contains the reassignment-
+// boundary and lead-deferral phrases (unchanged from V1/V2), Toolset
+// carries the V1+V2+V3 tool names, AuthorityMatrix grants `self` on
+// each, and Autonomy is `autonomous`.
+//
+// V3 is the right baseline for "what production loads" because
 // keepclient.GetManifest returns the highest-version_no row
-// (`core/pkg/keepclient/read_manifest.go:63-67`). The V1 baseline
-// (M8.2.a shape) is independently asserted by
-// [TestCoordinatorSeed_MigrationContainsExpectedShape] reading
-// migration 024 off disk.
+// (`core/pkg/keepclient/read_manifest.go:63-67`). The V1/V2 baselines
+// are independently asserted by the corresponding migration-shape
+// tests reading migrations 024/025 off disk.
 //
 // The fixture path mirrors the existing `loader_test.go` fakeFetcher
 // pattern rather than spinning up a real test DB. Real-DB exercising
@@ -147,7 +201,7 @@ func coordinatorSeedV2Fixture() *keepclient.ManifestVersion {
 func TestCoordinatorSeed_LoadsViaLoadManifest(t *testing.T) {
 	t.Parallel()
 
-	f := &fakeFetcher{response: coordinatorSeedV2Fixture()}
+	f := &fakeFetcher{response: coordinatorSeedV3Fixture()}
 
 	got, err := LoadManifest(context.Background(), f, CoordinatorManifestID)
 	if err != nil {
@@ -167,14 +221,32 @@ func TestCoordinatorSeed_LoadsViaLoadManifest(t *testing.T) {
 	}
 
 	// V2 appendix: narrative guidance for `find_overdue_tickets`
-	// (iter-1 critic minor — V1 prompt did not mention the tool).
+	// (preserved verbatim in V3).
 	const wantFindOverduePhrase = "find_overdue_tickets to surface"
 	if !strings.Contains(got.SystemPrompt, wantFindOverduePhrase) {
 		t.Errorf("SystemPrompt missing V2 read-tool guidance %q; got:\n%s",
 			wantFindOverduePhrase, got.SystemPrompt)
 	}
 
-	wantNames := map[string]bool{"update_ticket_field": true, "find_overdue_tickets": true}
+	// V3 appendix: narrative guidance for the three Slack tools.
+	for _, phrase := range []string{
+		"fetch_watch_orders to read",
+		"nudge_reviewer to DM",
+		"post_daily_briefing to post",
+	} {
+		if !strings.Contains(got.SystemPrompt, phrase) {
+			t.Errorf("SystemPrompt missing V3 slack-tool guidance %q; got:\n%s",
+				phrase, got.SystemPrompt)
+		}
+	}
+
+	wantNames := map[string]bool{
+		"update_ticket_field":  true,
+		"find_overdue_tickets": true,
+		"fetch_watch_orders":   true,
+		"nudge_reviewer":       true,
+		"post_daily_briefing":  true,
+	}
 	names := got.Toolset.Names()
 	if len(names) != len(wantNames) {
 		t.Errorf("Toolset = %v, want %v", names, wantNames)
@@ -185,7 +257,13 @@ func TestCoordinatorSeed_LoadsViaLoadManifest(t *testing.T) {
 		}
 	}
 
-	for _, action := range []string{"update_ticket_field", "find_overdue_tickets"} {
+	for _, action := range []string{
+		"update_ticket_field",
+		"find_overdue_tickets",
+		"fetch_watch_orders",
+		"nudge_reviewer",
+		"post_daily_briefing",
+	} {
 		if got, want := got.AuthorityMatrix[action], "self"; got != want {
 			t.Errorf("AuthorityMatrix[%s] = %q, want %q", action, got, want)
 		}
@@ -276,11 +354,11 @@ func TestCoordinatorSeed_AuthorityMatrixUsesRuntimeVocabulary(t *testing.T) {
 		"watchmaster": true,
 	}
 
-	// Pin the boundary on the V2 fixture (the one production loads
-	// after migration 025 ships) so a future M8.2.c/d add of
-	// `find_stale_prs` / Slack tools that drifts to `lead_approval`
-	// fails this test, not production.
-	f := &fakeFetcher{response: coordinatorSeedV2Fixture()}
+	// Pin the boundary on the V3 fixture (the one production loads
+	// after migration 026 ships) so a future M8.2.d add of
+	// `find_stale_prs` that drifts to `lead_approval` fails this
+	// test, not production.
+	f := &fakeFetcher{response: coordinatorSeedV3Fixture()}
 	got, err := LoadManifest(context.Background(), f, CoordinatorManifestID)
 	if err != nil {
 		t.Fatalf("LoadManifest: %v", err)
@@ -290,6 +368,75 @@ func TestCoordinatorSeed_AuthorityMatrixUsesRuntimeVocabulary(t *testing.T) {
 		if !allowed[value] {
 			t.Errorf("AuthorityMatrix[%q] = %q, want one of {self, lead, operator, watchmaster} "+
 				"(runtime vocabulary, not the M5.5.b.c.c.b enum)", action, value)
+		}
+	}
+}
+
+// TestCoordinatorSeedV3_MigrationContainsExpectedShape is the V3
+// equivalent of the V1/V2 migration-shape tests: reads
+// `deploy/migrations/026_coordinator_manifest_v3_seed.sql` off disk
+// and asserts the load-bearing literals (V3 manifest_version id,
+// version_no=3, the toolset extension with the three new Slack tools,
+// the new authority-matrix entries granting `self` on each, the
+// unchanged system-prompt phrases, the V3 narrative-guidance phrases,
+// idempotency clause). Drift fails CI, not production.
+//
+// Migration 024's and 025's shapes are independently asserted by their
+// corresponding tests; the three tests together pin the M8.2.a/b/c
+// progression. The M8.2.d sub-item will add a fourth migration-shape
+// test under this same pattern.
+func TestCoordinatorSeedV3_MigrationContainsExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	migrationPath := repoRelative(t, "deploy/migrations/026_coordinator_manifest_v3_seed.sql")
+	bytes, err := os.ReadFile(migrationPath) //nolint:gosec // test reads a fixed repo-relative path.
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", migrationPath, err)
+	}
+	body := string(bytes)
+
+	wantLiterals := []string{
+		// Stable ids — V3 manifest_version row + REUSED manifest id.
+		CoordinatorManifestVersionV3ID,
+		CoordinatorManifestID,
+		// Reused system tenant (referenced via the set_config preamble).
+		WatchmasterSystemOrganizationID,
+		// Version progression — V3 lands at version_no=3.
+		"  3,",
+		// System-prompt phrases (V1/V2 phrases unchanged; V3 preserves
+		// them).
+		"NEVER reassign tickets",
+		"ALWAYS surface a",
+		"find_overdue_tickets to surface",
+		// V3 narrative-guidance appendix for the three new Slack
+		// tools — pinned per-phrase so a future reword that drops
+		// one fails CI loudly.
+		"fetch_watch_orders to read",
+		"nudge_reviewer to DM",
+		"post_daily_briefing to post",
+		// Toolset extension: V1/V2 entries preserved, V3 entries added.
+		`"update_ticket_field"`,
+		`"find_overdue_tickets"`,
+		`"fetch_watch_orders"`,
+		`"nudge_reviewer"`,
+		`"post_daily_briefing"`,
+		// Authority matrix entries — runtime vocab; M8.2.c grants
+		// `self` on each of the three new tools.
+		`"update_ticket_field": "self"`,
+		`"find_overdue_tickets": "self"`,
+		`"fetch_watch_orders": "self"`,
+		`"nudge_reviewer": "self"`,
+		`"post_daily_briefing": "self"`,
+		`"manifest_version_bump": "lead"`,
+		// Model + autonomy unchanged from V1.
+		"claude-sonnet-4-6",
+		"'autonomous'",
+		// Idempotency clause.
+		"ON CONFLICT (id) DO NOTHING",
+	}
+	for _, lit := range wantLiterals {
+		if !strings.Contains(body, lit) {
+			t.Errorf("migration missing expected literal %q", lit)
 		}
 	}
 }
