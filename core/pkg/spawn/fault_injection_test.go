@@ -26,6 +26,21 @@
 // The harness is the M7.3.c "fault-injection harness" deliverable —
 // a single test loop covering the cross-step rollback contract that
 // per-step unit tests can't observe in isolation.
+//
+// # Out of scope: post-side-effect Execute failures
+//
+// The harness intentionally injects only TOP-LEVEL Execute failures
+// (the seam fake's returnErr fires BEFORE the platform call). The
+// M7.3.b "failed step is NOT compensated" runner discipline means a
+// platform-call-then-sink-failure path leaves orphaned platform
+// state (Slack App created but no `slack_app_creds` row; OAuth
+// install live but no encrypted tokens). That partial-success
+// surface is deferred to a future M7.3.d-or-M7.4 reconciler
+// (widened [SlackAppTeardown] / [OAuthInstallRevoker] seam
+// signatures taking the in-process platform ids OR a sweep of
+// `slack_app_creds` rows for app-creds without companion install-
+// tokens). See docs/lessons/M7.md M7.3.c iter-1 patterns #1 for
+// the full rationale.
 package spawn_test
 
 import (

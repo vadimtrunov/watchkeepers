@@ -55,6 +55,20 @@
 // OAuth code originate on the [saga.SpawnContext], NEVER on a
 // receiver-stash. The encrypted token bundle lives in the DAO row;
 // the Revoker reads it back via the same row.
+//
+// # Failed-step partial-success surface — deferred to M7.3.d-or-M7.4
+//
+// The M7.3.b runner does NOT dispatch [Compensate] on a step whose
+// [Execute] returned non-nil. The Slack `oauth.v2.access` exchange
+// is the side effect AND it precedes the sink/encrypt/DAO chain, so
+// a sink-failure path (token bundle in-process, encryption fails
+// before the DAO write) returns non-nil from [Execute] AFTER the
+// install completed platform-side. Today the live install survives
+// that path; recovery is deferred to a future M7.3.d-or-M7.4
+// reconciler (widened seam signature taking the in-process token
+// bundle, OR a sweep of `slack_app_creds` rows for app-creds
+// without companion install-tokens). See docs/lessons/M7.md
+// M7.3.c iter-1 patterns #1.
 package spawn
 
 import (

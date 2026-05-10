@@ -119,7 +119,7 @@ type WatchkeeperSlackAppCredsDAO interface {
 	// empty-bytea. The in-memory variant simply deletes the install-
 	// tokens map entry; a Postgres adapter SETs the columns to NULL.
 	//
-	// Future M7.3.d-equivalent landing the production
+	// Future M7.3.d-or-M7.4 reconciler landing the production
 	// [SlackAppTeardown] wrapper will introduce a companion
 	// `WipeAll` (full-row deletion including the M7.1.c.a app
 	// credentials) — deferred per the M6.3.b "ship in-memory DAO

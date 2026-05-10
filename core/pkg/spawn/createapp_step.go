@@ -32,13 +32,16 @@
 // [saga.SpawnContext] on `ctx` (NEVER receiver-stash — the M7.3.b
 // per-saga state contract forbids it; multiple sagas may share a
 // step instance) and dispatches via the [SlackAppTeardown] seam.
-// Production wiring backs the seam with a wrapper that performs the
-// best-effort Slack-side teardown the platform exposes (Phase 1:
-// no `apps.delete` API exists, so the wrapper wipes the local
-// `slack_app_creds` row + records the abandoned `app_id` to a
-// follow-up reconciler queue) and returns typed errors classed via
-// [saga.LastErrorClassed] so the audit row's `last_error_class`
-// pins the failure mode.
+//
+// The production wiring for the [SlackAppTeardown] seam is NOT
+// shipped in M7.3.c — the seam interface lands here so the rollback
+// chain compiles end-to-end; the wrapper itself is deferred to a
+// future M7.3.d-or-M7.4 reconciler (Phase 1: no Slack `apps.delete`
+// API exists; the wrapper-side strategy is best-effort local-state
+// wipe via [WatchkeeperSlackAppCredsDAO.WipeInstallTokens] + an
+// orphan-app_id reconciler queue an operator can drain manually).
+// Returns typed errors classed via [saga.LastErrorClassed] so the
+// audit row's `last_error_class` pins the failure mode.
 //
 // PII discipline on the rollback path: no creds substring, no
 // `app_id` raw value, and no Slack response body lands on the
@@ -46,6 +49,19 @@
 // prefix + the underlying typed sentinel (e.g.
 // [ErrMissingSpawnContext], [ErrMissingAgentID], or the Teardown's
 // own typed error).
+//
+// # Failed-step partial-success surface — deferred to M7.3.d-or-M7.4
+//
+// The M7.3.b runner does NOT dispatch [Compensate] on a step whose
+// [Execute] returned non-nil. The `apps.manifest.create` Slack call
+// is the side effect AND it precedes any client-side fail-fast we
+// could do, so a sink-failure path returns non-nil from [Execute]
+// AFTER the platform mutated. Today the orphaned Slack App
+// survives that path; recovery is deferred to a future
+// M7.3.d-or-M7.4 reconciler (widened seam signature taking the
+// in-process app_id, OR a sweep of `slack_app_creds` rows for
+// orphan ids without companion install-tokens). See
+// docs/lessons/M7.md M7.3.c iter-1 patterns #1.
 package spawn
 
 import (
@@ -343,12 +359,14 @@ type CreateAppCredsSinkInstaller interface {
 //
 // Phase-1 reality check: Slack does NOT expose a public
 // `apps.delete` API for the `apps.manifest.create`-flow surface,
-// so the production wrapper performs the best-effort teardown the
-// platform allows (typically: wipe the local `slack_app_creds`
-// row + record the abandoned `app_id` to a follow-up reconciler
-// queue an operator can drain manually). The seam exists so the
-// future migration to a richer platform-side teardown lands
-// without churning the step's signature.
+// so the future production wrapper (deferred to M7.3.d-or-M7.4
+// per the file-level rollback-contract section above) performs
+// the best-effort teardown the platform allows (typically: wipe
+// the local `slack_app_creds` row + record the abandoned
+// `app_id` to a reconciler queue an operator can drain manually).
+// The seam exists so the future migration to a richer
+// platform-side teardown lands without churning the step's
+// signature.
 //
 // Concurrency: implementations MUST be safe for concurrent calls
 // across distinct sagas. The production wrapper holds an immutable

@@ -570,7 +570,16 @@ func TestOAuthInstallStep_Compensate_PIICanary_NeverLeaksWorkspaceOrRedirectURI(
 	if !strings.Contains(err.Error(), piiCanary) {
 		t.Fatalf("wrap chain dropped the underlying error string: %q", err.Error())
 	}
-	for _, leak := range []string{"T-PII-WORKSPACE", "PII-NAME", "pii-redirect.example.com"} {
+	// Iter-2 codex Minor #3: assert the FULL configured RedirectURI
+	// (scheme + host + path) does not leak — a host-only check would
+	// miss a regression that wraps only the scheme/path/query.
+	for _, leak := range []string{
+		"T-PII-WORKSPACE",
+		"PII-NAME",
+		"https://pii-redirect.example.com/oauth/callback",
+		"pii-redirect.example.com",
+		"/oauth/callback",
+	} {
 		if strings.Contains(err.Error(), leak) {
 			t.Errorf("step config %q leaked into wrap chain: %q", leak, err.Error())
 		}
@@ -918,20 +927,12 @@ func TestPerStepCompensate_ReadsSpawnContextFromCtx(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %q: %v", f, err)
 		}
-		text := string(body)
-		idx := strings.Index(text, ") Compensate(ctx context.Context) error {")
-		if idx == -1 {
-			t.Errorf("%s: no `Compensate(ctx context.Context) error` body found", f)
+		fnBody, ok := compensateFunctionBody(string(body))
+		if !ok {
+			t.Errorf("%s: no `Compensate(...)` function body found", f)
 			continue
 		}
-		body2 := text[idx:]
-		end := strings.Index(body2, "\n}\n")
-		if end == -1 {
-			t.Errorf("%s: Compensate body has no closing brace within scan window", f)
-			continue
-		}
-		fn := body2[:end]
-		if !strings.Contains(fn, "saga.SpawnContextFromContext(ctx)") {
+		if !strings.Contains(fnBody, "saga.SpawnContextFromContext(ctx)") {
 			t.Errorf("%s: Compensate body does not call SpawnContextFromContext(ctx); per-saga state contract violated", f)
 		}
 	}
