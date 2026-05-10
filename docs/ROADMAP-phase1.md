@@ -457,7 +457,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Scope**
 
-- [ ] **M8.1** **Jira adapter** — REST via `go-jira` or direct HTTP: JQL search, read, comment, and update of a whitelisted set of fields.
+- [x] **M8.1** **Jira adapter** — REST via `go-jira` or direct HTTP: JQL search, read, comment, and update of a whitelisted set of fields.
 - [ ] **M8.2** **Coordinator manifest + toolset** — system prompt and authority matrix (comment + field-update allowed; no reassignment without lead approval); tools `fetch_watch_orders` (reads Slack DMs from lead), `find_stale_prs`, `find_overdue_tickets`, `nudge_reviewer`, `post_daily_briefing`, `update_ticket_field`.
 - [ ] **M8.3** **Watch Orders + scheduled work** — natural-language Watch Order parser distills lead priorities into a persistent task list in Keep with round-trip confirmation; cron-driven daily briefing at configurable time and morning overdue sweep; daily briefing includes a pending-lesson digest section listing lessons in the 24h cooling-off window (lead replies `forget <id>` to kill before activation; auto-activate otherwise).
 
