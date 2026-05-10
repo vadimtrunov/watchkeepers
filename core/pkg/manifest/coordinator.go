@@ -37,4 +37,21 @@ const (
 	// (version_no=1) UUID seeded by migration 024. Exported because the
 	// migration-shape test asserts it appears verbatim in the SQL file.
 	CoordinatorManifestVersionID = "21000000-0000-4000-8000-000000000000"
+
+	// CoordinatorManifestVersionV2ID is the `manifest_version.id`
+	// (version_no=2) UUID seeded by migration 025 (M8.2.b). Supersedes
+	// [CoordinatorManifestVersionID] — keepclient.GetManifest returns
+	// the manifest_version row with the highest version_no for a given
+	// manifest_id (`core/pkg/keepclient/read_manifest.go:63-67`), so
+	// after migration 025 runs the runtime loads V2 for boot. The V2
+	// row extends the toolset with `find_overdue_tickets` and grants
+	// `self` on it in the authority matrix; the system prompt,
+	// personality, model, autonomy, and notebook recall tunables are
+	// unchanged from V1.
+	//
+	// Future M8.2.c / M8.2.d sub-items add V3 / V4 rows under the same
+	// pattern (new id + version_no, INSERT-only, ON CONFLICT (id) DO
+	// NOTHING) so historical versions remain recoverable from the
+	// migration sequence.
+	CoordinatorManifestVersionV2ID = "22000000-0000-4000-8000-000000000000"
 )
