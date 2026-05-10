@@ -1075,6 +1075,14 @@ func TestRetireKickoff_StepFailure_AuditsSagaFailed(t *testing.T) {
 		spawn.EventTypeRetireApprovedForWatchkeeper,
 		saga.EventTypeSagaStepStarted,
 		saga.EventTypeSagaFailed,
+		// M7.3.b: the saga runner emits a `saga_compensated`
+		// summary row on every failure path (zero per-step
+		// rows here because the failing step is a non-Compensator
+		// stub). The retire kickoffer does NOT emit a per-saga
+		// rejection event in M7.3.b — that surface is spawn-side
+		// only per the roadmap; a future M7.4-or-equivalent
+		// retire-rollback emit is out of scope for M7.3.b.
+		saga.EventTypeSagaCompensated,
 	}
 	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
 		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)

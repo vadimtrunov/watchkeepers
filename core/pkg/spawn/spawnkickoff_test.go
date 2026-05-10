@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -88,6 +90,9 @@ type recordingDAO struct {
 	insertSeq          []uint64
 	insertIfAbsentSeq  []uint64
 	getSeq             []uint64
+	updateStepSeq      []uint64
+	markCompletedSeq   []uint64
+	markFailedSeq      []uint64
 	insertErr          error
 	insertIfAbsentErr  error
 	insertIfAbsentKeys []string
@@ -137,14 +142,26 @@ func (r *recordingDAO) Get(ctx context.Context, id uuid.UUID) (saga.Saga, error)
 }
 
 func (r *recordingDAO) UpdateStep(ctx context.Context, id uuid.UUID, step string) error {
+	t := r.tick()
+	r.mu.Lock()
+	r.updateStepSeq = append(r.updateStepSeq, t)
+	r.mu.Unlock()
 	return r.inner.UpdateStep(ctx, id, step)
 }
 
 func (r *recordingDAO) MarkCompleted(ctx context.Context, id uuid.UUID) error {
+	t := r.tick()
+	r.mu.Lock()
+	r.markCompletedSeq = append(r.markCompletedSeq, t)
+	r.mu.Unlock()
 	return r.inner.MarkCompleted(ctx, id)
 }
 
 func (r *recordingDAO) MarkFailed(ctx context.Context, id uuid.UUID, lastErr string) error {
+	t := r.tick()
+	r.mu.Lock()
+	r.markFailedSeq = append(r.markFailedSeq, t)
+	r.mu.Unlock()
 	return r.inner.MarkFailed(ctx, id, lastErr)
 }
 
@@ -830,6 +847,14 @@ func TestSpawnKickoff_StepFailure_AuditsSagaFailed(t *testing.T) {
 		spawn.EventTypeManifestApprovedForSpawn,
 		saga.EventTypeSagaStepStarted,
 		saga.EventTypeSagaFailed,
+		// M7.3.b: the runner emits a `saga_compensated` summary
+		// row on every failure path (zero per-step rows here
+		// because `boom` is a non-Compensator stub).
+		saga.EventTypeSagaCompensated,
+		// M7.3.b: the kickoffer emits the operator-visible
+		// rejection row AFTER the saga's own failure chain so a
+		// downstream consumer can mark the Manifest rejected.
+		spawn.EventTypeManifestRejectedAfterSpawnFailure,
 	}
 	if got := keep.eventTypes(); !equalStrings(got, wantEvents) {
 		t.Fatalf("event_type chain = %v, want %v", got, wantEvents)
@@ -1259,12 +1284,26 @@ func TestEventTypeManifestApprovalReplayedForSpawn_NoPrefixCollision(t *testing.
 
 // TestSpawnKickoff_ConcurrentReplays_ExactlyOneRun hammers the
 // idempotency contract under contention: 16 goroutines call Kickoff
-// concurrently with the SAME approvalToken; exactly one of them is
-// the original (Runner.Run fires once), the other 15 are replays
-// (no Run, no second saga row, no second `manifest_approved_for_spawn`
-// audit). Pinned by the race-detector test invocation; the test
-// fails if a developer regresses the InsertIfAbsent dedup away from
-// a single-row commit.
+// concurrently with the SAME approvalToken. The test uses a
+// blocking saga step so the first goroutine's [saga.Runner.Run]
+// transitions the saga out of `pending` (via UpdateStep →
+// SagaStateInFlight) BEFORE releasing the other 15 goroutines —
+// once Status != pending, the M7.3.a-iter-1 catch-up branch falls
+// back to the true-replay branch and the original "exactly one
+// approved + 15 replays" semantic holds deterministically.
+//
+// M7.3.b deflake note: the prior version of this test used
+// [kickoffWithDefaults] (zero-step saga); zero-step Run transitions
+// pending → completed under MarkCompleted's wlock, leaving NO
+// `in_flight` window other goroutines could observe — so the
+// catch-up branch fired non-deterministically depending on goroutine
+// scheduling. Replacing the zero-step saga with a one-blocking-step
+// saga + barrier moves the assertion from race-window-dependent to
+// state-machine-deterministic; the failing-step + concurrent-rollback
+// invariant is covered by the M7.3.b
+// `TestRunner_Concurrency_DistinctSagas_RollbackInIsolation` saga-
+// core test, so this test stays scoped to the kickoffer's idempotency
+// contract.
 func TestSpawnKickoff_ConcurrentReplays_ExactlyOneRun(t *testing.T) {
 	t.Parallel()
 
@@ -1272,11 +1311,21 @@ func TestSpawnKickoff_ConcurrentReplays_ExactlyOneRun(t *testing.T) {
 	keep := &fakeLocalKeepClient{}
 	writer := keeperslog.New(keep)
 	runner := saga.NewRunner(saga.Dependencies{DAO: rec, Logger: writer})
+
+	// Blocking step: closes `entered` once UpdateStep has flipped
+	// Status to `in_flight` and Runner has dispatched Execute;
+	// blocks on `release` until the other 15 goroutines land
+	// their InsertIfAbsent calls.
+	step := &blockingStepImpl{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
 	k := spawn.NewSpawnKickoffer(spawn.SpawnKickoffDeps{
 		Logger:  writer,
 		DAO:     rec,
 		Runner:  runner,
 		AgentID: "bot",
+		Steps:   []saga.Step{step},
 	})
 
 	const writers = 16
@@ -1284,18 +1333,61 @@ func TestSpawnKickoff_ConcurrentReplays_ExactlyOneRun(t *testing.T) {
 	mvID := uuid.New()
 
 	var wg sync.WaitGroup
-	for i := 0; i < writers; i++ {
+	// Goroutine #1 is the saga winner: it acquires InsertIfAbsent
+	// first, runs the saga, hits the blocking step, signals
+	// `entered`, then waits on `release` to complete.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := kickoffWithDefaults(context.Background(), k, uuid.New(), mvID, token); err != nil {
+			t.Errorf("winner Kickoff: %v", err)
+		}
+	}()
+
+	// Wait for the winner to flip Status → in_flight via UpdateStep
+	// + reach the blocking step.
+	<-step.entered
+
+	// Now spawn the 15 replays — every one of them races
+	// InsertIfAbsent against the in_flight saga; the M7.3.a
+	// `Status != pending` branch routes them through the
+	// true-replay path (emit replayed + return).
+	for i := 0; i < writers-1; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Each goroutine mints its own candidate sagaID + watchkeeperID
-			// (mirrors the dispatcher's uuid.New() per call). The dedup
-			// index ensures only one of them wins the insert race.
 			if err := kickoffWithDefaults(context.Background(), k, uuid.New(), mvID, token); err != nil {
-				t.Errorf("Kickoff: %v", err)
+				t.Errorf("replay Kickoff: %v", err)
 			}
 		}()
 	}
+	// Wait for all 15 replays to finish before releasing the winner.
+	// Goroutine #1 holds the blocking step open, so the other 15
+	// observe Status=in_flight regardless of scheduling order. The
+	// 5s watchdog converts a regression that deadlocks the catch-up
+	// branch (e.g. an InsertIfAbsent that never returns) from a
+	// hung test into a fast failure with a clear diagnostic.
+	deadline := time.After(5 * time.Second)
+poll:
+	for {
+		rec.mu.Lock()
+		seen := len(rec.insertIfAbsentSeq)
+		rec.mu.Unlock()
+		if seen >= writers {
+			break poll
+		}
+		select {
+		case <-deadline:
+			rec.mu.Lock()
+			seenNow := len(rec.insertIfAbsentSeq)
+			rec.mu.Unlock()
+			t.Fatalf("timeout waiting for %d concurrent InsertIfAbsent calls; seen=%d (regression candidate: a goroutine deadlocked in the catch-up branch)",
+				writers, seenNow)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	close(step.release)
+
 	wg.Wait()
 
 	approvedCount := 0
@@ -1322,5 +1414,348 @@ func TestSpawnKickoff_ConcurrentReplays_ExactlyOneRun(t *testing.T) {
 	}
 	if len(rec.getSeq) != 1 {
 		t.Errorf("Get calls = %d, want 1 (Runner.Run fires exactly once)", len(rec.getSeq))
+	}
+}
+
+// findRejectionPayload scans the recorded keepers_log requests for
+// the [spawn.EventTypeManifestRejectedAfterSpawnFailure] row and
+// returns its decoded `data` envelope. t.Fatalf on any decode
+// failure or missing row — pulled out of the inline test body to
+// keep the parent test's cyclomatic complexity below the
+// project's gocyclo threshold.
+func findRejectionPayload(t *testing.T, rows []keepclient.LogAppendRequest) map[string]any {
+	t.Helper()
+	for _, row := range rows {
+		if row.EventType != spawn.EventTypeManifestRejectedAfterSpawnFailure {
+			continue
+		}
+		var envelope map[string]any
+		if err := json.Unmarshal(row.Payload, &envelope); err != nil {
+			t.Fatalf("rejection row payload not JSON: %v", err)
+		}
+		dataAny, ok := envelope["data"]
+		if !ok {
+			t.Fatalf("rejection row missing data envelope")
+		}
+		data, ok := dataAny.(map[string]any)
+		if !ok {
+			t.Fatalf("rejection row data not a map; got %T", dataAny)
+		}
+		return data
+	}
+	t.Fatalf("no manifest_rejected_after_spawn_failure row recorded")
+	return nil
+}
+
+// blockingStepImpl is the concrete [saga.Step] used by the M7.3.b
+// deflaked concurrency test. Lives at file scope so the saga.Step
+// interface satisfaction is type-checked once at compile time
+// rather than via a closure-capturing inline type literal.
+//
+// `entered` closes once on the first Execute (the winner saga); the
+// remaining concurrent Kickoff calls go through the kickoffer's
+// replay branch (Status != pending) WITHOUT reaching this step, so
+// `entered` is closed exactly once by definition.
+type blockingStepImpl struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingStepImpl) Name() string { return "blocking" }
+
+func (b *blockingStepImpl) Execute(_ context.Context) error {
+	close(b.entered)
+	<-b.release
+	return nil
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// M7.3.b: manifest_rejected_after_spawn_failure emit on saga rollback
+// ────────────────────────────────────────────────────────────────────────
+
+// selectiveFailLocalKeepClient is a [keeperslog.LocalKeepClient]
+// stand-in that records every LogAppend AND fails ONLY on calls
+// whose `event_type` matches the configured target. Used to drive
+// the M7.3.b "rejection-emit best-effort" path: a transient
+// keeperslog outage that drops the rejection row MUST NOT shadow
+// the original Run error.
+type selectiveFailLocalKeepClient struct {
+	mu             sync.Mutex
+	calls          []keepclient.LogAppendRequest
+	failOnEventTyp string
+	failErr        error
+}
+
+func (f *selectiveFailLocalKeepClient) LogAppend(_ context.Context, req keepclient.LogAppendRequest) (*keepclient.LogAppendResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, req)
+	if req.EventType == f.failOnEventTyp {
+		return nil, f.failErr
+	}
+	return &keepclient.LogAppendResponse{ID: "fake-row"}, nil
+}
+
+func (f *selectiveFailLocalKeepClient) recordedTypes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.calls))
+	for i, c := range f.calls {
+		out[i] = c.EventType
+	}
+	return out
+}
+
+// TestSpawnKickoff_StepFails_EmitsRejectionAfterSagaCompensated pins
+// the M7.3.b ordering: the saga's own `saga_failed` + `saga_compensated`
+// rows precede the kickoffer's `manifest_rejected_after_spawn_failure`
+// row. A downstream consumer that watches the audit chain and joins
+// the rejection row to the saga's failure rows by `saga_id` MUST
+// see the saga's wrap-up rows first.
+func TestSpawnKickoff_StepFails_EmitsRejectionAfterSagaCompensated(t *testing.T) {
+	t.Parallel()
+
+	stepErr := errors.New("step blew up")
+	failing := &errSagaStep{name: "explode", err: stepErr}
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+	k := spawn.NewSpawnKickoffer(spawn.SpawnKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot-7-3-b",
+		Steps:   []saga.Step{failing},
+	})
+
+	mvID := uuid.New()
+	wkID := uuid.New()
+	err := k.Kickoff(context.Background(), uuid.New(), mvID, wkID, testSpawnClaim(), "tok-rej-1")
+	if err == nil {
+		t.Fatal("Kickoff returned nil, want wrapped step error")
+	}
+	if !errors.Is(err, stepErr) {
+		t.Errorf("errors.Is(err, stepErr) = false; got %v", err)
+	}
+
+	gotTypes := keep.eventTypes()
+	wantTypes := []string{
+		spawn.EventTypeManifestApprovedForSpawn,
+		saga.EventTypeSagaStepStarted,
+		saga.EventTypeSagaFailed,
+		saga.EventTypeSagaCompensated,
+		spawn.EventTypeManifestRejectedAfterSpawnFailure,
+	}
+	if !equalStrings(gotTypes, wantTypes) {
+		t.Fatalf("event_type chain = %v, want %v", gotTypes, wantTypes)
+	}
+
+	// Pin the rejection-row payload shape: closed-set keys only,
+	// the watchkeeper id matches the kickoffer's input (no
+	// duplicate watchkeeper minted by the runner), the agent_id is
+	// the kickoffer's bot id (NOT the watchkeeper-being-spawned id),
+	// the approval_token is rendered as the tok-<6-prefix>.
+	rejectionPayload := findRejectionPayload(t, keep.recorded())
+
+	allowed := map[string]bool{
+		"saga_id":               true,
+		"manifest_version_id":   true,
+		"watchkeeper_id":        true,
+		"agent_id":              true,
+		"approval_token_prefix": true,
+	}
+	for k := range rejectionPayload {
+		if !allowed[k] {
+			t.Errorf("rejection payload contains forbidden key %q (allowed: %v)", k, allowed)
+		}
+	}
+	if got := rejectionPayload["manifest_version_id"]; got != mvID.String() {
+		t.Errorf("payload.manifest_version_id = %v, want %v", got, mvID.String())
+	}
+	if got := rejectionPayload["watchkeeper_id"]; got != wkID.String() {
+		t.Errorf("payload.watchkeeper_id = %v, want %v", got, wkID.String())
+	}
+	if got := rejectionPayload["agent_id"]; got != "bot-7-3-b" {
+		t.Errorf("payload.agent_id = %v, want bot-7-3-b", got)
+	}
+	if got, _ := rejectionPayload["approval_token_prefix"].(string); got != "tok-tok-re" {
+		// approvalTokenPrefix prepends "tok-" + first 6 runes of
+		// the input token; "tok-rej-1" → "tok-rej-1"[:6] = "tok-re"
+		// → emit "tok-tok-re".
+		t.Errorf("payload.approval_token_prefix = %q, want %q", got, "tok-tok-re")
+	}
+}
+
+// TestSpawnKickoff_HappyPath_NoRejectionEmit pins the negative AC: the
+// kickoffer MUST NOT emit `manifest_rejected_after_spawn_failure` on a
+// successful saga run. Without this guard a regression that always
+// emits the row (e.g. moves the emit out of the failure branch) would
+// pollute the audit chain with phantom rejections.
+func TestSpawnKickoff_HappyPath_NoRejectionEmit(t *testing.T) {
+	t.Parallel()
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &fakeLocalKeepClient{}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+	k := spawn.NewSpawnKickoffer(spawn.SpawnKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot-happy",
+	})
+
+	if err := kickoffWithDefaults(context.Background(), k, uuid.New(), uuid.New(), "tok-happy"); err != nil {
+		t.Fatalf("Kickoff: %v", err)
+	}
+
+	for _, et := range keep.eventTypes() {
+		if et == spawn.EventTypeManifestRejectedAfterSpawnFailure {
+			t.Errorf("happy path emitted forbidden rejection event %q", et)
+		}
+	}
+}
+
+// TestSpawnKickoff_RejectionAppendFails_OriginalRunErrorPreserved
+// pins the M7.3.b best-effort rejection-emit contract: a transient
+// keeperslog outage that drops the rejection row MUST NOT shadow the
+// original step error. The operator's wrap-chain answer to "what
+// failed?" stays the saga's step error, regardless of whether the
+// rejection-row append succeeded.
+func TestSpawnKickoff_RejectionAppendFails_OriginalRunErrorPreserved(t *testing.T) {
+	t.Parallel()
+
+	stepErr := errors.New("step blew up")
+	failing := &errSagaStep{name: "explode", err: stepErr}
+	appendErr := errors.New("keeperslog offline")
+
+	dao := saga.NewMemorySpawnSagaDAO(nil)
+	keep := &selectiveFailLocalKeepClient{
+		failOnEventTyp: spawn.EventTypeManifestRejectedAfterSpawnFailure,
+		failErr:        appendErr,
+	}
+	writer := keeperslog.New(keep)
+	runner := saga.NewRunner(saga.Dependencies{DAO: dao, Logger: writer})
+	k := spawn.NewSpawnKickoffer(spawn.SpawnKickoffDeps{
+		Logger:  writer,
+		DAO:     dao,
+		Runner:  runner,
+		AgentID: "bot-best-effort",
+		Steps:   []saga.Step{failing},
+	})
+
+	err := k.Kickoff(context.Background(), uuid.New(), uuid.New(), uuid.New(), testSpawnClaim(), "tok-best")
+	if err == nil {
+		t.Fatal("Kickoff returned nil, want wrapped step error")
+	}
+	if !errors.Is(err, stepErr) {
+		t.Errorf("errors.Is(err, stepErr) = false; rejection-append failure must NOT shadow the original Run error (got %v)", err)
+	}
+	if errors.Is(err, appendErr) {
+		t.Errorf("errors.Is(err, appendErr) = true; rejection-append error must be silently swallowed (got %v)", err)
+	}
+
+	// Defense-in-depth: even though the append errored, the
+	// kickoffer MUST have ATTEMPTED the call. Pin the attempt by
+	// checking the recorded list (the fake records every call,
+	// regardless of return value).
+	gotRejection := false
+	for _, et := range keep.recordedTypes() {
+		if et == spawn.EventTypeManifestRejectedAfterSpawnFailure {
+			gotRejection = true
+			break
+		}
+	}
+	if !gotRejection {
+		t.Errorf("kickoffer skipped the rejection-emit attempt; best-effort emit MUST still call Append")
+	}
+}
+
+// TestSpawnKickoffSourceCode_NoManifestDAOWrite is the M7.3.b
+// scope-defending source-grep AC: the rejection-emit MUST stay
+// audit-only. A regression that adds a Manifest-DAO Update / Reject
+// call from spawnkickoff.go would extend the kickoffer's blast
+// radius into the M2 manifest-storage seam without an explicit
+// dependency, which the file's lean-import shape is designed to
+// reject. The future M7.4-or-equivalent reconciler that consumes
+// the rejection audit row owns the Manifest mutation.
+func TestSpawnKickoffSourceCode_NoManifestDAOWrite(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("spawnkickoff.go")
+	if err != nil {
+		t.Fatalf("read spawnkickoff.go: %v", err)
+	}
+	src := string(body)
+
+	// Scan only NON-comment lines so the doc-block narrative
+	// (which legitimately mentions the future Manifest mutation)
+	// is not flagged. The forbidden substrings target the
+	// manifest-DAO surfaces a regression would touch — `Manifest`
+	// + a DAO verb (`Reject`, `Update`, `MarkRejected`).
+	forbiddenSubstrings := []string{
+		"ManifestDAO",
+		"manifestDAO",
+		"MarkManifestRejected",
+		"RejectManifest",
+		"core/pkg/manifest",
+		// Defense-in-depth against a regression that lands a
+		// Manifest mutation under a non-flagged identifier — e.g.
+		// a typed UpdateManifestStatus method on a satellite DAO,
+		// a generic Update that takes a Manifest pointer, or a
+		// manifest_status field-write through a DB query helper.
+		"manifest_status",
+		"Manifest.Status",
+		"UpdateManifest",
+		"manifest_versions", // any direct DB-table reference is
+		// out of scope for the audit-only kickoffer.
+	}
+	for _, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		for _, forbidden := range forbiddenSubstrings {
+			if strings.Contains(line, forbidden) {
+				t.Errorf("spawnkickoff.go contains forbidden substring %q (M7.3.b: rejection-emit MUST stay audit-only): %s",
+					forbidden, line)
+			}
+		}
+	}
+}
+
+// TestEventTypeManifestRejectedAfterSpawnFailure_PrefixCollisionFree
+// pins the M7.3.b rejection event_type against the M6.3.e prefix
+// vocabulary discipline: the event MUST use the `manifest_` prefix
+// (mirroring `manifest_approved_for_spawn` /
+// `manifest_approval_replayed_for_spawn`) and MUST NOT collide with
+// the `llm_turn_cost_*` family or the `saga_*` family. A future
+// rename that drops the prefix would feed bogus rows to the wrong
+// audit-chain consumer.
+func TestEventTypeManifestRejectedAfterSpawnFailure_PrefixCollisionFree(t *testing.T) {
+	t.Parallel()
+
+	et := spawn.EventTypeManifestRejectedAfterSpawnFailure
+	if !strings.HasPrefix(et, "manifest_") {
+		t.Errorf("event_type %q missing manifest_ prefix (vocabulary discipline)", et)
+	}
+	if strings.HasPrefix(et, "llm_turn_cost") {
+		t.Errorf("event_type %q has forbidden llm_turn_cost prefix (M6.3.e)", et)
+	}
+	if strings.HasPrefix(et, "saga_") {
+		t.Errorf("event_type %q has forbidden saga_ prefix (M7.1.a vocabulary)", et)
+	}
+	if strings.HasPrefix(et, "retire_") {
+		t.Errorf("event_type %q has forbidden retire_ prefix (M7.2.a vocabulary)", et)
+	}
+	// Distinct from the existing manifest_* events to avoid
+	// payload-shape ambiguity.
+	if et == spawn.EventTypeManifestApprovedForSpawn {
+		t.Errorf("event_type collides with EventTypeManifestApprovedForSpawn")
+	}
+	if et == spawn.EventTypeManifestApprovalReplayedForSpawn {
+		t.Errorf("event_type collides with EventTypeManifestApprovalReplayedForSpawn")
 	}
 }

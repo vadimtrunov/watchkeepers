@@ -187,9 +187,14 @@ func NewRunner(deps Dependencies) *Runner {
 //     (state-write precedes execute).
 //     b. Emit `saga_step_started` (audit-emit precedes execute).
 //     c. Call [Step.Execute].
-//     d. On error: call [SpawnSagaDAO.MarkFailed] with the
-//     resolved `last_error_class` sentinel, emit `saga_failed`,
-//     and return the wrapped step error.
+//     d. On error: call [SpawnSagaDAO.MarkFailed] with the resolved
+//     `last_error_class` sentinel, emit `saga_failed`, then run
+//     the M7.3.b reverse-rollback chain over every previously-
+//     successful step that implements [Compensator] (per-step
+//     `saga_step_compensated` / `saga_compensation_failed` rows
+//     followed by a saga-level `saga_compensated` summary row),
+//     and return the wrapped step error. Compensations run AFTER
+//     `saga_failed` so the audit chain stays causally readable.
 //     e. On success: emit `saga_step_completed`.
 //  3. After the last step succeeds (or immediately for an empty
 //     `steps` slice): call [SpawnSagaDAO.MarkCompleted] and emit
@@ -198,7 +203,11 @@ func NewRunner(deps Dependencies) *Runner {
 // All audit payloads carry only `saga_id`, `step_name`, and (failure
 // only) `last_error_class` per AC5. The returned error wraps the
 // original [Step.Execute] error chain on the failure path so callers
-// can `errors.Is` / `errors.As` on the underlying type.
+// can `errors.Is` / `errors.As` on the underlying type. Compensation
+// outcomes are audit-chain-only — they never alter the [Run] return
+// value, so the operator's "what made the saga fail?" question is
+// answered by the original step error regardless of how many
+// compensations succeeded or failed.
 func (r *Runner) Run(ctx context.Context, sagaID uuid.UUID, steps []Step) error {
 	if _, err := r.dao.Get(ctx, sagaID); err != nil {
 		if errors.Is(err, ErrSagaNotFound) {
@@ -206,6 +215,15 @@ func (r *Runner) Run(ctx context.Context, sagaID uuid.UUID, steps []Step) error 
 		}
 		return fmt.Errorf("saga: run: get: %w", err)
 	}
+
+	// executed tracks the steps whose [Step.Execute] returned nil,
+	// in forward order. When a later step fails, the M7.3.b
+	// reverse-rollback chain iterates this slice in reverse. Steps
+	// that do NOT implement [Compensator] are still added (so the
+	// reverse-walk's positional logic stays correct); the
+	// per-step Compensate dispatch in [Runner.compensate] simply
+	// skips non-implementers without emitting any audit row.
+	executed := make([]Step, 0, len(steps))
 
 	for _, step := range steps {
 		stepName := step.Name()
@@ -228,6 +246,7 @@ func (r *Runner) Run(ctx context.Context, sagaID uuid.UUID, steps []Step) error 
 				EventType: EventTypeSagaFailed,
 				Payload:   sagaFailedPayload(sagaID, stepName, lastErrorClass),
 			})
+			r.compensate(ctx, sagaID, executed)
 			return fmt.Errorf("saga: run: step %q: %w", stepName, execErr)
 		}
 
@@ -235,6 +254,7 @@ func (r *Runner) Run(ctx context.Context, sagaID uuid.UUID, steps []Step) error 
 			EventType: EventTypeSagaStepCompleted,
 			Payload:   stepCompletedPayload(sagaID, stepName),
 		})
+		executed = append(executed, step)
 	}
 
 	if err := r.dao.MarkCompleted(ctx, sagaID); err != nil {
@@ -257,18 +277,140 @@ func (r *Runner) emit(ctx context.Context, evt keeperslog.Event) {
 	_, _ = r.logger.Append(ctx, evt)
 }
 
+// compensate is the M7.3.b reverse-rollback chain. The [Runner] calls
+// it AFTER `saga_failed` has been emitted on the [Step.Execute]
+// failure path, with `executed` populated with every previously-
+// successful step in forward order. The chain walks `executed` in
+// REVERSE; for each step that implements [Compensator] it calls
+// [Compensator.Compensate] and emits a `saga_step_compensated` row on
+// nil OR a `saga_compensation_failed` row on non-nil. Steps that do
+// not implement [Compensator] are silently skipped — their forward
+// [Step.Execute] had no compensable side effect (e.g. M7.1.c.c
+// BotProfile, whose only side effect is a watchkeeper-row write that
+// the M7.1.c.a CreateApp.Compensate teardown of the Slack App makes
+// moot anyway).
+//
+// Best-effort: a non-nil [Compensator.Compensate] does NOT abort the
+// chain. The [Runner] continues with the remaining (earlier-in-
+// forward-order) compensations. The original [Step.Execute] error
+// stays the [Run] return value; compensation outcomes are
+// audit-chain-only.
+//
+// A saga-level [EventTypeSagaCompensated] summary row is emitted at
+// the end of the chain regardless of how many per-step compensations
+// fired (zero on a first-step failure; len(executed) on a later
+// failure). Operators who watch the audit chain see the boundary
+// without counting per-step rows.
+func (r *Runner) compensate(ctx context.Context, sagaID uuid.UUID, executed []Step) {
+	// Derive a rollback ctx that carries the parent's deadline +
+	// values but does NOT propagate the parent's cancellation. A
+	// request-bound parent ctx that fires Cancel mid-saga (HTTP
+	// timeout, operator-initiated abort, dispatcher tear-down) MUST
+	// NOT poison the rollback chain by uniformly returning
+	// `context.Canceled` from every Compensate. Per-Compensate
+	// timeouts belong to the step author (mirrors the M7.1.c.*
+	// step's "Execute owns its own retry / timeout policy"
+	// pattern). The audit chain still uses the ORIGINAL `ctx` for
+	// the saga-level summary row so the row inherits the parent's
+	// trace identifiers — only the per-step Compensate dispatch
+	// uses `compensateCtx`.
+	compensateCtx := context.WithoutCancel(ctx)
+
+	for i := len(executed) - 1; i >= 0; i-- {
+		step := executed[i]
+		compensator, ok := step.(Compensator)
+		if !ok {
+			continue
+		}
+		stepName := step.Name()
+		err := safeCompensate(compensateCtx, compensator)
+		if err != nil {
+			r.emit(ctx, keeperslog.Event{
+				EventType: EventTypeSagaCompensationFailed,
+				Payload: sagaCompensationFailedPayload(
+					sagaID,
+					stepName,
+					resolveCompensateLastErrorClass(err),
+				),
+			})
+			continue
+		}
+		r.emit(ctx, keeperslog.Event{
+			EventType: EventTypeSagaStepCompensated,
+			Payload:   stepCompensatedPayload(sagaID, stepName),
+		})
+	}
+	r.emit(ctx, keeperslog.Event{
+		EventType: EventTypeSagaCompensated,
+		Payload:   sagaCompensatedPayload(sagaID),
+	})
+}
+
+// safeCompensate dispatches [Compensator.Compensate] under a
+// `defer/recover` so a panicking step impl converts to a typed
+// error rather than tearing down the saga goroutine and skipping
+// the [EventTypeSagaCompensated] summary row. The recovered panic
+// surfaces as [errPanicDuringCompensate], which
+// [resolveCompensateLastErrorClass] resolves via
+// [LastErrorClassed] to the stable
+// [LastErrorClassCompensatePanic] sentinel — distinct from the
+// `step_compensate_error` default so an operator filtering the
+// audit chain can pin "rollback impl panicked" against the
+// closed-set vocabulary.
+func safeCompensate(ctx context.Context, c Compensator) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = errPanicDuringCompensate{recovered: rec}
+		}
+	}()
+	return c.Compensate(ctx)
+}
+
+// errPanicDuringCompensate is the typed error
+// [safeCompensate] returns when a [Compensator.Compensate] impl
+// panics. Implements [LastErrorClassed] so the
+// `saga_compensation_failed` audit row classes it as
+// [LastErrorClassCompensatePanic] without parsing the recovered
+// value's string form. The recovered value itself is intentionally
+// NOT included in the audit payload (M2b.7 PII discipline — a
+// panicking impl could carry secrets in its recovered value).
+type errPanicDuringCompensate struct{ recovered any }
+
+func (e errPanicDuringCompensate) Error() string {
+	return fmt.Sprintf("saga: compensate panicked: %v", e.recovered)
+}
+
+func (e errPanicDuringCompensate) LastErrorClass() string {
+	return LastErrorClassCompensatePanic
+}
+
 // resolveLastErrorClass walks the supplied error chain and returns
 // the first [LastErrorClassed.LastErrorClass] value it finds, or
 // [LastErrorClassDefault] when no link in the chain implements the
 // interface. Resolved via [errors.As] so wrapped errors are enough.
 func resolveLastErrorClass(err error) string {
+	return resolveLastErrorClassWithDefault(err, LastErrorClassDefault)
+}
+
+// resolveLastErrorClassWithDefault is the shared implementation behind
+// [resolveLastErrorClass] and the M7.3.b
+// [resolveCompensateLastErrorClass]. The two surfaces differ only in
+// the fallback sentinel emitted when the supplied error chain does
+// not implement [LastErrorClassed]: the [Step.Execute] failure path
+// defaults to [LastErrorClassDefault] (`step_execute_error`); the
+// [Compensator.Compensate] failure path defaults to
+// [LastErrorClassCompensateDefault] (`step_compensate_error`). The
+// two are deliberately distinct so a downstream consumer can branch
+// on the audit-chain sentinel without parsing the surrounding
+// `event_type`.
+func resolveLastErrorClassWithDefault(err error, fallback string) string {
 	var classed LastErrorClassed
 	if errors.As(err, &classed) {
 		if class := classed.LastErrorClass(); class != "" {
 			return class
 		}
 	}
-	return LastErrorClassDefault
+	return fallback
 }
 
 // stepStartedPayload composes the closed-set `saga_step_started`

@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -76,6 +77,31 @@ const EventTypeManifestApprovedForSpawn = "manifest_approved_for_spawn"
 // the discarded second-call candidate). All ids are sourced from
 // [saga.IdempotentInsertResult.Existing], not the second-call args.
 const EventTypeManifestApprovalReplayedForSpawn = "manifest_approval_replayed_for_spawn"
+
+// EventTypeManifestRejectedAfterSpawnFailure is the M7.3.b audit event
+// type the kickoffer emits AFTER [saga.Runner.Run] returns non-nil.
+// The row is the operator-visible "we tried to spawn this manifest,
+// the saga aborted, the rollback chain ran" signal. A downstream
+// consumer (e.g. a future Manifest-status reconciler) treats the row
+// as the trigger to mark the Manifest rejected; M7.3.b ships the
+// emit only — the Manifest-DAO write is deferred to a follow-up so
+// this PR's surface stays narrow per the roadmap's "no concrete
+// Compensate impls — foundation for M7.3.c" wording.
+//
+// Distinct prefix (`manifest_`) so it does NOT collide with the
+// `saga_*` family established in M7.1.a or the `llm_turn_cost_*`
+// family established in M6.3.e. Distinct event_type from the M7.3.a
+// `manifest_approval_replayed_for_spawn` row so an operator can
+// branch on the wire vocabulary without parsing payload structure.
+//
+// The payload carries the FIRST-call's `saga_id` /
+// `manifest_version_id` / `watchkeeper_id` (sourced from
+// [saga.IdempotentInsertResult.Existing] so a catch-up rejection
+// names the original saga, not the discarded second-call
+// candidate) plus `agent_id` (the bot that emitted the row) and
+// `approval_token_prefix` (the M6.3.b token-prefix-display lesson —
+// never the full bearer token).
+const EventTypeManifestRejectedAfterSpawnFailure = "manifest_rejected_after_spawn_failure"
 
 // Closed-set audit payload keys. Hoisted to constants so the
 // payload-shape regression test pins the wire vocabulary (M2b.7 PII
@@ -328,6 +354,49 @@ func (k *SpawnKickoffer) Kickoff(
 	})
 
 	if err := k.runner.Run(ctx, emitSagaID, k.steps); err != nil {
+		// M7.3.b: the saga aborted (a step's Execute returned
+		// non-nil; the runner has already emitted `saga_failed` AND
+		// run the reverse-rollback chain over the previously-
+		// successful steps). Emit the operator-visible
+		// `manifest_rejected_after_spawn_failure` row so a
+		// downstream consumer can mark the Manifest rejected and
+		// surface the failure — best-effort: a non-nil append does
+		// NOT shadow the original Run error (the operator's "what
+		// failed?" question is answered by the saga's wrap chain,
+		// not by the rejection-emit's wrap chain). Ids are sourced
+		// from `result.Existing` so the catch-up-on-pending path
+		// names the FIRST-call's saga, mirroring the M7.3.a
+		// replay-payload contract.
+		if _, appendErr := k.logger.Append(ctx, keeperslog.Event{
+			EventType: EventTypeManifestRejectedAfterSpawnFailure,
+			Payload: manifestRejectedAfterSpawnFailurePayload(
+				emitSagaID,
+				emitManifestVersionID,
+				emitWatchkeeperID,
+				approvalToken,
+				k.agentID,
+			),
+		}); appendErr != nil {
+			// Best-effort emit: a non-nil append does NOT shadow the
+			// original Run error — but the kickoffer's call site MUST
+			// surface the dropped rejection row to ops so an operator
+			// debugging "why is the rejection row missing from
+			// keepers_log for this saga_id" has a structured signal at
+			// the call boundary, NOT just the keeperslog writer's
+			// internal diagnostic sink (which is opaque to the
+			// kickoffer's interface seam). slog.Warn picks up the
+			// configured slog.Default() handler in production; in
+			// unit tests with no handler wired the entry is silently
+			// formatted to stderr and ignored — defense-in-depth
+			// against a future regression that masks all rejection-
+			// row drops.
+			slog.WarnContext(
+				ctx, "spawn: kickoff: append manifest_rejected_after_spawn_failure failed",
+				"saga_id", emitSagaID.String(),
+				"agent_id", k.agentID,
+				"err_class", "manifest_rejected_after_spawn_failure_emit_dropped",
+			)
+		}
 		return fmt.Errorf("spawn: kickoff: run saga: %w", err)
 	}
 	return nil
@@ -383,6 +452,49 @@ func manifestApprovalReplayedPayload(
 		kickoffPayloadKeyApprovalTokenPrefix: approvalTokenPrefix(approvalToken),
 		kickoffPayloadKeyAgentID:             agentID,
 		kickoffPayloadKeyPreviousStatus:      string(previousStatus),
+	}
+}
+
+// manifestRejectedAfterSpawnFailurePayload composes the closed-set
+// `manifest_rejected_after_spawn_failure` payload. Carries the saga's
+// id, manifest version, target watchkeeper, the bot's agent_id, and
+// the truncated approval-token prefix so a downstream consumer can
+// correlate the rejection row to the saga's other audit rows
+// (`saga_failed`, `saga_step_compensated`*, `saga_compensated`)
+// without a follow-up DAO read.
+//
+// All ids MUST be sourced from [saga.IdempotentInsertResult.Existing]
+// at the call site — codex iter-1 lesson held forward from M7.3.a:
+// the catch-up-on-pending path's caller-supplied
+// `manifestVersionID` / `watchkeeperID` are the SECOND call's args
+// (which the DAO discarded); only `Existing.*` carries the FIRST
+// call's authoritative ids. Pre-iter-1 the kickoffer wired the
+// new-call args into this payload directly; the M7.3.b implementation
+// reuses the `emitManifestVersionID` / `emitWatchkeeperID` /
+// `emitSagaID` locals already populated from `result.Existing` for
+// the `manifest_approved_for_spawn` emit, so the rejection row stays
+// consistent with the approval row by construction.
+//
+// PII guard: this function is the SOLE composer of the payload; the
+// closed-set keys mirror `manifest_approval_replayed_for_spawn`
+// MINUS the `previous_status` key (the rejection row is emitted
+// post-Run on a saga that the runner has already transitioned to
+// `failed`, so a `previous_status` would always be `failed` and
+// adds no signal). NEVER carries the full approval token, the
+// underlying step error, or any step-internal params — the saga's
+// own `saga_failed` row carries the `last_error_class` sentinel.
+func manifestRejectedAfterSpawnFailurePayload(
+	sagaID uuid.UUID,
+	manifestVersionID uuid.UUID,
+	watchkeeperID uuid.UUID,
+	approvalToken, agentID string,
+) map[string]any {
+	return map[string]any{
+		kickoffPayloadKeySagaID:              sagaID.String(),
+		kickoffPayloadKeyManifestVersionID:   manifestVersionID.String(),
+		kickoffPayloadKeyWatchkeeperID:       watchkeeperID.String(),
+		kickoffPayloadKeyApprovalTokenPrefix: approvalTokenPrefix(approvalToken),
+		kickoffPayloadKeyAgentID:             agentID,
 	}
 }
 

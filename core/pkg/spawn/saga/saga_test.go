@@ -310,6 +310,11 @@ func TestRunner_Run_SecondStepFails_StopsBeforeThirdStep(t *testing.T) {
 		saga.EventTypeSagaStepCompleted, // step_one
 		saga.EventTypeSagaStepStarted,   // step_two
 		saga.EventTypeSagaFailed,        // step_two
+		// step_one + step_two are non-Compensator stubs, so the
+		// M7.3.b reverse-rollback chain emits no per-step rows;
+		// the saga-level summary `saga_compensated` row is
+		// emitted unconditionally on the failure path.
+		saga.EventTypeSagaCompensated,
 	}
 	if len(got) != len(wantTypes) {
 		t.Fatalf("audit-event count = %d, want %d (events: %+v)", len(got), len(wantTypes), got)
@@ -480,6 +485,42 @@ func TestRunner_AuditPayloads_PIIDiscipline_KeysOnly(t *testing.T) {
 	}
 }
 
+// payloadKeySpec describes the closed-set required / forbidden keys
+// per saga event type. Hoisted as a table so the assertPayloadKeys
+// dispatcher stays under the project's gocyclo threshold.
+type payloadKeySpec struct {
+	requireSagaID         bool
+	requireStepName       bool
+	forbidStepName        bool
+	requireLastErrorClass bool
+	forbidLastErrorClass  bool
+}
+
+//nolint:gochecknoglobals // closed-set table-driven fixture for assertPayloadKeys; per-test allocation would obscure the spec.
+var payloadKeySpecs = map[string]payloadKeySpec{
+	saga.EventTypeSagaStepStarted: {
+		requireSagaID: true, requireStepName: true, forbidLastErrorClass: true,
+	},
+	saga.EventTypeSagaStepCompleted: {
+		requireSagaID: true, requireStepName: true, forbidLastErrorClass: true,
+	},
+	saga.EventTypeSagaFailed: {
+		requireSagaID: true, requireStepName: true, requireLastErrorClass: true,
+	},
+	saga.EventTypeSagaCompleted: {
+		requireSagaID: true, forbidStepName: true,
+	},
+	saga.EventTypeSagaStepCompensated: {
+		requireSagaID: true, requireStepName: true, forbidLastErrorClass: true,
+	},
+	saga.EventTypeSagaCompensationFailed: {
+		requireSagaID: true, requireStepName: true, requireLastErrorClass: true,
+	},
+	saga.EventTypeSagaCompensated: {
+		requireSagaID: true, forbidStepName: true,
+	},
+}
+
 func assertPayloadKeys(t *testing.T, idx int, eventType string, data map[string]any) {
 	t.Helper()
 
@@ -495,36 +536,33 @@ func assertPayloadKeys(t *testing.T, idx int, eventType string, data map[string]
 		}
 	}
 
-	switch eventType {
-	case saga.EventTypeSagaStepStarted, saga.EventTypeSagaStepCompleted:
-		if _, ok := data["saga_id"]; !ok {
-			t.Errorf("row[%d] event_type=%q missing saga_id", idx, eventType)
-		}
-		if _, ok := data["step_name"]; !ok {
-			t.Errorf("row[%d] event_type=%q missing step_name", idx, eventType)
-		}
-		if _, ok := data["last_error_class"]; ok {
-			t.Errorf("row[%d] event_type=%q must NOT carry last_error_class", idx, eventType)
-		}
-	case saga.EventTypeSagaFailed:
-		if _, ok := data["saga_id"]; !ok {
-			t.Errorf("row[%d] event_type=%q missing saga_id", idx, eventType)
-		}
-		if _, ok := data["step_name"]; !ok {
-			t.Errorf("row[%d] event_type=%q missing step_name", idx, eventType)
-		}
-		if _, ok := data["last_error_class"]; !ok {
-			t.Errorf("row[%d] event_type=%q missing last_error_class", idx, eventType)
-		}
-	case saga.EventTypeSagaCompleted:
-		if _, ok := data["saga_id"]; !ok {
-			t.Errorf("row[%d] event_type=%q missing saga_id", idx, eventType)
-		}
-		if _, ok := data["step_name"]; ok {
-			t.Errorf("row[%d] event_type=%q must NOT carry step_name (saga-level event)", idx, eventType)
-		}
-	default:
+	spec, ok := payloadKeySpecs[eventType]
+	if !ok {
 		t.Errorf("row[%d] unexpected event_type=%q", idx, eventType)
+		return
+	}
+	checkPayloadKeyPresence(t, idx, eventType, data, spec)
+}
+
+func checkPayloadKeyPresence(t *testing.T, idx int, eventType string, data map[string]any, spec payloadKeySpec) {
+	t.Helper()
+	_, hasSaga := data["saga_id"]
+	if spec.requireSagaID && !hasSaga {
+		t.Errorf("row[%d] event_type=%q missing saga_id", idx, eventType)
+	}
+	_, hasStep := data["step_name"]
+	if spec.requireStepName && !hasStep {
+		t.Errorf("row[%d] event_type=%q missing step_name", idx, eventType)
+	}
+	if spec.forbidStepName && hasStep {
+		t.Errorf("row[%d] event_type=%q must NOT carry step_name (saga-level event)", idx, eventType)
+	}
+	_, hasErrClass := data["last_error_class"]
+	if spec.requireLastErrorClass && !hasErrClass {
+		t.Errorf("row[%d] event_type=%q missing last_error_class", idx, eventType)
+	}
+	if spec.forbidLastErrorClass && hasErrClass {
+		t.Errorf("row[%d] event_type=%q must NOT carry last_error_class", idx, eventType)
 	}
 }
 
@@ -542,6 +580,9 @@ func TestEventTypes_NoLLMTurnCostPrefix(t *testing.T) {
 		saga.EventTypeSagaStepCompleted,
 		saga.EventTypeSagaFailed,
 		saga.EventTypeSagaCompleted,
+		saga.EventTypeSagaStepCompensated,
+		saga.EventTypeSagaCompensationFailed,
+		saga.EventTypeSagaCompensated,
 	} {
 		if strings.HasPrefix(et, "llm_turn_cost") {
 			t.Errorf("event_type %q has forbidden llm_turn_cost prefix (M6.3.e)", et)
