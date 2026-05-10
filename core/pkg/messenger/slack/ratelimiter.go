@@ -117,6 +117,8 @@ var defaultMethodTiers = map[string]Tier{
 	"conversations.info":    Tier3,
 	"conversations.list":    Tier2,
 	"conversations.members": Tier4,
+	"conversations.history": Tier3,
+	"conversations.open":    Tier3,
 	"auth.test":             Tier3,
 }
 

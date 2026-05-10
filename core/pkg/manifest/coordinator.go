@@ -49,9 +49,20 @@ const (
 	// personality, model, autonomy, and notebook recall tunables are
 	// unchanged from V1.
 	//
-	// Future M8.2.c / M8.2.d sub-items add V3 / V4 rows under the same
-	// pattern (new id + version_no, INSERT-only, ON CONFLICT (id) DO
-	// NOTHING) so historical versions remain recoverable from the
-	// migration sequence.
+	// Future M8.2.d sub-item adds a V4 row under the same pattern
+	// (new id + version_no, INSERT-only, ON CONFLICT (id) DO NOTHING)
+	// so historical versions remain recoverable from the migration
+	// sequence.
 	CoordinatorManifestVersionV2ID = "22000000-0000-4000-8000-000000000000"
+
+	// CoordinatorManifestVersionV3ID is the `manifest_version.id`
+	// (version_no=3) UUID seeded by migration 026 (M8.2.c). Supersedes
+	// [CoordinatorManifestVersionV2ID] for production boot (keepclient
+	// picks the highest version_no). The V3 row extends the toolset
+	// with three Slack tools (`fetch_watch_orders`, `nudge_reviewer`,
+	// `post_daily_briefing`) and grants `self` on each in the
+	// authority matrix; system prompt picks up narrative guidance for
+	// the new tools. Personality, model, autonomy, and notebook recall
+	// tunables are unchanged from V2.
+	CoordinatorManifestVersionV3ID = "23000000-0000-4000-8000-000000000000"
 )

@@ -59,6 +59,22 @@ var (
 	// hello timeout, etc.). Callers awaiting [messenger.Subscription.Stop]
 	// receive this wrapped error; matchable via [errors.Is].
 	ErrReconnectExhausted = errors.New("slack: socket mode: reconnect budget exhausted")
+
+	// ErrMissingScope surfaces when Slack returns
+	// `error: "missing_scope"` — the bearer token lacks one of the
+	// OAuth scopes required for the method (e.g. `im:history` for
+	// `conversations.history` against an IM channel,
+	// `im:write` for `conversations.open`). Callers managing scope
+	// requests match this sentinel to surface a re-consent prompt
+	// rather than a transient retry.
+	ErrMissingScope = errors.New("slack: missing required oauth scope")
+
+	// ErrCannotDMBot surfaces when Slack returns
+	// `error: "cannot_dm_bot"` from `conversations.open` — the target
+	// user id resolves to a bot account that the calling bot cannot
+	// DM. The Coordinator surfaces this as a refusal to the agent so
+	// it can re-plan; matchable via [errors.Is].
+	ErrCannotDMBot = errors.New("slack: cannot DM bot account")
 )
 
 // APIError carries the parsed envelope from a Slack response that
@@ -134,7 +150,7 @@ func (e *APIError) Unwrap() error {
 	switch e.Code {
 	case "channel_not_found":
 		return ErrChannelNotFound
-	case "user_not_found":
+	case "user_not_found", "users_not_found":
 		return ErrUserNotFound
 	case "app_not_found":
 		return ErrAppNotFound
@@ -144,6 +160,10 @@ func (e *APIError) Unwrap() error {
 		return ErrTokenExpired
 	case "ratelimited":
 		return ErrRateLimited
+	case "missing_scope":
+		return ErrMissingScope
+	case "cannot_dm_bot":
+		return ErrCannotDMBot
 	}
 	if e.Status == 429 {
 		return ErrRateLimited
