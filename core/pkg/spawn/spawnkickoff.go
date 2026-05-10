@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -48,15 +49,33 @@ type kickoffLogAppender interface {
 var _ kickoffLogAppender = keepersLogAppender(nil)
 
 // EventTypeManifestApprovedForSpawn is the M7.1.b audit event type the
-// kickoffer emits BEFORE inserting the saga row. Hoisted to a constant
-// so the payload-shape regression test pins the wire vocabulary AND so
-// a downstream consumer can match by string equality without a typo
+// kickoffer emits AFTER persisting a freshly-inserted saga row via
+// [saga.SpawnSagaDAO.InsertIfAbsent]. Hoisted to a constant so the
+// payload-shape regression test pins the wire vocabulary AND so a
+// downstream consumer can match by string equality without a typo
 // risk.
 //
 // Distinct prefix (`manifest_`) so it does NOT collide with the
 // `llm_turn_cost_*` family established in M6.3.e or the `saga_*`
 // family established in M7.1.a.
 const EventTypeManifestApprovedForSpawn = "manifest_approved_for_spawn"
+
+// EventTypeManifestApprovalReplayedForSpawn is the M7.3.a audit event
+// type the kickoffer emits when the supplied approval_token's
+// idempotency_key already names a row (the upstream approval was
+// resubmitted, e.g. Slack retry / double-click) AND the prior saga
+// has already advanced beyond `pending`. Distinct from
+// `manifest_approved_for_spawn` so a downstream consumer can branch
+// on the wire `event_type` and surface "approval replayed; no second
+// saga, no second Slack App" without parsing payload structure.
+//
+// The payload carries the SAME closed-set keys as
+// `manifest_approved_for_spawn` plus the FIRST-call's `saga_id`,
+// `watchkeeper_id`, and `previous_status` keys (codex iter-1 Major:
+// the replay event MUST authoritatively name the existing saga, not
+// the discarded second-call candidate). All ids are sourced from
+// [saga.IdempotentInsertResult.Existing], not the second-call args.
+const EventTypeManifestApprovalReplayedForSpawn = "manifest_approval_replayed_for_spawn"
 
 // Closed-set audit payload keys. Hoisted to constants so the
 // payload-shape regression test pins the wire vocabulary (M2b.7 PII
@@ -65,6 +84,9 @@ const (
 	kickoffPayloadKeyManifestVersionID   = "manifest_version_id"
 	kickoffPayloadKeyApprovalTokenPrefix = "approval_token_prefix"
 	kickoffPayloadKeyAgentID             = "agent_id"
+	kickoffPayloadKeySagaID              = "saga_id"
+	kickoffPayloadKeyWatchkeeperID       = "watchkeeper_id"
+	kickoffPayloadKeyPreviousStatus      = "previous_status"
 	approvalTokenPrefixLen               = 6
 	approvalTokenPrefixPrefix            = "tok-"
 )
@@ -182,33 +204,63 @@ func NewSpawnKickoffer(deps SpawnKickoffDeps) *SpawnKickoffer {
 }
 
 // Kickoff seeds the spawn saga and runs it through the
-// construction-time-registered step list.
+// construction-time-registered step list, OR short-circuits with a
+// `manifest_approval_replayed_for_spawn` audit event when the supplied
+// `approvalToken` already names a persisted saga that has advanced
+// past `pending` (the M7.3.a idempotency replay path), OR resumes a
+// `pending` saga whose original audit-append failed mid-flight (the
+// M7.3.a catch-up path — codex iter-1 Critical fix).
 //
 // Sequence (load-bearing — the order is pinned by an ordering test):
 //
-//  1. Emit `manifest_approved_for_spawn` audit event (audit-emit
-//     precedes state-write per the M6.3.e + M7.1.a pattern; the
-//     audit row is the canonical "we tried" signal even when
-//     state-persistence fails afterwards).
-//  2. Call [saga.SpawnSagaDAO.Insert] to persist the saga row
-//     (Insert MUST precede Run — the runner's first action is
-//     [saga.SpawnSagaDAO.Get], which would fail without the row).
-//  3. Seed the per-call [saga.SpawnContext] on `ctx` with the
-//     manifest_version id, the watchkeeperID (=AgentID), and the
-//     supplied claim. OAuthCode stays empty in the Phase-1
-//     admin-grant flow; the M7.1.c.b.b OAuthInstall step
-//     short-circuits with a wrapped sentinel until the operator
-//     supplies a code (a future M7.x will replace this with an
-//     auto-install callback HTTP route).
-//  4. Call [saga.Runner.Run] with the registered step list. A
-//     nil / empty step list completes immediately and emits a
-//     single `saga_completed` event (matches the M7.1.b
-//     zero-step behaviour).
+//  1. Fail-fast validation rejects `uuid.Nil` sagaID /
+//     manifestVersionID / watchkeeperID and an empty / whitespace-only
+//     `approvalToken` with [ErrInvalidKickoffArgs] BEFORE any
+//     audit-emit / state-write side effect. An empty approval token
+//     would silently bypass the idempotency dedup at the DAO layer
+//     ([saga.ErrEmptyIdempotencyKey]).
+//  2. Call [saga.SpawnSagaDAO.InsertIfAbsent] with `approvalToken`
+//     as the idempotency_key, persisting `watchkeeperID` on the
+//     fresh-insert row so the M7.3.a replay-payload contract can
+//     emit the FIRST-call's id (codex iter-1 Major).
+//  3. On INSERT (`result.Inserted == true`): emit
+//     `manifest_approved_for_spawn` (the original M7.1.b audit row)
+//     using the new-call's args, seed the per-call
+//     [saga.SpawnContext] on `ctx`, and call [saga.Runner.Run].
+//  4. On REPLAY of an ALREADY-RUN saga
+//     (`result.Inserted == false` AND `Existing.Status !=
+//     SagaStatePending`): emit
+//     `manifest_approval_replayed_for_spawn` carrying the FIRST-call's
+//     `saga_id` / `manifest_version_id` / `watchkeeper_id` /
+//     `previous_status`, then return nil. No second
+//     `manifest_approved_for_spawn` row, no second
+//     [saga.Runner.Run].
+//  5. On REPLAY of a STUCK saga (`result.Inserted == false` AND
+//     `Existing.Status == SagaStatePending`): the original Kickoff's
+//     audit-append succeeded the InsertIfAbsent BUT failed the
+//     `manifest_approved_for_spawn` emit OR crashed before reaching
+//     [saga.Runner.Run]. Catch-up: emit
+//     `manifest_approved_for_spawn` (using the FIRST-call's ids
+//     via `Existing`), seed [saga.SpawnContext] with
+//     `Existing.ManifestVersionID` + `Existing.WatchkeeperID` +
+//     the new call's `claim`, and run [saga.Runner.Run] for the
+//     existing saga id. The audit chain catches up to the original
+//     intent rather than parking the saga in `pending` forever.
+//
+// The catch-up branch (step 5) is the codex iter-1 Critical fix:
+// without it, a transient keeperslog outage between
+// `InsertIfAbsent` and the original `manifest_approved_for_spawn`
+// emit would create a row stuck in `pending`, the operator's retry
+// would fall into the replay branch and silently no-op, and the
+// approval_token would be locked in `pending_approvals` (resolved
+// state) so no future flow could complete the saga. Resume on
+// `pending` is safe because the runner is not yet running; no step
+// state has been emitted; the catch-up path emits exactly the
+// audit chain a successful first call would have produced.
 //
 // Errors are wrapped with the `spawn:` prefix; the underlying
 // keeperslog / saga sentinels remain matchable via [errors.Is]
-// through the wrap chain. A non-nil error return surfaces back to
-// the dispatcher, which audits it as `approval_replay_failed`.
+// through the wrap chain.
 func (k *SpawnKickoffer) Kickoff(
 	ctx context.Context,
 	sagaID uuid.UUID,
@@ -217,12 +269,6 @@ func (k *SpawnKickoffer) Kickoff(
 	claim saga.SpawnClaim,
 	approvalToken string,
 ) error {
-	// Fail-fast validation runs BEFORE Append/Insert so a malformed
-	// kickoff leaves no audit row + no saga row. The dispatcher's
-	// production caller mints both ids via uuid.New(), so a Nil here
-	// is a programmer / wiring bug — surfacing it as
-	// `approval_replay_failed` (the dispatcher's existing error
-	// branch) is preferable to a half-emitted audit chain.
 	if sagaID == uuid.Nil {
 		return fmt.Errorf("%w: empty sagaID", ErrInvalidKickoffArgs)
 	}
@@ -232,25 +278,56 @@ func (k *SpawnKickoffer) Kickoff(
 	if watchkeeperID == uuid.Nil {
 		return fmt.Errorf("%w: empty watchkeeperID", ErrInvalidKickoffArgs)
 	}
+	// Whitespace-only tokens normalise to empty for the
+	// idempotency_key contract — see [saga.ErrEmptyIdempotencyKey].
+	if strings.TrimSpace(approvalToken) == "" {
+		return fmt.Errorf("%w: empty approvalToken", ErrInvalidKickoffArgs)
+	}
 
+	result, err := k.dao.InsertIfAbsent(ctx, sagaID, manifestVersionID, watchkeeperID, approvalToken)
+	if err != nil {
+		return fmt.Errorf("spawn: kickoff: insert saga: %w", err)
+	}
+
+	if !result.Inserted && result.Existing.Status != saga.SagaStatePending {
+		if _, replayErr := k.logger.Append(ctx, keeperslog.Event{
+			EventType: EventTypeManifestApprovalReplayedForSpawn,
+			Payload: manifestApprovalReplayedPayload(
+				result.Existing.ID,
+				result.Existing.ManifestVersionID,
+				result.Existing.WatchkeeperID,
+				approvalToken,
+				k.agentID,
+				result.Existing.Status,
+			),
+		}); replayErr != nil {
+			return fmt.Errorf("spawn: kickoff: append manifest_approval_replayed_for_spawn: %w", replayErr)
+		}
+		return nil
+	}
+
+	// Insert path OR catch-up-on-pending path: in both cases the saga
+	// is about to (or originally was about to) run, so emit
+	// `manifest_approved_for_spawn` and continue to Runner.Run. The
+	// catch-up branch sources its ids from `result.Existing` so the
+	// audit row authoritatively names the FIRST-call's saga.
+	emitSagaID := result.Existing.ID
+	emitManifestVersionID := result.Existing.ManifestVersionID
+	emitWatchkeeperID := result.Existing.WatchkeeperID
 	if _, err := k.logger.Append(ctx, keeperslog.Event{
 		EventType: EventTypeManifestApprovedForSpawn,
-		Payload:   manifestApprovedPayload(manifestVersionID, approvalToken, k.agentID),
+		Payload:   manifestApprovedPayload(emitManifestVersionID, approvalToken, k.agentID),
 	}); err != nil {
 		return fmt.Errorf("spawn: kickoff: append manifest_approved_for_spawn: %w", err)
 	}
 
-	if err := k.dao.Insert(ctx, sagaID, manifestVersionID); err != nil {
-		return fmt.Errorf("spawn: kickoff: insert saga: %w", err)
-	}
-
 	ctx = saga.WithSpawnContext(ctx, saga.SpawnContext{
-		ManifestVersionID: manifestVersionID,
-		AgentID:           watchkeeperID,
+		ManifestVersionID: emitManifestVersionID,
+		AgentID:           emitWatchkeeperID,
 		Claim:             claim,
 	})
 
-	if err := k.runner.Run(ctx, sagaID, k.steps); err != nil {
+	if err := k.runner.Run(ctx, emitSagaID, k.steps); err != nil {
 		return fmt.Errorf("spawn: kickoff: run saga: %w", err)
 	}
 	return nil
@@ -270,6 +347,42 @@ func manifestApprovedPayload(manifestVersionID uuid.UUID, approvalToken, agentID
 		kickoffPayloadKeyManifestVersionID:   manifestVersionID.String(),
 		kickoffPayloadKeyApprovalTokenPrefix: approvalTokenPrefix(approvalToken),
 		kickoffPayloadKeyAgentID:             agentID,
+	}
+}
+
+// manifestApprovalReplayedPayload composes the closed-set
+// `manifest_approval_replayed_for_spawn` payload. Carries the prior
+// saga's id, target watchkeeper id, manifest version, and status so a
+// downstream consumer can distinguish "replayed mid-flight" from
+// "replayed after terminal state" AND correlate the replay row to
+// the saga's persisted bot id without a follow-up DAO read.
+//
+// All ids are sourced from [saga.IdempotentInsertResult.Existing] —
+// codex iter-1 Major fix: pre-iter-1 the payload accepted the
+// SECOND-call's `manifestVersionID` and emitted it verbatim, which
+// could produce a self-contradictory row when a retried approval
+// supplied a different `manifestVersionID` than the original (the
+// DAO discards the second-call value but the audit emit kept it).
+//
+// PII guard: this function is the SOLE composer of the payload; the
+// closed-set keys mirror `manifest_approved_for_spawn` plus three
+// replay-only fields (`saga_id`, `watchkeeper_id`, `previous_status`).
+// NEVER carries the full approval token, the original step's params,
+// or any error string.
+func manifestApprovalReplayedPayload(
+	existingSagaID uuid.UUID,
+	existingManifestVersionID uuid.UUID,
+	existingWatchkeeperID uuid.UUID,
+	approvalToken, agentID string,
+	previousStatus saga.SagaState,
+) map[string]any {
+	return map[string]any{
+		kickoffPayloadKeySagaID:              existingSagaID.String(),
+		kickoffPayloadKeyManifestVersionID:   existingManifestVersionID.String(),
+		kickoffPayloadKeyWatchkeeperID:       existingWatchkeeperID.String(),
+		kickoffPayloadKeyApprovalTokenPrefix: approvalTokenPrefix(approvalToken),
+		kickoffPayloadKeyAgentID:             agentID,
+		kickoffPayloadKeyPreviousStatus:      string(previousStatus),
 	}
 }
 
