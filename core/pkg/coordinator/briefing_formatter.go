@@ -106,7 +106,7 @@ func escapeMrkdwn(s string) string {
 	if !strings.ContainsAny(s, "*_~`><") {
 		return s
 	}
-	const zws = "​"
+	const zws = "\u200b"
 	var b strings.Builder
 	b.Grow(len(s) + 8)
 	for _, r := range s {

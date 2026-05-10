@@ -97,7 +97,7 @@ func TestEscapeMrkdwn_NeutralisesSlackMentionSyntax(t *testing.T) {
 	// Defence-in-depth: assert the structural `<@U…>` bracketing is
 	// broken by ZWS insertion — the `<` rune is present but no longer
 	// adjacent to `@`.
-	const zws = "​"
+	const zws = "\u200b"
 	wantPrefix := zws + "<" + zws
 	if !strings.HasPrefix(got, wantPrefix) {
 		t.Errorf("escapeMrkdwn(%q) did not wrap the leading `<` with ZWS; got %q", mention, got)
