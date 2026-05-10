@@ -300,7 +300,6 @@ func TestMemoryWatchkeeperSlackAppCredsDAO_WipeInstallTokens_PreservesAppCredsRo
 	if got != creds {
 		t.Errorf("app-creds row mutated by WipeInstallTokens: got %+v, want %+v", got, creds)
 	}
-
 	// And the install-tokens row IS gone.
 	if _, _, _, _, _, ok := dao.GetInstallTokens(watchkeeperID); ok {
 		t.Errorf("install tokens still present after Wipe; expected absent")
