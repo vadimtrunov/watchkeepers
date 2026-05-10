@@ -91,6 +91,7 @@ func newNotebookProvisionStep(t *testing.T, provisioner spawn.NotebookProvisione
 	t.Helper()
 	return spawn.NewNotebookProvisionStep(spawn.NotebookProvisionStepDeps{
 		Provisioner: provisioner,
+		Archiver:    nopNotebookProvisionArchiver{},
 		Profile:     profile,
 	})
 }
@@ -124,6 +125,21 @@ func TestNewNotebookProvisionStep_PanicsOnNilProvisioner(t *testing.T) {
 	}()
 	_ = spawn.NewNotebookProvisionStep(spawn.NotebookProvisionStepDeps{
 		Provisioner: nil,
+		Archiver:    nopNotebookProvisionArchiver{},
+		Profile:     canonicalNotebookProfile(),
+	})
+}
+
+func TestNewNotebookProvisionStep_PanicsOnNilArchiver(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("NewNotebookProvisionStep with nil Archiver did not panic")
+		}
+	}()
+	_ = spawn.NewNotebookProvisionStep(spawn.NotebookProvisionStepDeps{
+		Provisioner: newFakeNotebookProvisioner(),
+		Archiver:    nil,
 		Profile:     canonicalNotebookProfile(),
 	})
 }

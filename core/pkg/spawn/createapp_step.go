@@ -23,6 +23,29 @@
 // core ([saga.Runner]) emits `saga_step_started` /
 // `saga_step_completed`. Adding a third audit row here would
 // double-emit the same external action.
+//
+// # M7.3.c rollback contract — [Compensate]
+//
+// On saga rollback (a later step's [saga.Step.Execute] returned non-
+// nil) the [saga.Runner] dispatches [CreateAppStep.Compensate] in
+// REVERSE forward order. Compensate sources `watchkeeperID` from the
+// [saga.SpawnContext] on `ctx` (NEVER receiver-stash — the M7.3.b
+// per-saga state contract forbids it; multiple sagas may share a
+// step instance) and dispatches via the [SlackAppTeardown] seam.
+// Production wiring backs the seam with a wrapper that performs the
+// best-effort Slack-side teardown the platform exposes (Phase 1:
+// no `apps.delete` API exists, so the wrapper wipes the local
+// `slack_app_creds` row + records the abandoned `app_id` to a
+// follow-up reconciler queue) and returns typed errors classed via
+// [saga.LastErrorClassed] so the audit row's `last_error_class`
+// pins the failure mode.
+//
+// PII discipline on the rollback path: no creds substring, no
+// `app_id` raw value, and no Slack response body lands on the
+// returned error string. The wrap chain surfaces only the step-
+// prefix + the underlying typed sentinel (e.g.
+// [ErrMissingSpawnContext], [ErrMissingAgentID], or the Teardown's
+// own typed error).
 package spawn
 
 import (
@@ -79,6 +102,19 @@ type CreateAppStepDeps struct {
 	// [WatchkeeperSlackAppCredsDAO.Put].
 	CredsDAO WatchkeeperSlackAppCredsDAO
 
+	// Teardown is the M7.3.c rollback seam dispatched by
+	// [CreateAppStep.Compensate] when a later saga step fails and
+	// the runner walks the rollback chain in reverse. Required; a
+	// nil Teardown is rejected at construction — a step that
+	// satisfies [saga.Compensator] but cannot actually compensate
+	// is a wiring bug that surfaces best at boot, not on the first
+	// rollback (which would otherwise fall onto the runner's
+	// `safeCompensate` panic harness). The seam closes over the
+	// watchkeeperID supplied to [SlackAppTeardown.TeardownApp]; per-
+	// saga state lives on the [saga.SpawnContext] read from `ctx`,
+	// NEVER on the step receiver (M7.3.b lesson #1).
+	Teardown SlackAppTeardown
+
 	// AppName is the Slack app's display name forwarded to
 	// [CreateAppRequest.AppName]. Required; empty values fail at
 	// construction so a misconfigured wiring layer is caught at
@@ -116,6 +152,7 @@ type CreateAppStepDeps struct {
 type CreateAppStep struct {
 	rpc            SlackAppRPC
 	credsDAO       WatchkeeperSlackAppCredsDAO
+	teardown       SlackAppTeardown
 	appName        string
 	appDescription string
 	scopes         []string
@@ -126,6 +163,11 @@ type CreateAppStep struct {
 // (AC2). Pins the integration shape so a future change to the
 // interface surface fails the build here.
 var _ saga.Step = (*CreateAppStep)(nil)
+
+// Compile-time assertion: [*CreateAppStep] satisfies [saga.Compensator]
+// (M7.3.c). Pins the rollback contract — a future signature change to
+// [saga.Compensator] surfaces here.
+var _ saga.Compensator = (*CreateAppStep)(nil)
 
 // NewCreateAppStep constructs a [CreateAppStep] with the supplied
 // [CreateAppStepDeps]. RPC, CredsDAO, AppName, and ApprovalToken are
@@ -139,6 +181,9 @@ func NewCreateAppStep(deps CreateAppStepDeps) *CreateAppStep {
 	if deps.CredsDAO == nil {
 		panic("spawn: NewCreateAppStep: deps.CredsDAO must not be nil")
 	}
+	if deps.Teardown == nil {
+		panic("spawn: NewCreateAppStep: deps.Teardown must not be nil")
+	}
 	if deps.AppName == "" {
 		panic("spawn: NewCreateAppStep: deps.AppName must not be empty")
 	}
@@ -149,6 +194,7 @@ func NewCreateAppStep(deps CreateAppStepDeps) *CreateAppStep {
 	return &CreateAppStep{
 		rpc:            deps.RPC,
 		credsDAO:       deps.CredsDAO,
+		teardown:       deps.Teardown,
 		appName:        deps.AppName,
 		appDescription: deps.AppDescription,
 		scopes:         scopes,
@@ -286,4 +332,100 @@ type CreateAppCredsSinkInstaller interface {
 	// [slack.WithCreateAppCredsSink]. The returned RPC is safe for
 	// single-call use; the step does not retain it across calls.
 	WithCreateAppCredsSink(sink slackmessenger.CreateAppCredsSink) SlackAppRPC
+}
+
+// SlackAppTeardown is the M7.3.c rollback seam the
+// [CreateAppStep.Compensate] dispatches through. Implementations
+// undo the externally-visible side effect produced by
+// [CreateAppStep.Execute]: the freshly-minted Slack App + the
+// `slack_app_creds` row + any partially-stored install tokens
+// keyed by the supplied watchkeeper id.
+//
+// Phase-1 reality check: Slack does NOT expose a public
+// `apps.delete` API for the `apps.manifest.create`-flow surface,
+// so the production wrapper performs the best-effort teardown the
+// platform allows (typically: wipe the local `slack_app_creds`
+// row + record the abandoned `app_id` to a follow-up reconciler
+// queue an operator can drain manually). The seam exists so the
+// future migration to a richer platform-side teardown lands
+// without churning the step's signature.
+//
+// Concurrency: implementations MUST be safe for concurrent calls
+// across distinct sagas. The production wrapper holds an immutable
+// reference to the DAO + secrets seams; the test fake uses sync
+// primitives to record calls.
+//
+// Idempotency: implementations MUST be safe to call MORE than once
+// with the same `watchkeeperID`. The [saga.Runner]'s rollback
+// chain is best-effort (M7.3.b discipline) — a transient operator
+// retry of the same failed saga would dispatch Compensate twice;
+// the second call MUST NOT panic on missing rows or surface
+// `ErrCredsNotFound` as a hard failure.
+//
+// Typed-error contract for `last_error_class`: errors returned
+// SHOULD implement [saga.LastErrorClassed] to override the default
+// `step_compensate_error` sentinel emitted on the
+// `saga_compensation_failed` audit row (e.g.
+// `slack_app_teardown_unauthorized`,
+// `slack_app_teardown_not_found`). The wrap chain in
+// [CreateAppStep.Compensate] preserves the underlying chain so
+// `errors.As` walks through.
+type SlackAppTeardown interface {
+	// TeardownApp undoes the side effect of a prior successful
+	// [CreateAppStep.Execute] for `watchkeeperID`. Returns nil on
+	// successful teardown; returns a typed error chain on failure.
+	// MUST be idempotent (see type-level discipline above).
+	TeardownApp(ctx context.Context, watchkeeperID uuid.UUID) error
+}
+
+// Compensate satisfies [saga.Compensator].
+//
+// Resolution order:
+//
+//  1. Read the [saga.SpawnContext] off `ctx`. A miss returns a
+//     wrapped [ErrMissingSpawnContext]; the [SlackAppTeardown] is
+//     NOT touched. The [saga.Runner] dispatches Compensate under
+//     [context.WithoutCancel] (M7.3.b iter-1 #2) so a parent
+//     cancellation does NOT poison the rollback walk.
+//  2. Validate the SpawnContext's AgentID is non-zero (uuid.Nil
+//     cannot be a credential-store key). A miss returns a wrapped
+//     [ErrMissingAgentID]; the [SlackAppTeardown] is NOT touched.
+//  3. Dispatch through the [SlackAppTeardown] seam, forwarding the
+//     watchkeeperID. The seam owns the actual rollback (Slack-side
+//     uninstall best-effort + DAO wipe).
+//
+// Errors are wrapped with `fmt.Errorf("spawn: create_app step
+// compensate: %w", err)` so a caller's `errors.Is` against the
+// underlying sentinel still matches AND the saga audit row's
+// `last_error_class` resolver picks the deepest
+// [saga.LastErrorClassed] in the chain via `errors.As` (M7.3.b
+// resolver discipline).
+//
+// Audit discipline: this method does NOT call
+// [keeperslog.Writer.Append] (AC7). The audit chain belongs to the
+// saga core; per-step `saga_step_compensated` /
+// `saga_compensation_failed` rows are emitted by the [saga.Runner]
+// based on the returned error.
+//
+// PII discipline: NEVER reflects creds, raw `app_id`, or Slack
+// response substrings into the returned error string. Only the
+// typed sentinel chain rides through.
+func (s *CreateAppStep) Compensate(ctx context.Context) error {
+	// No `ctx.Err()` short-circuit here (asymmetric vs Execute) —
+	// the saga.Runner dispatches Compensate under
+	// context.WithoutCancel (M7.3.b iter-1 #2; see saga.compensate),
+	// so the parent ctx's cancellation never reaches this body. The
+	// asymmetry is intentional; every Compensate in this package
+	// follows the same shape.
+	sc, ok := saga.SpawnContextFromContext(ctx)
+	if !ok {
+		return fmt.Errorf("spawn: create_app step compensate: %w", ErrMissingSpawnContext)
+	}
+	if sc.AgentID == uuid.Nil {
+		return fmt.Errorf("spawn: create_app step compensate: %w", ErrMissingAgentID)
+	}
+	if err := s.teardown.TeardownApp(ctx, sc.AgentID); err != nil {
+		return fmt.Errorf("spawn: create_app step compensate: %w", err)
+	}
+	return nil
 }

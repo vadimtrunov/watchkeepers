@@ -96,4 +96,34 @@ type WatchkeeperSlackAppCredsDAO interface {
 		refreshCT []byte,
 		expiresAt time.Time,
 	) error
+
+	// WipeInstallTokens is the M7.3.c rollback method the
+	// [OAuthInstallStep.Compensate] dispatches when the saga aborts.
+	// It clears the bot/user/refresh ciphertexts + the expiry/install
+	// timestamps for the row keyed by `watchkeeperID`, leaving the
+	// row itself in place (the M7.1.c.a `slack_app_creds` columns
+	// — `client_id`, `client_secret`, `signing_secret`,
+	// `verification_token` — survive so the future
+	// [SlackAppTeardown.TeardownApp] production wrapper can read
+	// the abandoned `app_id` before its own platform-side wipe).
+	//
+	// MUST be idempotent: calling Wipe twice on the same
+	// `watchkeeperID` returns nil on the second call (no row =
+	// already wiped, treated as success). A missing row is NOT an
+	// error — the rollback chain is best-effort and double-Compensate
+	// is allowed (M7.3.b discipline).
+	//
+	// Implementations MUST overwrite (not zero-len-clear) the
+	// ciphertext columns so a future select against the row
+	// observes `bot_access_token IS NULL` rather than an
+	// empty-bytea. The in-memory variant simply deletes the install-
+	// tokens map entry; a Postgres adapter SETs the columns to NULL.
+	//
+	// Future M7.3.d-equivalent landing the production
+	// [SlackAppTeardown] wrapper will introduce a companion
+	// `WipeAll` (full-row deletion including the M7.1.c.a app
+	// credentials) — deferred per the M6.3.b "ship in-memory DAO
+	// with consumer" rhythm; a method without a caller is dead
+	// surface that drifts out of date.
+	WipeInstallTokens(ctx context.Context, watchkeeperID uuid.UUID) error
 }

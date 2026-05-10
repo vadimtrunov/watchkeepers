@@ -131,6 +131,7 @@ func newStep(t *testing.T, rpc spawn.SlackAppRPC, dao spawn.WatchkeeperSlackAppC
 	return spawn.NewCreateAppStep(spawn.CreateAppStepDeps{
 		RPC:           rpc,
 		CredsDAO:      dao,
+		Teardown:      nopSlackAppTeardown{},
 		AppName:       "test-app",
 		Scopes:        []string{"chat:write"},
 		ApprovalToken: "tok-test-approval-token",
@@ -170,6 +171,7 @@ func TestNewCreateAppStep_PanicsOnRequiredFields(t *testing.T) {
 	}{
 		{"nil RPC", func(d *spawn.CreateAppStepDeps) { d.RPC = nil }},
 		{"nil CredsDAO", func(d *spawn.CreateAppStepDeps) { d.CredsDAO = nil }},
+		{"nil Teardown", func(d *spawn.CreateAppStepDeps) { d.Teardown = nil }},
 		{"empty AppName", func(d *spawn.CreateAppStepDeps) { d.AppName = "" }},
 		{"empty ApprovalToken", func(d *spawn.CreateAppStepDeps) { d.ApprovalToken = "" }},
 	}
@@ -183,6 +185,7 @@ func TestNewCreateAppStep_PanicsOnRequiredFields(t *testing.T) {
 			deps := spawn.CreateAppStepDeps{
 				RPC:           newFakeSlackAppRPC(newTestCreds()),
 				CredsDAO:      spawn.NewMemoryWatchkeeperSlackAppCredsDAO(),
+				Teardown:      nopSlackAppTeardown{},
 				AppName:       "test-app",
 				ApprovalToken: "tok-test",
 			}

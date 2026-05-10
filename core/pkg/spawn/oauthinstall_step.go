@@ -27,6 +27,34 @@
 // material NEVER appear in any returned error string. The wrap chain
 // surfaces only sentinel-level diagnostics (e.g. [ErrMissingOAuthCode],
 // [ErrCredsNotFound]).
+//
+// # M7.3.c rollback contract — [Compensate]
+//
+// On saga rollback the [saga.Runner] dispatches
+// [OAuthInstallStep.Compensate] in REVERSE forward order. Compensate
+// performs TWO best-effort actions:
+//
+//  1. Dispatches via the [OAuthInstallRevoker] seam to call Slack's
+//     `auth.revoke` (or equivalent platform-side install-revocation)
+//     for the bot/user tokens stored on the
+//     [WatchkeeperSlackAppCredsDAO] row keyed by watchkeeperID.
+//  2. Calls [WatchkeeperSlackAppCredsDAO.WipeInstallTokens] to clear
+//     the encrypted token columns. The companion `slack_app_creds`
+//     row's M7.1.c.a columns (client_id, secret, signing, app_id)
+//     stay so the next-in-reverse [SlackAppTeardown] can still read
+//     the abandoned app_id.
+//
+// Wipe-after-revoke ordering: even when revoke FAILS (the platform
+// returned 5xx, the access token was already invalidated, etc.) the
+// Wipe still runs so a subsequent saga retry does not see stale
+// encrypted bytes for a token Slack already ignores. The revoke
+// error is the load-bearing return; a Wipe failure surfaces only
+// when revoke succeeded.
+//
+// Per-saga state contract (M7.3.b lesson #1): watchkeeperID and the
+// OAuth code originate on the [saga.SpawnContext], NEVER on a
+// receiver-stash. The encrypted token bundle lives in the DAO row;
+// the Revoker reads it back via the same row.
 package spawn
 
 import (
@@ -111,6 +139,14 @@ type OAuthInstallStepDeps struct {
 	// (NOT encrypted-empty-string — see the M7.1.c.b.b plan).
 	Encrypter secrets.Encrypter
 
+	// Revoker is the M7.3.c rollback seam dispatched by
+	// [OAuthInstallStep.Compensate]. Required; a nil Revoker is
+	// rejected at construction — a step that satisfies
+	// [saga.Compensator] but cannot actually revoke is a wiring bug.
+	// Production wiring backs the seam with a wrapper around Slack's
+	// `auth.revoke`; tests substitute a hand-rolled fake.
+	Revoker OAuthInstallRevoker
+
 	// Workspace identifies the Slack workspace this install targets.
 	// Required; an empty Workspace.ID is rejected at construction. For
 	// the Phase-1 admin-grant flow this is the operator's dev
@@ -138,6 +174,7 @@ type OAuthInstallStep struct {
 	installer   SlackAppInstaller
 	credsDAO    WatchkeeperSlackAppCredsDAO
 	encrypter   secrets.Encrypter
+	revoker     OAuthInstallRevoker
 	workspace   messenger.WorkspaceRef
 	redirectURI string
 }
@@ -146,6 +183,10 @@ type OAuthInstallStep struct {
 // (AC2). Pins the integration shape so a future change to the
 // interface surface fails the build here.
 var _ saga.Step = (*OAuthInstallStep)(nil)
+
+// Compile-time assertion: [*OAuthInstallStep] satisfies
+// [saga.Compensator] (M7.3.c). Pins the rollback contract.
+var _ saga.Compensator = (*OAuthInstallStep)(nil)
 
 // NewOAuthInstallStep constructs an [OAuthInstallStep] with the supplied
 // [OAuthInstallStepDeps]. Installer, CredsDAO, Encrypter, and a
@@ -162,6 +203,9 @@ func NewOAuthInstallStep(deps OAuthInstallStepDeps) *OAuthInstallStep {
 	if deps.Encrypter == nil {
 		panic("spawn: NewOAuthInstallStep: deps.Encrypter must not be nil")
 	}
+	if deps.Revoker == nil {
+		panic("spawn: NewOAuthInstallStep: deps.Revoker must not be nil")
+	}
 	if deps.Workspace.ID == "" {
 		panic("spawn: NewOAuthInstallStep: deps.Workspace.ID must not be empty")
 	}
@@ -169,6 +213,7 @@ func NewOAuthInstallStep(deps OAuthInstallStepDeps) *OAuthInstallStep {
 		installer:   deps.Installer,
 		credsDAO:    deps.CredsDAO,
 		encrypter:   deps.Encrypter,
+		revoker:     deps.Revoker,
 		workspace:   deps.Workspace,
 		redirectURI: deps.RedirectURI,
 	}
@@ -326,4 +371,121 @@ func expiryFromExpiresIn(expiresIn int) time.Time {
 		return time.Time{}
 	}
 	return time.Now().UTC().Add(time.Duration(expiresIn) * time.Second)
+}
+
+// OAuthInstallRevoker is the M7.3.c rollback seam the
+// [OAuthInstallStep.Compensate] dispatches through. Implementations
+// undo the externally-visible side effect produced by
+// [OAuthInstallStep.Execute]: the platform-side install
+// (Slack's `auth.revoke` for the bot/user tokens previously
+// minted via `oauth.v2.access`).
+//
+// The seam reads the token bundle from the
+// [WatchkeeperSlackAppCredsDAO] row keyed by `watchkeeperID`,
+// decrypts whatever it needs (typically only the bot token —
+// `auth.revoke` accepts a single bearer), and dispatches the
+// platform call. The wipe of the encrypted DAO columns is the
+// step's responsibility (the [OAuthInstallStep.Compensate] body
+// calls [WatchkeeperSlackAppCredsDAO.WipeInstallTokens] AFTER
+// the revoker returns) so a future seam impl can stay focused
+// on the platform-side action.
+//
+// Concurrency: implementations MUST be safe for concurrent calls
+// across distinct sagas. The production wrapper holds an immutable
+// reference to the DAO + Encrypter + slack.Client seams; the test
+// fake uses sync primitives to record calls.
+//
+// Idempotency: implementations MUST be safe to call MORE than once
+// with the same `watchkeeperID`. A second revoke against an
+// already-revoked token surfaces typically as
+// `slack: token_revoked` or `slack: invalid_auth` from Slack —
+// implementations SHOULD treat both as success on the rollback path
+// (the goal is "the platform considers the token dead"; a
+// previously-revoked token is by definition dead).
+//
+// Typed-error contract: errors SHOULD implement
+// [saga.LastErrorClassed] to override the default
+// `step_compensate_error` sentinel (e.g.
+// `oauth_install_revoke_unauthorized`,
+// `oauth_install_revoke_network`).
+//
+// PII discipline: implementations MUST NOT reflect plaintext token
+// substrings into returned error strings. Failure messages carry
+// only platform-side error codes (`slack: <code>`) and the typed
+// sentinel chain.
+type OAuthInstallRevoker interface {
+	// Revoke calls the platform's install-revocation surface for the
+	// bot/user tokens stored on the DAO row keyed by `watchkeeperID`.
+	// Returns nil on successful revoke; returns a typed error chain
+	// on failure. MUST be idempotent (see type-level discipline).
+	Revoke(ctx context.Context, watchkeeperID uuid.UUID) error
+}
+
+// Compensate satisfies [saga.Compensator].
+//
+// Resolution order:
+//
+//  1. Read the [saga.SpawnContext] off `ctx`. A miss returns a
+//     wrapped [ErrMissingSpawnContext]; the [OAuthInstallRevoker]
+//     and the DAO are NOT touched. The [saga.Runner] dispatches
+//     Compensate under [context.WithoutCancel] (M7.3.b iter-1 #2)
+//     so a parent cancellation does NOT poison the rollback walk.
+//  2. Validate the SpawnContext's AgentID is non-zero. A miss
+//     returns a wrapped [ErrMissingAgentID]; the seams are NOT
+//     touched.
+//  3. Dispatch the [OAuthInstallRevoker.Revoke] call. The seam owns
+//     the platform-side revoke (Slack's `auth.revoke` against the
+//     bot token).
+//  4. Regardless of revoke outcome, dispatch
+//     [WatchkeeperSlackAppCredsDAO.WipeInstallTokens]. The wipe
+//     ALWAYS runs so a subsequent saga retry never observes stale
+//     ciphertext for an already-revoked token. The wipe is the
+//     M7.3.c hygiene step that keeps the DAO row's install columns
+//     consistent with the saga's terminal state.
+//
+// Error precedence: a revoke error is the load-bearing return —
+// the operator's "what failed?" question is answered by the
+// platform-side action. A wipe error surfaces ONLY when revoke
+// succeeded (otherwise the wipe error is masked so the operator
+// sees the genuine root cause). This mirrors the M7.3.b
+// "kickoffer best-effort emit does not shadow runner error" pattern.
+//
+// Errors are wrapped with `fmt.Errorf("spawn: oauth_install step
+// compensate: %w", err)` so a caller's `errors.Is` against the
+// underlying sentinel (e.g. [ErrCredsNotFound] from a Wipe miss)
+// still matches.
+//
+// Audit discipline: this method does NOT call
+// [keeperslog.Writer.Append] (AC7). The audit chain belongs to the
+// saga core.
+//
+// PII discipline: NEVER reflects plaintext token substrings, the
+// OAuth code, or KEK material into the returned error string.
+func (s *OAuthInstallStep) Compensate(ctx context.Context) error {
+	sc, ok := saga.SpawnContextFromContext(ctx)
+	if !ok {
+		return fmt.Errorf("spawn: oauth_install step compensate: %w", ErrMissingSpawnContext)
+	}
+	if sc.AgentID == uuid.Nil {
+		return fmt.Errorf("spawn: oauth_install step compensate: %w", ErrMissingAgentID)
+	}
+
+	revokeErr := s.revoker.Revoke(ctx, sc.AgentID)
+
+	// The wipe ALWAYS runs — even on revoke failure — so a
+	// subsequent saga retry never observes stale ciphertext for a
+	// platform-side install state that may already be inconsistent.
+	// The DAO contract makes Wipe idempotent (no-op on missing row).
+	wipeErr := s.credsDAO.WipeInstallTokens(ctx, sc.AgentID)
+
+	if revokeErr != nil {
+		// Revoke is the load-bearing failure — surface it to the
+		// operator. The wipe error (if any) is masked so the
+		// operator sees the genuine platform-side root cause.
+		return fmt.Errorf("spawn: oauth_install step compensate: %w", revokeErr)
+	}
+	if wipeErr != nil {
+		return fmt.Errorf("spawn: oauth_install step compensate: %w", wipeErr)
+	}
+	return nil
 }

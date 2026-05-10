@@ -26,11 +26,49 @@
 // surfaces only the step-prefix + the underlying sentinel (e.g.
 // [ErrMissingSpawnContext], [ErrMissingAgentID], or the Provisioner's
 // typed error).
+//
+// # M7.3.c rollback contract — archive-not-delete + flag-for-review
+//
+// On saga rollback the [saga.Runner] dispatches
+// [NotebookProvisionStep.Compensate]. The roadmap mandates
+// "archive-not-delete + flag-for-review" — the per-watchkeeper
+// notebook file must NOT be deleted (any seed entries the M2b.7
+// `notebook_entry_remembered` audit chain wrote are durable
+// records of the failed spawn, valuable for postmortem) and the
+// archived blob must be flagged for operator review (an aborted
+// spawn that left a notebook file is a wiring or platform issue
+// the operator should examine before retrying).
+//
+// Compensate dispatches via the [NotebookProvisionArchiver] seam
+// which:
+//
+//  1. Streams the per-watchkeeper notebook file through the
+//     existing M2b.1 [notebook.DB.Archive] surface into the
+//     configured [archivestore.ArchiveStore].
+//  2. Sets a closed-set "flagged_for_review" attribute on the
+//     archived blob (production wiring writes a sidecar metadata
+//     file or sets an S3 object tag).
+//  3. Returns the archive URI on success; non-empty + non-nil-err
+//     is the success contract (mirrors [NotebookArchiver] from the
+//     M7.2.b retire saga).
+//
+// Compensate does NOT publish the URI to a [saga.RetireResult]
+// outbox — the spawn-saga's audit chain alone records the
+// rollback (`saga_step_compensated` for `notebook_provision`),
+// the URI is operator-visible via the production archiver's own
+// audit emit (`notebook_archived` per M2b.7) plus the
+// flag-for-review marker.
+//
+// Per-saga state contract (M7.3.b lesson #1): watchkeeperID
+// originates on the [saga.SpawnContext], NEVER on a
+// receiver-stash. The notebook file path is derivable from
+// watchkeeperID alone (the M2b.1 path validator).
 package spawn
 
 import (
 	"context"
 	"fmt"
+	"net/url"
 
 	"github.com/google/uuid"
 
@@ -114,6 +152,14 @@ type NotebookProvisionStepDeps struct {
 	// Required; a nil Provisioner is rejected at construction.
 	Provisioner NotebookProvisioner
 
+	// Archiver is the M7.3.c rollback seam dispatched by
+	// [NotebookProvisionStep.Compensate]. Required; a nil Archiver is
+	// rejected at construction. The seam owns archive-not-delete +
+	// flag-for-review; production wiring backs it with a wrapper
+	// around [notebook.ArchiveOnRetire] + an
+	// [archivestore.ArchiveStore] tag-set call.
+	Archiver NotebookProvisionArchiver
+
 	// Profile is the [NotebookProfile] applied on every saga run.
 	// Phase-1 admin-grant flow: a static per-deployment profile (the
 	// wiring layer derives it from the seeded `bots/watchmaster.yaml`
@@ -134,6 +180,7 @@ type NotebookProvisionStepDeps struct {
 // [saga.SpawnContext] keying the watchkeeper).
 type NotebookProvisionStep struct {
 	provisioner NotebookProvisioner
+	archiver    NotebookProvisionArchiver
 	profile     NotebookProfile
 }
 
@@ -141,6 +188,10 @@ type NotebookProvisionStep struct {
 // [saga.Step]. Pins the integration shape so a future change to the
 // interface surface fails the build here.
 var _ saga.Step = (*NotebookProvisionStep)(nil)
+
+// Compile-time assertion: [*NotebookProvisionStep] satisfies
+// [saga.Compensator] (M7.3.c). Pins the rollback contract.
+var _ saga.Compensator = (*NotebookProvisionStep)(nil)
 
 // NewNotebookProvisionStep constructs a [NotebookProvisionStep] with
 // the supplied [NotebookProvisionStepDeps]. Provisioner is required;
@@ -163,8 +214,12 @@ func NewNotebookProvisionStep(deps NotebookProvisionStepDeps) *NotebookProvision
 	if deps.Provisioner == nil {
 		panic("spawn: NewNotebookProvisionStep: deps.Provisioner must not be nil")
 	}
+	if deps.Archiver == nil {
+		panic("spawn: NewNotebookProvisionStep: deps.Archiver must not be nil")
+	}
 	return &NotebookProvisionStep{
 		provisioner: deps.Provisioner,
+		archiver:    deps.Archiver,
 		profile:     deps.Profile,
 	}
 }
@@ -214,6 +269,118 @@ func (s *NotebookProvisionStep) Execute(ctx context.Context) error {
 
 	if err := s.provisioner.ProvisionNotebook(ctx, sc.AgentID, s.profile); err != nil {
 		return fmt.Errorf("spawn: notebook_provision step: %w", err)
+	}
+	return nil
+}
+
+// NotebookProvisionArchiver is the M7.3.c rollback seam the
+// [NotebookProvisionStep.Compensate] dispatches through.
+// Implementations undo the externally-visible side effect produced
+// by [NotebookProvisionStep.Execute] via archive-not-delete +
+// flag-for-review:
+//
+//  1. Stream the per-watchkeeper notebook file through
+//     [notebook.DB.Archive] into the configured
+//     [archivestore.ArchiveStore].
+//  2. Set a closed-set "flagged_for_review" attribute on the
+//     archived blob so an operator's review queue surfaces the
+//     aborted-spawn artifact.
+//  3. NEVER delete the source notebook file — the seed entries
+//     written by [NotebookProvisionStep.Execute] are durable
+//     records of the failed spawn that an operator might need for
+//     post-mortem.
+//
+// The seam returns the archive URI on success (non-empty +
+// shape-valid per the M7.2.b discipline). The
+// [NotebookProvisionStep.Compensate] body validates the URI
+// shape via [net/url.Parse] and reuses the M7.2.b sentinels
+// [ErrEmptyArchiveURI] / [ErrInvalidArchiveURI] for shape errors —
+// a buggy archiver returning `"garbage"` MUST surface as a
+// `saga_compensation_failed` audit row rather than silently
+// poisoning a future review-queue lookup.
+//
+// Concurrency: implementations MUST be safe for concurrent calls
+// across distinct sagas. The production wrapper holds an immutable
+// reference to the notebook + archivestore + audit seams; the test
+// fake uses sync primitives to record calls.
+//
+// Idempotency: implementations MUST be safe to call MORE than once
+// with the same `watchkeeperID`. A re-archive of an already-
+// archived notebook MAY produce a different URI (e.g. a new
+// timestamped object) — the rollback contract treats both as
+// success; the operator's review queue de-dupes by watchkeeperID.
+//
+// Typed-error contract: errors SHOULD implement
+// [saga.LastErrorClassed] to override the default
+// `step_compensate_error` sentinel (e.g.
+// `notebook_archive_store_full`,
+// `notebook_archive_flag_failed`).
+type NotebookProvisionArchiver interface {
+	// ArchiveAndFlagForReview archives the per-agent notebook keyed
+	// by `watchkeeperID` AND sets the closed-set "flagged_for_review"
+	// attribute on the resulting archive blob. Returns the archive
+	// URI on success; the URI MUST be non-empty AND shape-valid
+	// (parses via [net/url.Parse] with a non-empty scheme — see the
+	// M7.2.b [NotebookArchiver] precedent). Returns `("", err)` on
+	// failure with the underlying error chain wrapped so callers
+	// can `errors.Is` against substrate sentinels.
+	ArchiveAndFlagForReview(ctx context.Context, watchkeeperID uuid.UUID) (uri string, err error)
+}
+
+// Compensate satisfies [saga.Compensator].
+//
+// Resolution order:
+//
+//  1. Read the [saga.SpawnContext] off `ctx`. A miss returns a
+//     wrapped [ErrMissingSpawnContext]; the [NotebookProvisionArchiver]
+//     is NOT touched. The [saga.Runner] dispatches Compensate under
+//     [context.WithoutCancel] (M7.3.b iter-1 #2) so a parent
+//     cancellation does NOT poison the rollback walk.
+//  2. Validate the SpawnContext's AgentID is non-zero. A miss
+//     returns a wrapped [ErrMissingAgentID]; the seam is NOT
+//     touched.
+//  3. Dispatch through the [NotebookProvisionArchiver] seam,
+//     forwarding the watchkeeperID. The seam owns the archive +
+//     flag-for-review work.
+//  4. On the seam's success branch, validate the returned URI
+//     non-empty ([ErrEmptyArchiveURI]) AND shape-correct
+//     (parses via [net/url.Parse] with a non-empty scheme —
+//     [ErrInvalidArchiveURI]). A buggy wrapper returning
+//     `"garbage"` MUST NOT silently succeed — the operator's
+//     review queue would then key off an unparseable string.
+//
+// Errors are wrapped with `fmt.Errorf("spawn: notebook_provision
+// step compensate: %w", err)` so a caller's `errors.Is` against
+// the underlying sentinel still matches.
+//
+// Audit discipline: this method does NOT call
+// [keeperslog.Writer.Append] (AC7). The audit chain belongs to the
+// saga core; the M2b.7 mutation-audit emit on archive belongs to
+// the [notebook.ArchiveOnRetire] substrate the production
+// [NotebookProvisionArchiver] wraps.
+//
+// PII discipline: NEVER reflects the [NotebookProfile] contents,
+// the seed entries, or the archive URI substring (the URI is the
+// SUCCESS payload, not a failure-message ingredient) into the
+// returned error string.
+func (s *NotebookProvisionStep) Compensate(ctx context.Context) error {
+	sc, ok := saga.SpawnContextFromContext(ctx)
+	if !ok {
+		return fmt.Errorf("spawn: notebook_provision step compensate: %w", ErrMissingSpawnContext)
+	}
+	if sc.AgentID == uuid.Nil {
+		return fmt.Errorf("spawn: notebook_provision step compensate: %w", ErrMissingAgentID)
+	}
+
+	uri, err := s.archiver.ArchiveAndFlagForReview(ctx, sc.AgentID)
+	if err != nil {
+		return fmt.Errorf("spawn: notebook_provision step compensate: %w", err)
+	}
+	if uri == "" {
+		return fmt.Errorf("spawn: notebook_provision step compensate: %w", ErrEmptyArchiveURI)
+	}
+	if parsed, parseErr := url.Parse(uri); parseErr != nil || parsed.Scheme == "" {
+		return fmt.Errorf("spawn: notebook_provision step compensate: %w", ErrInvalidArchiveURI)
 	}
 	return nil
 }

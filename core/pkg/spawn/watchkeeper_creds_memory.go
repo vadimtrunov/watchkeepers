@@ -152,3 +152,19 @@ func (m *MemoryWatchkeeperSlackAppCredsDAO) GetInstallTokens(
 	}
 	return t.botCT, t.userCT, t.refreshCT, t.expiresAt, t.installedAt, true
 }
+
+// WipeInstallTokens satisfies [WatchkeeperSlackAppCredsDAO.WipeInstallTokens].
+// Idempotent: a missing tokens row returns nil (treated as
+// already-wiped). The companion `slack_app_creds` row (the M7.1.c.a
+// `client_id` / `client_secret` / etc.) is left in place so the
+// future [SlackAppTeardown] production wrapper can still read the
+// abandoned `app_id` before its own platform-side wipe.
+func (m *MemoryWatchkeeperSlackAppCredsDAO) WipeInstallTokens(
+	_ context.Context,
+	watchkeeperID uuid.UUID,
+) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.tokens, watchkeeperID)
+	return nil
+}

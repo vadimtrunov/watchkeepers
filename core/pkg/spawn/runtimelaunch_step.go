@@ -44,6 +44,41 @@
 // surfaces inside the M7.1.e wrap chain (`spawn: runtime_launch step:
 // spawn: create_app step: missing ...`) — not a matching bug
 // ([errors.Is] still resolves) but a callout for log-grep tooling.
+//
+// # M7.3.c rollback contract — runtime teardown + cost finalisation
+//
+// On saga rollback the [saga.Runner] dispatches
+// [RuntimeLaunchStep.Compensate] in REVERSE forward order. The
+// roadmap mandates "runtime teardown, cost-record finalisation":
+//
+//  1. Stop the running agent runtime ([runtime.Subscription.Stop]
+//     equivalent) keyed by watchkeeperID.
+//  2. Finalise the cost-record ledger for any in-flight
+//     `llm_turn_cost_*` rows the runtime emitted before the abort
+//     (the M6.3.e cost-logger decorator emits one row per
+//     successful LLM turn; an aborted runtime may have observed N
+//     turns whose rows are valid but no `lifecycle_completed`
+//     terminal row will ever land — the finalisation step writes
+//     a synthetic terminal row so a downstream cost aggregator
+//     can close the ledger).
+//
+// Both actions live behind the [RuntimeTeardown] seam; production
+// wiring backs it with a wrapper around the runtime's
+// [runtime.AgentRuntime.Stop] (or its Subscription.Stop equivalent)
+// and the cost package's ledger-finalisation surface.
+//
+// At-least-once semantics: the M7.1.e doc-block already pins that
+// [RuntimeLauncher.LaunchRuntime] is at-least-once on the spawn
+// path; the M7.3.c rollback inherits the same semantics on the
+// teardown side. A repeat Compensate against an already-stopped
+// runtime MUST return nil (idempotent).
+//
+// Per-saga state contract (M7.3.b lesson #1): watchkeeperID +
+// manifestVersionID originate on the [saga.SpawnContext], NEVER
+// on a receiver-stash. The runtime instance is keyed off
+// watchkeeperID; the manifestVersionID is forwarded so a future
+// teardown impl that needs to drain version-pinned cost rows can
+// branch on it without re-resolving the saga.
 package spawn
 
 import (
@@ -163,6 +198,14 @@ type RuntimeLaunchStepDeps struct {
 	// dispatcher. Required; a nil Launcher is rejected at construction.
 	Launcher RuntimeLauncher
 
+	// Teardown is the M7.3.c rollback seam dispatched by
+	// [RuntimeLaunchStep.Compensate]. Required; a nil Teardown is
+	// rejected at construction. The seam owns runtime stop +
+	// cost-record finalisation; production wiring backs it with a
+	// wrapper around the runtime's stop primitive and the cost
+	// package's ledger surface.
+	Teardown RuntimeTeardown
+
 	// Profile is the [RuntimeLaunchProfile] applied on every saga run.
 	// Phase-1 admin-grant flow: a static per-deployment profile (the
 	// wiring layer derives it from the seeded `bots/watchmaster.yaml`
@@ -184,6 +227,7 @@ type RuntimeLaunchStepDeps struct {
 // [saga.SpawnContext] keying the watchkeeper).
 type RuntimeLaunchStep struct {
 	launcher RuntimeLauncher
+	teardown RuntimeTeardown
 	profile  RuntimeLaunchProfile
 }
 
@@ -191,6 +235,10 @@ type RuntimeLaunchStep struct {
 // Pins the integration shape so a future change to the interface
 // surface fails the build here.
 var _ saga.Step = (*RuntimeLaunchStep)(nil)
+
+// Compile-time assertion: [*RuntimeLaunchStep] satisfies
+// [saga.Compensator] (M7.3.c). Pins the rollback contract.
+var _ saga.Compensator = (*RuntimeLaunchStep)(nil)
 
 // NewRuntimeLaunchStep constructs a [RuntimeLaunchStep] with the
 // supplied [RuntimeLaunchStepDeps]. Launcher is required; a nil value
@@ -214,8 +262,12 @@ func NewRuntimeLaunchStep(deps RuntimeLaunchStepDeps) *RuntimeLaunchStep {
 	if deps.Launcher == nil {
 		panic("spawn: NewRuntimeLaunchStep: deps.Launcher must not be nil")
 	}
+	if deps.Teardown == nil {
+		panic("spawn: NewRuntimeLaunchStep: deps.Teardown must not be nil")
+	}
 	return &RuntimeLaunchStep{
 		launcher: deps.Launcher,
+		teardown: deps.Teardown,
 		profile:  deps.Profile,
 	}
 }
@@ -276,6 +328,104 @@ func (s *RuntimeLaunchStep) Execute(ctx context.Context) error {
 
 	if err := s.launcher.LaunchRuntime(ctx, sc.AgentID, sc.ManifestVersionID, s.profile); err != nil {
 		return fmt.Errorf("spawn: runtime_launch step: %w", err)
+	}
+	return nil
+}
+
+// RuntimeTeardown is the M7.3.c rollback seam the
+// [RuntimeLaunchStep.Compensate] dispatches through. Implementations
+// undo the externally-visible side effect produced by
+// [RuntimeLaunchStep.Execute]:
+//
+//  1. Stop the running agent runtime keyed by `watchkeeperID`
+//     ([runtime.AgentRuntime.Stop] equivalent).
+//  2. Finalise the cost-record ledger for any in-flight
+//     `llm_turn_cost_*` rows the runtime emitted before the abort
+//     so a downstream cost aggregator can close the ledger
+//     deterministically.
+//
+// `manifestVersionID` is forwarded so a future teardown impl that
+// needs to drain version-pinned cost rows can branch on it without
+// re-resolving the saga; the M7.3.c production wrapper currently
+// uses only `watchkeeperID` (the runtime is keyed off it; the cost
+// aggregator's join is per-watchkeeper).
+//
+// Concurrency: implementations MUST be safe for concurrent calls
+// across distinct sagas. The production wrapper holds an immutable
+// reference to the runtime + cost seams; the test fake uses sync
+// primitives to record calls.
+//
+// Idempotency: implementations MUST be safe to call MORE than once
+// with the same `(watchkeeperID, manifestVersionID)` pair. A repeat
+// Teardown against an already-stopped runtime returns nil; the
+// runtime's [runtime.Subscription.Stop] surface already documents
+// idempotency for this case (see `core/pkg/runtime/README.md`).
+//
+// Typed-error contract: errors SHOULD implement
+// [saga.LastErrorClassed] to override the default
+// `step_compensate_error` sentinel (e.g.
+// `runtime_teardown_runtime_stuck`,
+// `runtime_teardown_cost_finalise_failed`).
+//
+// PII discipline: implementations MUST NOT reflect runtime
+// session state, in-flight LLM turn payloads, or intro-message
+// substrings into returned error strings.
+type RuntimeTeardown interface {
+	// Teardown stops the runtime + finalises the cost ledger for
+	// `watchkeeperID` / `manifestVersionID`. Returns nil on success;
+	// returns a typed error chain on failure. MUST be idempotent
+	// (see type-level discipline above).
+	Teardown(ctx context.Context, watchkeeperID uuid.UUID, manifestVersionID uuid.UUID) error
+}
+
+// Compensate satisfies [saga.Compensator].
+//
+// Resolution order:
+//
+//  1. Read the [saga.SpawnContext] off `ctx`. A miss returns a
+//     wrapped [ErrMissingSpawnContext]; the [RuntimeTeardown] is
+//     NOT touched. The [saga.Runner] dispatches Compensate under
+//     [context.WithoutCancel] (M7.3.b iter-1 #2) so a parent
+//     cancellation does NOT poison the rollback walk.
+//  2. Validate the SpawnContext's ManifestVersionID is non-zero
+//     (uuid.Nil cannot pin a version-scoped cost ledger drain).
+//     A miss returns a wrapped [ErrMissingManifestVersion]; the
+//     seam is NOT touched. Mirrors [RuntimeLaunchStep.Execute]'s
+//     ordering.
+//  3. Validate the SpawnContext's AgentID is non-zero. A miss
+//     returns a wrapped [ErrMissingAgentID]; the seam is NOT
+//     touched.
+//  4. Dispatch through the [RuntimeTeardown] seam, forwarding the
+//     watchkeeperID + manifestVersionID. The seam owns the runtime
+//     stop + cost-record finalisation work.
+//
+// Errors are wrapped with `fmt.Errorf("spawn: runtime_launch step
+// compensate: %w", err)` so a caller's `errors.Is` against the
+// underlying sentinel still matches.
+//
+// Audit discipline: this method does NOT call
+// [keeperslog.Writer.Append] (AC7). The audit chain belongs to the
+// saga core; the M6.3.e cost-logger decorator's
+// `llm_turn_cost_completed` rows ride underneath the runtime layer
+// the production [RuntimeTeardown] wraps.
+//
+// PII discipline: NEVER reflects runtime session state, in-flight
+// LLM turn payloads, or the intro-message body into the returned
+// error string.
+func (s *RuntimeLaunchStep) Compensate(ctx context.Context) error {
+	sc, ok := saga.SpawnContextFromContext(ctx)
+	if !ok {
+		return fmt.Errorf("spawn: runtime_launch step compensate: %w", ErrMissingSpawnContext)
+	}
+	if sc.ManifestVersionID == uuid.Nil {
+		return fmt.Errorf("spawn: runtime_launch step compensate: %w", ErrMissingManifestVersion)
+	}
+	if sc.AgentID == uuid.Nil {
+		return fmt.Errorf("spawn: runtime_launch step compensate: %w", ErrMissingAgentID)
+	}
+
+	if err := s.teardown.Teardown(ctx, sc.AgentID, sc.ManifestVersionID); err != nil {
+		return fmt.Errorf("spawn: runtime_launch step compensate: %w", err)
 	}
 	return nil
 }

@@ -20,6 +20,34 @@
 // The wrap chain surfaces only the step-prefix + the underlying
 // sentinel (e.g. [ErrMissingSpawnContext], [ErrMissingAgentID], or
 // the Setter's typed error).
+//
+// # M7.3.c rollback contract — explicit no-op
+//
+// [BotProfileStep.Compensate] is a documented no-op. Two converging
+// reasons:
+//
+//  1. The next-in-reverse [OAuthInstallStep.Compensate] revokes the
+//     bot's install + wipes the encrypted tokens. After that wipe
+//     the bot has no platform-side identity for the profile to
+//     reflect — a `users.profile.set` against the dead install
+//     would either 401 or set the profile on a bot the operator
+//     can no longer reach. Either outcome is strictly worse than
+//     letting the profile data evaporate alongside the install.
+//  2. The next-in-reverse [CreateAppStep.Compensate] tears down
+//     the Slack App entirely (best-effort per the platform's
+//     limitations). The profile is bound to the App's bot user;
+//     teardown of the App makes the profile inaccessible by
+//     construction.
+//
+// The step still IMPLEMENTS [saga.Compensator] (rather than relying
+// on the M7.3.b "non-implementer is silently skipped" path) so the
+// audit chain emits a positive `saga_step_compensated` row for
+// `bot_profile`. Operators reading the rollback chain see the
+// explicit "we considered the bot_profile compensation and
+// intentionally no-opped" signal instead of having to reason about
+// absence. The M7.3.b doc-block on [Compensator] explicitly names
+// BotProfile as the canonical example of "no-op rollback" — this
+// step file is the implementation of that example.
 package spawn
 
 import (
@@ -101,6 +129,13 @@ type BotProfileStep struct {
 // Pins the integration shape so a future change to the interface
 // surface fails the build here.
 var _ saga.Step = (*BotProfileStep)(nil)
+
+// Compile-time assertion: [*BotProfileStep] satisfies
+// [saga.Compensator] (M7.3.c). The Compensate method is a documented
+// no-op (see the file-level rollback contract); the assertion exists
+// so the audit chain emits a positive `saga_step_compensated` row for
+// `bot_profile` rather than silently skipping the step.
+var _ saga.Compensator = (*BotProfileStep)(nil)
 
 // NewBotProfileStep constructs a [BotProfileStep] with the supplied
 // [BotProfileStepDeps]. Setter is required; a nil value panics with
@@ -195,5 +230,25 @@ func (s *BotProfileStep) Execute(ctx context.Context) error {
 	if err := s.setter.SetBotProfile(ctx, sc.AgentID, cloneBotProfile(s.profile)); err != nil {
 		return fmt.Errorf("spawn: bot_profile step: %w", err)
 	}
+	return nil
+}
+
+// Compensate satisfies [saga.Compensator] as a documented no-op
+// (M7.3.c). See the file-level "rollback contract — explicit no-op"
+// section for the rationale: the next-in-reverse compensators
+// ([OAuthInstallStep.Compensate], [CreateAppStep.Compensate]) make
+// any bot-profile rollback moot by tearing down the install or the
+// Slack App that owns the profile. The method intentionally does
+// NOT validate [saga.SpawnContext] / [ErrMissingAgentID] — there is
+// no work to gate on, and surfacing a wrap-chain error here would
+// turn a documented no-op into a saga_compensation_failed row that
+// confuses the audit trail.
+//
+// Returning nil also ensures the saga emits a positive
+// `saga_step_compensated` row for `bot_profile`, giving the
+// operator the explicit "we considered the compensation and
+// no-opped intentionally" signal — distinct from the M7.3.b
+// "non-Compensator silently skipped" pattern.
+func (s *BotProfileStep) Compensate(_ context.Context) error {
 	return nil
 }

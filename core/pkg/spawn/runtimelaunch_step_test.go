@@ -101,6 +101,7 @@ func newRuntimeLaunchStep(t *testing.T, launcher spawn.RuntimeLauncher, profile 
 	t.Helper()
 	return spawn.NewRuntimeLaunchStep(spawn.RuntimeLaunchStepDeps{
 		Launcher: launcher,
+		Teardown: nopRuntimeTeardown{},
 		Profile:  profile,
 	})
 }
@@ -134,6 +135,21 @@ func TestNewRuntimeLaunchStep_PanicsOnNilLauncher(t *testing.T) {
 	}()
 	_ = spawn.NewRuntimeLaunchStep(spawn.RuntimeLaunchStepDeps{
 		Launcher: nil,
+		Teardown: nopRuntimeTeardown{},
+		Profile:  canonicalRuntimeLaunchProfile(),
+	})
+}
+
+func TestNewRuntimeLaunchStep_PanicsOnNilTeardown(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("NewRuntimeLaunchStep with nil Teardown did not panic")
+		}
+	}()
+	_ = spawn.NewRuntimeLaunchStep(spawn.RuntimeLaunchStepDeps{
+		Launcher: newFakeRuntimeLauncher(),
+		Teardown: nil,
 		Profile:  canonicalRuntimeLaunchProfile(),
 	})
 }
