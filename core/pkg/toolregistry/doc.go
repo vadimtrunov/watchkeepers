@@ -1,12 +1,24 @@
-// Package toolregistry implements the M9.1.a data + sync layer for the
-// multi-source Tool Registry: operator-supplied `tool_sources` config,
-// per-tool `manifest.json` schema, and a [Scheduler] that clones / pulls
-// each configured source into the operator's `$DATA_DIR/tools/<source>/`
-// directory according to the source's pull policy. Successful syncs emit
-// a [SourceSynced] event on [TopicSourceSynced]; failures emit a
-// [SourceFailed] event on [TopicSourceFailed]. Effective-toolset recompute
-// and the runtime hot-reload signal land in M9.1.b and are deliberately
-// out of scope here.
+// Package toolregistry implements the M9.1.a data + sync layer AND the
+// M9.1.b runtime layer of the multi-source Tool Registry.
+//
+// M9.1.a (data + sync): operator-supplied `tool_sources` config,
+// per-tool `manifest.json` schema, and a [Scheduler] that clones /
+// pulls each configured source into the operator's
+// `$DATA_DIR/tools/<source>/` directory according to the source's
+// pull policy. Successful syncs emit a [SourceSynced] event on
+// [TopicSourceSynced]; failures emit a [SourceFailed] event on
+// [TopicSourceFailed].
+//
+// M9.1.b (runtime): a [Registry] subscribes to [TopicSourceSynced],
+// rescans the synced directories via [BuildEffective], builds the
+// [EffectiveToolset] under precedence flattening (earlier-source-
+// wins on same-name conflicts — M9.2 will add the shadow + Slack-DM
+// warning), atomically installs it as current, and (when a
+// [Publisher] is wired) emits [TopicEffectiveToolsetUpdated]. The
+// in-flight-vs-new boundary is preserved by `atomic.Pointer` capture
+// + a per-entry refcount tracked on retiring snapshots; the
+// configurable [RegistryDeps.GracePeriod] controls how long the
+// registry tracks each retiring entry for telemetry.
 //
 // # Seams
 //
@@ -34,9 +46,10 @@
 //
 // # Atomic-ship boundary
 //
-// M9.1.a defines the data + sync layer. The effective-toolset recompute
-// (scanning the synced directory and projecting per-Watchkeeper
-// toolsets), the runtime hot-reload signal, and the in-flight-vs-new
-// grace period live in M9.1.b. Subscribers to [TopicSourceSynced] in
-// M9.1.b will do that work; this package only emits the events.
+// M9.1.a defines the data + sync layer; M9.1.b adds the runtime
+// [Registry] in-process. M9.2 will add the priority + shadow warning
+// path (a SHADOWED lower-priority same-name tool fires a
+// `tool_shadowed` event and a Slack DM); M9.3 will plug a real
+// cosign / minisign verifier into [SignatureVerifier]. Both extend
+// the existing seams without rewriting them.
 package toolregistry

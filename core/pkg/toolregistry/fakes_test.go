@@ -20,23 +20,33 @@ type fakeFS struct {
 	dirs  map[string]bool     // path → exists
 	infos map[string]fakeInfo // optional: explicit FileInfo
 
-	mkdirErr map[string]error // path → error to return
-	statErr  map[string]error
-	readErr  map[string]error
+	// dirEntries maps a parent directory path to the [fs.DirEntry] list
+	// returned by [fakeFS.ReadDir]. Set entries explicitly per test;
+	// leave unset to let ReadDir return fs.ErrNotExist for an unknown
+	// parent (mirrors real-OS behaviour for a missing dir).
+	dirEntries map[string][]fs.DirEntry
 
-	statCalls  int
-	mkdirCalls int
-	readCalls  int
+	mkdirErr   map[string]error // path → error to return
+	statErr    map[string]error
+	readErr    map[string]error
+	readDirErr map[string]error
+
+	statCalls    int
+	mkdirCalls   int
+	readCalls    int
+	readDirCalls int
 }
 
 func newFakeFS() *fakeFS {
 	return &fakeFS{
-		files:    map[string][]byte{},
-		dirs:     map[string]bool{},
-		infos:    map[string]fakeInfo{},
-		mkdirErr: map[string]error{},
-		statErr:  map[string]error{},
-		readErr:  map[string]error{},
+		files:      map[string][]byte{},
+		dirs:       map[string]bool{},
+		infos:      map[string]fakeInfo{},
+		dirEntries: map[string][]fs.DirEntry{},
+		mkdirErr:   map[string]error{},
+		statErr:    map[string]error{},
+		readErr:    map[string]error{},
+		readDirErr: map[string]error{},
 	}
 }
 
@@ -86,6 +96,38 @@ func (f *fakeFS) ReadFile(path string) ([]byte, error) {
 	copy(out, b)
 	return out, nil
 }
+
+func (f *fakeFS) ReadDir(path string) ([]fs.DirEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readDirCalls++
+	if err, ok := f.readDirErr[path]; ok {
+		return nil, err
+	}
+	entries, ok := f.dirEntries[path]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	// Return a fresh slice so caller mutation never bleeds back.
+	out := make([]fs.DirEntry, len(entries))
+	copy(out, entries)
+	return out, nil
+}
+
+// fakeDirEntry is a controllable [fs.DirEntry] used by tests to
+// populate [fakeFS.dirEntries] without depending on a real OS
+// directory. Only the methods the M9.1.b scanner consults are
+// implemented; [fakeDirEntry.Info] returns ([fs.FileInfo](nil), nil)
+// because the scanner does not call it.
+type fakeDirEntry struct {
+	name  string
+	isDir bool
+}
+
+func (e fakeDirEntry) Name() string               { return e.name }
+func (e fakeDirEntry) IsDir() bool                { return e.isDir }
+func (e fakeDirEntry) Type() fs.FileMode          { return 0 }
+func (e fakeDirEntry) Info() (fs.FileInfo, error) { return nil, nil }
 
 // fakeInfo is the [os.FileInfo] returned by [fakeFS.Stat]. Only the
 // fields the scheduler actually consults are populated.

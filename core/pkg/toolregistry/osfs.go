@@ -1,6 +1,9 @@
 package toolregistry
 
-import "os"
+import (
+	"io/fs"
+	"os"
+)
 
 // OSFS is the production [FS] adapter that delegates every method to
 // the corresponding `os` / `os.ReadFile` / `os.ReadDir` primitive.
@@ -21,4 +24,11 @@ func (OSFS) Stat(path string) (os.FileInfo, error) { return os.Stat(path) }
 // ReadFile implements [FS] via [os.ReadFile].
 func (OSFS) ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path) //nolint:gosec // path is operator-derived (DataDir/tools/<sourceName>/manifest.json), not user input
+}
+
+// ReadDir implements [FS] via [os.ReadDir]. The M9.1.b scanner uses
+// it to discover per-tool subdirectories under
+// `<DataDir>/tools/<sourceName>/`.
+func (OSFS) ReadDir(path string) ([]fs.DirEntry, error) {
+	return os.ReadDir(path) //nolint:gosec // path is operator-derived (DataDir/tools/<sourceName>), not user input
 }

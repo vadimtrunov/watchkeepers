@@ -13,11 +13,20 @@ import (
 	"time"
 )
 
-// FS is the file-system seam consumed by [Scheduler]. The real
-// production wiring satisfies it via a thin shim around the `os`
-// package; tests substitute hand-rolled fakes that drive each method
-// to a specific failure path. Method names mirror the stdlib so a
-// production shim is mechanical.
+// FS is the file-system seam consumed by [Scheduler] and the M9.1.b
+// [Registry] scanner. The real production wiring satisfies it via a
+// thin shim around the `os` package; tests substitute hand-rolled
+// fakes that drive each method to a specific failure path. Method
+// names mirror the stdlib so a production shim is mechanical.
+//
+// The interface is INTERNAL to the watchkeepers tree (the package
+// is `toolregistry`, not `toolregistryext`). Adding a method —
+// [FS.ReadDir] was reintroduced in M9.1.b after the M9.1.a iter-1
+// fix removed it as unused — is a source-incompatible change for
+// any out-of-tree implementer; downstream callers in this repo all
+// inherit `OSFS{}` so the additive method does not affect them.
+// External implementers who need a stable subset should embed the
+// stdlib `io/fs` interfaces directly.
 //
 // Method contract:
 //
@@ -25,11 +34,15 @@ import (
 //   - Stat returns the stdlib [os.ErrNotExist] sentinel chain when the
 //     path is absent; the scheduler `errors.Is` against that sentinel
 //     to distinguish "clone needed" from "stat failed".
-//   - ReadFile / ReadDir mirror the stdlib semantics.
+//   - ReadFile / ReadDir mirror the stdlib semantics. ReadDir on a
+//     missing path MUST return an error chain that satisfies
+//     `errors.Is(err, fs.ErrNotExist)` so the M9.1.b scanner can
+//     distinguish "source directory absent" from "I/O failure".
 type FS interface {
 	MkdirAll(path string, perm os.FileMode) error
 	Stat(path string) (os.FileInfo, error)
 	ReadFile(path string) ([]byte, error)
+	ReadDir(path string) ([]fs.DirEntry, error)
 }
 
 // GitClient is the git seam consumed by [Scheduler]. Both methods
