@@ -306,76 +306,77 @@ func coordinatorSeedV5Fixture() *keepclient.ManifestVersion {
 // pattern rather than spinning up a real test DB. Real-DB exercising
 // of the seed is covered by the `keep-integration-ci` pipeline in
 // `.github/workflows/ci.yml`.
+// coordinatorV5LoadBearingPhrases collects every system-prompt phrase
+// the V1..V5 progression considers load-bearing. Extracted into a
+// var so [TestCoordinatorSeed_LoadsViaLoadManifest] stays under the
+// gocyclo cap by iterating once rather than branching per phrase.
+var coordinatorV5LoadBearingPhrases = []string{
+	// V1 role boundary + lead-deferral phrases (preserved through V5).
+	"NEVER reassign tickets",
+	"ALWAYS surface a",
+	// V2 appendix.
+	"find_overdue_tickets to surface",
+	// V3 appendix (three Slack tools).
+	"fetch_watch_orders to read",
+	"nudge_reviewer to DM",
+	"post_daily_briefing to post",
+	// V4 appendix (GitHub stale-PRs tool).
+	"find_stale_prs to surface",
+	// V5 appendix (M8.3 Watch Order + pending-lesson digest).
+	"record_watch_order to persist",
+	"list_pending_lessons to surface",
+}
+
+// coordinatorV5SelfActions is the set of actions the V5 authority
+// matrix grants `self`. Matches the toolset names — every shipped
+// tool is granted `self` because Coordinator authority is
+// `autonomous` and gating happens per-tool at the handler boundary.
+var coordinatorV5SelfActions = []string{
+	"update_ticket_field",
+	"find_overdue_tickets",
+	"fetch_watch_orders",
+	"nudge_reviewer",
+	"post_daily_briefing",
+	"find_stale_prs",
+	"record_watch_order",
+	"list_pending_lessons",
+}
+
 func TestCoordinatorSeed_LoadsViaLoadManifest(t *testing.T) {
 	t.Parallel()
 
 	f := &fakeFetcher{response: coordinatorSeedV5Fixture()}
-
 	got, err := LoadManifest(context.Background(), f, CoordinatorManifestID)
 	if err != nil {
 		t.Fatalf("LoadManifest: %v", err)
 	}
 
-	const wantReassignmentPhrase = "NEVER reassign tickets"
-	if !strings.Contains(got.SystemPrompt, wantReassignmentPhrase) {
-		t.Errorf("SystemPrompt missing reassignment-boundary phrase %q; got:\n%s",
-			wantReassignmentPhrase, got.SystemPrompt)
-	}
-
-	const wantLeadDeferralPhrase = "ALWAYS surface a"
-	if !strings.Contains(got.SystemPrompt, wantLeadDeferralPhrase) {
-		t.Errorf("SystemPrompt missing lead-deferral phrase %q; got:\n%s",
-			wantLeadDeferralPhrase, got.SystemPrompt)
-	}
-
-	// V2 appendix: narrative guidance for `find_overdue_tickets`
-	// (preserved verbatim in V3).
-	const wantFindOverduePhrase = "find_overdue_tickets to surface"
-	if !strings.Contains(got.SystemPrompt, wantFindOverduePhrase) {
-		t.Errorf("SystemPrompt missing V2 read-tool guidance %q; got:\n%s",
-			wantFindOverduePhrase, got.SystemPrompt)
-	}
-
-	// V3 appendix: narrative guidance for the three Slack tools.
-	for _, phrase := range []string{
-		"fetch_watch_orders to read",
-		"nudge_reviewer to DM",
-		"post_daily_briefing to post",
-	} {
+	for _, phrase := range coordinatorV5LoadBearingPhrases {
 		if !strings.Contains(got.SystemPrompt, phrase) {
-			t.Errorf("SystemPrompt missing V3 slack-tool guidance %q; got:\n%s",
-				phrase, got.SystemPrompt)
+			t.Errorf("SystemPrompt missing phrase %q; got:\n%s", phrase, got.SystemPrompt)
 		}
 	}
 
-	// V4 appendix: narrative guidance for the GitHub stale-PRs tool.
-	const wantFindStalePRsPhrase = "find_stale_prs to surface"
-	if !strings.Contains(got.SystemPrompt, wantFindStalePRsPhrase) {
-		t.Errorf("SystemPrompt missing V4 github-tool guidance %q; got:\n%s",
-			wantFindStalePRsPhrase, got.SystemPrompt)
-	}
+	assertCoordinatorV5Toolset(t, got)
 
-	// V5 appendix: narrative guidance for the M8.3 Watch Order /
-	// pending-lesson-digest tools.
-	for _, phrase := range []string{
-		"record_watch_order to persist",
-		"list_pending_lessons to surface",
-	} {
-		if !strings.Contains(got.SystemPrompt, phrase) {
-			t.Errorf("SystemPrompt missing V5 M8.3-tool guidance %q; got:\n%s",
-				phrase, got.SystemPrompt)
+	for _, action := range coordinatorV5SelfActions {
+		if v, want := got.AuthorityMatrix[action], "self"; v != want {
+			t.Errorf("AuthorityMatrix[%s] = %q, want %q", action, v, want)
 		}
 	}
 
-	wantNames := map[string]bool{
-		"update_ticket_field":  true,
-		"find_overdue_tickets": true,
-		"fetch_watch_orders":   true,
-		"nudge_reviewer":       true,
-		"post_daily_briefing":  true,
-		"find_stale_prs":       true,
-		"record_watch_order":   true,
-		"list_pending_lessons": true,
+	if got.Autonomy != agentruntime.AutonomyAutonomous {
+		t.Errorf("Autonomy = %q, want %q (seed value)", got.Autonomy, agentruntime.AutonomyAutonomous)
+	}
+}
+
+// assertCoordinatorV5Toolset extracts the toolset-name assertion into
+// a helper so the parent test stays under the gocyclo cap.
+func assertCoordinatorV5Toolset(t *testing.T, got agentruntime.Manifest) {
+	t.Helper()
+	wantNames := map[string]bool{}
+	for _, n := range coordinatorV5SelfActions {
+		wantNames[n] = true
 	}
 	names := got.Toolset.Names()
 	if len(names) != len(wantNames) {
@@ -385,25 +386,6 @@ func TestCoordinatorSeed_LoadsViaLoadManifest(t *testing.T) {
 		if !wantNames[n] {
 			t.Errorf("Toolset contains unexpected entry %q; want one of %v", n, wantNames)
 		}
-	}
-
-	for _, action := range []string{
-		"update_ticket_field",
-		"find_overdue_tickets",
-		"fetch_watch_orders",
-		"nudge_reviewer",
-		"post_daily_briefing",
-		"find_stale_prs",
-		"record_watch_order",
-		"list_pending_lessons",
-	} {
-		if got, want := got.AuthorityMatrix[action], "self"; got != want {
-			t.Errorf("AuthorityMatrix[%s] = %q, want %q", action, got, want)
-		}
-	}
-
-	if got.Autonomy != agentruntime.AutonomyAutonomous {
-		t.Errorf("Autonomy = %q, want %q (seed value)", got.Autonomy, agentruntime.AutonomyAutonomous)
 	}
 }
 
