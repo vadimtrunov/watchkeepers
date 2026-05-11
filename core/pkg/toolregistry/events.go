@@ -15,6 +15,14 @@ const TopicSourceSynced = "toolregistry.source_synced"
 // diagnostic cannot leak credentials downstream.
 const TopicSourceFailed = "toolregistry.source_failed"
 
+// TopicEffectiveToolsetUpdated is the [eventbus.Bus] topic the M9.1.b
+// [Registry] emits to after a successful [Registry.Recompute] installs
+// a new [EffectiveToolset]. Running runtimes subscribe here to learn
+// that "new invocations should resolve against a new snapshot"; the
+// in-flight calls already hold a reference to the old snapshot and
+// keep running on it until they release.
+const TopicEffectiveToolsetUpdated = "toolregistry.effective_toolset_updated"
+
 // SourceSynced is the payload published on [TopicSourceSynced] after
 // the scheduler has finished cloning / pulling a source AND the
 // [SignatureVerifier] (if any) has accepted the result.
@@ -80,5 +88,47 @@ type SourceFailed struct {
 
 	// CorrelationID is the process-monotonic identifier of the
 	// failed sync cycle — same shape as [SourceSynced.CorrelationID].
+	CorrelationID string
+}
+
+// EffectiveToolsetUpdated is the payload published on
+// [TopicEffectiveToolsetUpdated] when [Registry.Recompute] installs a
+// new [EffectiveToolset]. The payload is intentionally small — it
+// carries enough for a subscriber to decide "I should re-read the
+// snapshot" without dragging the entire manifest set onto the bus
+// (which would defeat the snapshot/refcount pattern and explode the
+// event-bus channel buffers under churn).
+//
+// PII discipline: only the revision counter, tool count, source
+// count, build timestamp, and correlation id are carried. The
+// manifest contents — which can be operator-authored / AI-authored
+// and may include capability ids or schema blobs that a verbose
+// subscriber log would dump — are deliberately NOT in the payload.
+// Subscribers that need them call [Registry.Snapshot] /
+// [Registry.Acquire] on the registry directly.
+type EffectiveToolsetUpdated struct {
+	// Revision matches [EffectiveToolset.Revision] for the newly
+	// installed snapshot. Strictly monotonic across publishes from
+	// the same [Registry].
+	Revision int64
+
+	// BuiltAt is the wall-clock timestamp captured by
+	// [Registry.Recompute] before the swap, sourced from [Clock.Now].
+	BuiltAt time.Time
+
+	// ToolCount is the [EffectiveToolset.Len] of the new snapshot
+	// (number of tools after precedence flattening).
+	ToolCount int
+
+	// SourceCount is the number of [SourceConfig] entries the
+	// scanner walked to build this snapshot — equal to the
+	// registry's configured source count, not the number of
+	// sources that actually contributed tools (an empty source
+	// still counts).
+	SourceCount int
+
+	// CorrelationID is a process-monotonic identifier for this
+	// recompute cycle — same opaque shape as
+	// [SourceSynced.CorrelationID].
 	CorrelationID string
 }

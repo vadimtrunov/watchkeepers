@@ -147,3 +147,44 @@ var ErrFSStat = errors.New("toolregistry: fs stat failed")
 // ErrFSMkdir wraps a [FS.MkdirAll] failure when preparing the
 // per-source sync directory.
 var ErrFSMkdir = errors.New("toolregistry: fs mkdir failed")
+
+// ErrScanReadDir wraps a [FS.ReadDir] failure during M9.1.b's
+// [Registry.Recompute] scan of a per-source directory. The scanner
+// treats `fs.ErrNotExist` as "source not yet synced — skip" and does
+// NOT raise this sentinel; any OTHER read-dir error (permission,
+// stale handle, etc.) surfaces here so the [Registry] can log it
+// without aborting the whole recompute.
+var ErrScanReadDir = errors.New("toolregistry: scan readdir failed")
+
+// ErrInvalidGracePeriod is returned by [NewRegistry] when the
+// configured retire-grace-period is negative. Zero is allowed (the
+// retire bookkeeping is purely diagnostic when zero); negative is
+// rejected because it would render the deadline check ambiguous.
+var ErrInvalidGracePeriod = errors.New("toolregistry: invalid grace period")
+
+// ErrPublishAfterSwap is returned by [Registry.Recompute] when the
+// atomic snapshot swap has already committed (so the new
+// [EffectiveToolset] is the current snapshot and subsequent
+// [Registry.Acquire] calls observe it) but the subsequent
+// [Publisher.Publish] of [TopicEffectiveToolsetUpdated] failed. The
+// wrapped underlying error (typically [context.Canceled] or a
+// publisher-internal error) is chained through this sentinel so a
+// caller can distinguish "state committed, notification missed"
+// (`errors.Is(err, ErrPublishAfterSwap)`) from "scan aborted, no
+// change" (`errors.Is(err, context.Canceled)` AND NOT
+// `errors.Is(err, ErrPublishAfterSwap)`). Subscribers that only
+// observe `TopicEffectiveToolsetUpdated` consequently miss this
+// revision; external monitoring SHOULD treat the wrapped error as a
+// signal to re-read [Registry.Snapshot].
+var ErrPublishAfterSwap = errors.New("toolregistry: publish after swap")
+
+// ErrIntraSourceDuplicateManifestName is logged by [ScanSourceDir]
+// (and silently dropped after logging) when two per-tool
+// subdirectories within the same configured source declare the same
+// manifest `name`. The winner is the alphabetically-first toolDir
+// after sorting `FS.ReadDir` output — making the choice
+// deterministic across runs even if [FS.ReadDir] returns entries in
+// arbitrary order. M9.4's CI gates should reject duplicates at the
+// authoring boundary; at the scan boundary the registry refuses to
+// pick nondeterministically.
+var ErrIntraSourceDuplicateManifestName = errors.New("toolregistry: intra-source duplicate manifest name")
