@@ -225,80 +225,158 @@ func coordinatorSeedV4Fixture() *keepclient.ManifestVersion {
 	return v3
 }
 
-// TestCoordinatorSeed_LoadsViaLoadManifest is the happy-path proof:
-// pipe the V4 fixture mirroring `027_coordinator_manifest_v4_seed.sql`
-// through [LoadManifest] and assert the projected fields the M8.2.d
-// sub-item calls out — SystemPrompt still contains the reassignment-
-// boundary and lead-deferral phrases (unchanged from V1/V2/V3),
-// Toolset carries the V1+V2+V3+V4 tool names, AuthorityMatrix grants
-// `self` on each, and Autonomy is `autonomous`.
+// coordinatorSeedV5Fixture mirrors the manifest_version row written by
+// `deploy/migrations/028_coordinator_manifest_v5_seed.sql` (M8.3).
+// Supersedes [coordinatorSeedV4Fixture] for production boot.
 //
-// V4 is the right baseline for "what production loads" because
+// Shape diff vs V4: extends `Tools` with `record_watch_order` and
+// `list_pending_lessons`; extends `AuthorityMatrix` granting `self`
+// on each; appends two narrative paragraphs to `SystemPrompt`
+// documenting the new tools + the pending-lesson digest contract.
+// Personality, model, autonomy, and notebook recall tunables are
+// unchanged from V4.
+func coordinatorSeedV5Fixture() *keepclient.ManifestVersion {
+	v4 := coordinatorSeedV4Fixture()
+	const v5AuthorityMatrix = `{
+		"update_ticket_field": "self",
+		"find_overdue_tickets": "self",
+		"fetch_watch_orders": "self",
+		"nudge_reviewer": "self",
+		"post_daily_briefing": "self",
+		"find_stale_prs": "self",
+		"record_watch_order": "self",
+		"list_pending_lessons": "self",
+		"manifest_version_bump": "lead"
+	}`
+	const v5PromptAppendix = "\n\nWatch Orders: use record_watch_order to persist a" +
+		" natural-language task from the lead into your notebook as a" +
+		" pending_task. Required args: summary (≤2000 chars," +
+		" non-empty). Optional args: due_at (RFC3339 UTC, e.g." +
+		" 2026-05-20T17:00:00Z), source_ref (opaque trace string, ≤500" +
+		" chars — typically the Slack ts of the lead's DM). The" +
+		" handler returns watch_order_id + recorded_at; round-trip a" +
+		` confirmation DM to the lead ("Recorded as <id> — anything` +
+		` to amend?") so the lead can correct misparses immediately.` +
+		" Echo only the id + recorded_at in the round-trip; the" +
+		" summary already lives in the lead's DM history." +
+		"\n\nPending-lesson digest: use list_pending_lessons to surface" +
+		" notebook lessons currently inside the 24h cooling-off" +
+		" window. Optional args: limit (integer 1..200, default 50)." +
+		` Render the result as a "Pending lessons (24h cooling-off)"` +
+		" section in the daily briefing — one bullet per lesson with" +
+		" the id + subject + cooling_off_hours_left. The lead replies" +
+		" `forget <id>` in DM to suppress a lesson before its auto-" +
+		" activation; lessons that pass the cooling-off window without" +
+		" a forget reply auto-activate the next turn the runtime" +
+		" loads them via notebook recall. NEVER include the lesson" +
+		` content body in the briefing — the digest is a "what's` +
+		` pending?" surface, not a full incident review.`
+	v4.ID = CoordinatorManifestVersionV5ID
+	v4.VersionNo = 5
+	v4.SystemPrompt += v5PromptAppendix
+	v4.Tools = json.RawMessage(`[
+		{"name": "update_ticket_field"},
+		{"name": "find_overdue_tickets"},
+		{"name": "fetch_watch_orders"},
+		{"name": "nudge_reviewer"},
+		{"name": "post_daily_briefing"},
+		{"name": "find_stale_prs"},
+		{"name": "record_watch_order"},
+		{"name": "list_pending_lessons"}
+	]`)
+	v4.AuthorityMatrix = json.RawMessage(v5AuthorityMatrix)
+	return v4
+}
+
+// TestCoordinatorSeed_LoadsViaLoadManifest is the happy-path proof:
+// pipe the V5 fixture mirroring `028_coordinator_manifest_v5_seed.sql`
+// through [LoadManifest] and assert the projected fields the M8.3
+// sub-item calls out — SystemPrompt still contains the reassignment-
+// boundary and lead-deferral phrases (unchanged from V1/V2/V3/V4),
+// Toolset carries the V1+V2+V3+V4+V5 tool names, AuthorityMatrix
+// grants `self` on each, and Autonomy is `autonomous`.
+//
+// V5 is the right baseline for "what production loads" because
 // keepclient.GetManifest returns the highest-version_no row
-// (`core/pkg/keepclient/read_manifest.go:63-67`). The V1/V2/V3
+// (`core/pkg/keepclient/read_manifest.go:63-67`). The V1/V2/V3/V4
 // baselines are independently asserted by the corresponding
-// migration-shape tests reading migrations 024/025/026 off disk.
+// migration-shape tests reading migrations 024/025/026/027 off disk.
 //
 // The fixture path mirrors the existing `loader_test.go` fakeFetcher
 // pattern rather than spinning up a real test DB. Real-DB exercising
 // of the seed is covered by the `keep-integration-ci` pipeline in
 // `.github/workflows/ci.yml`.
+// coordinatorV5LoadBearingPhrases collects every system-prompt phrase
+// the V1..V5 progression considers load-bearing. Extracted into a
+// var so [TestCoordinatorSeed_LoadsViaLoadManifest] stays under the
+// gocyclo cap by iterating once rather than branching per phrase.
+var coordinatorV5LoadBearingPhrases = []string{
+	// V1 role boundary + lead-deferral phrases (preserved through V5).
+	"NEVER reassign tickets",
+	"ALWAYS surface a",
+	// V2 appendix.
+	"find_overdue_tickets to surface",
+	// V3 appendix (three Slack tools).
+	"fetch_watch_orders to read",
+	"nudge_reviewer to DM",
+	"post_daily_briefing to post",
+	// V4 appendix (GitHub stale-PRs tool).
+	"find_stale_prs to surface",
+	// V5 appendix (M8.3 Watch Order + pending-lesson digest).
+	"record_watch_order to persist",
+	"list_pending_lessons to surface",
+}
+
+// coordinatorV5SelfActions is the set of actions the V5 authority
+// matrix grants `self`. Matches the toolset names — every shipped
+// tool is granted `self` because Coordinator authority is
+// `autonomous` and gating happens per-tool at the handler boundary.
+var coordinatorV5SelfActions = []string{
+	"update_ticket_field",
+	"find_overdue_tickets",
+	"fetch_watch_orders",
+	"nudge_reviewer",
+	"post_daily_briefing",
+	"find_stale_prs",
+	"record_watch_order",
+	"list_pending_lessons",
+}
+
 func TestCoordinatorSeed_LoadsViaLoadManifest(t *testing.T) {
 	t.Parallel()
 
-	f := &fakeFetcher{response: coordinatorSeedV4Fixture()}
-
+	f := &fakeFetcher{response: coordinatorSeedV5Fixture()}
 	got, err := LoadManifest(context.Background(), f, CoordinatorManifestID)
 	if err != nil {
 		t.Fatalf("LoadManifest: %v", err)
 	}
 
-	const wantReassignmentPhrase = "NEVER reassign tickets"
-	if !strings.Contains(got.SystemPrompt, wantReassignmentPhrase) {
-		t.Errorf("SystemPrompt missing reassignment-boundary phrase %q; got:\n%s",
-			wantReassignmentPhrase, got.SystemPrompt)
-	}
-
-	const wantLeadDeferralPhrase = "ALWAYS surface a"
-	if !strings.Contains(got.SystemPrompt, wantLeadDeferralPhrase) {
-		t.Errorf("SystemPrompt missing lead-deferral phrase %q; got:\n%s",
-			wantLeadDeferralPhrase, got.SystemPrompt)
-	}
-
-	// V2 appendix: narrative guidance for `find_overdue_tickets`
-	// (preserved verbatim in V3).
-	const wantFindOverduePhrase = "find_overdue_tickets to surface"
-	if !strings.Contains(got.SystemPrompt, wantFindOverduePhrase) {
-		t.Errorf("SystemPrompt missing V2 read-tool guidance %q; got:\n%s",
-			wantFindOverduePhrase, got.SystemPrompt)
-	}
-
-	// V3 appendix: narrative guidance for the three Slack tools.
-	for _, phrase := range []string{
-		"fetch_watch_orders to read",
-		"nudge_reviewer to DM",
-		"post_daily_briefing to post",
-	} {
+	for _, phrase := range coordinatorV5LoadBearingPhrases {
 		if !strings.Contains(got.SystemPrompt, phrase) {
-			t.Errorf("SystemPrompt missing V3 slack-tool guidance %q; got:\n%s",
-				phrase, got.SystemPrompt)
+			t.Errorf("SystemPrompt missing phrase %q; got:\n%s", phrase, got.SystemPrompt)
 		}
 	}
 
-	// V4 appendix: narrative guidance for the GitHub stale-PRs tool.
-	const wantFindStalePRsPhrase = "find_stale_prs to surface"
-	if !strings.Contains(got.SystemPrompt, wantFindStalePRsPhrase) {
-		t.Errorf("SystemPrompt missing V4 github-tool guidance %q; got:\n%s",
-			wantFindStalePRsPhrase, got.SystemPrompt)
+	assertCoordinatorV5Toolset(t, got)
+
+	for _, action := range coordinatorV5SelfActions {
+		if v, want := got.AuthorityMatrix[action], "self"; v != want {
+			t.Errorf("AuthorityMatrix[%s] = %q, want %q", action, v, want)
+		}
 	}
 
-	wantNames := map[string]bool{
-		"update_ticket_field":  true,
-		"find_overdue_tickets": true,
-		"fetch_watch_orders":   true,
-		"nudge_reviewer":       true,
-		"post_daily_briefing":  true,
-		"find_stale_prs":       true,
+	if got.Autonomy != agentruntime.AutonomyAutonomous {
+		t.Errorf("Autonomy = %q, want %q (seed value)", got.Autonomy, agentruntime.AutonomyAutonomous)
+	}
+}
+
+// assertCoordinatorV5Toolset extracts the toolset-name assertion into
+// a helper so the parent test stays under the gocyclo cap.
+func assertCoordinatorV5Toolset(t *testing.T, got agentruntime.Manifest) {
+	t.Helper()
+	wantNames := map[string]bool{}
+	for _, n := range coordinatorV5SelfActions {
+		wantNames[n] = true
 	}
 	names := got.Toolset.Names()
 	if len(names) != len(wantNames) {
@@ -308,23 +386,6 @@ func TestCoordinatorSeed_LoadsViaLoadManifest(t *testing.T) {
 		if !wantNames[n] {
 			t.Errorf("Toolset contains unexpected entry %q; want one of %v", n, wantNames)
 		}
-	}
-
-	for _, action := range []string{
-		"update_ticket_field",
-		"find_overdue_tickets",
-		"fetch_watch_orders",
-		"nudge_reviewer",
-		"post_daily_briefing",
-		"find_stale_prs",
-	} {
-		if got, want := got.AuthorityMatrix[action], "self"; got != want {
-			t.Errorf("AuthorityMatrix[%s] = %q, want %q", action, got, want)
-		}
-	}
-
-	if got.Autonomy != agentruntime.AutonomyAutonomous {
-		t.Errorf("Autonomy = %q, want %q (seed value)", got.Autonomy, agentruntime.AutonomyAutonomous)
 	}
 }
 
@@ -408,10 +469,10 @@ func TestCoordinatorSeed_AuthorityMatrixUsesRuntimeVocabulary(t *testing.T) {
 		"watchmaster": true,
 	}
 
-	// Pin the boundary on the V4 fixture (the one production loads
-	// after migration 027 ships) so any future add that drifts to
+	// Pin the boundary on the V5 fixture (the one production loads
+	// after migration 028 ships) so any future add that drifts to
 	// `lead_approval` fails this test, not production.
-	f := &fakeFetcher{response: coordinatorSeedV4Fixture()}
+	f := &fakeFetcher{response: coordinatorSeedV5Fixture()}
 	got, err := LoadManifest(context.Background(), f, CoordinatorManifestID)
 	if err != nil {
 		t.Fatalf("LoadManifest: %v", err)
@@ -613,6 +674,83 @@ func TestCoordinatorSeedV2_MigrationContainsExpectedShape(t *testing.T) {
 		// `self` (read-only).
 		`"update_ticket_field": "self"`,
 		`"find_overdue_tickets": "self"`,
+		`"manifest_version_bump": "lead"`,
+		// Model + autonomy unchanged from V1.
+		"claude-sonnet-4-6",
+		"'autonomous'",
+		// Idempotency clause.
+		"ON CONFLICT (id) DO NOTHING",
+	}
+	for _, lit := range wantLiterals {
+		if !strings.Contains(body, lit) {
+			t.Errorf("migration missing expected literal %q", lit)
+		}
+	}
+}
+
+// TestCoordinatorSeedV5_MigrationContainsExpectedShape is the V5
+// equivalent of the V1/V2/V3/V4 migration-shape tests: reads
+// `deploy/migrations/028_coordinator_manifest_v5_seed.sql` off disk
+// and asserts the load-bearing literals (V5 manifest_version id,
+// version_no=5, the toolset extension with the two M8.3 tools, the
+// new authority-matrix entries granting `self`, the unchanged
+// system-prompt phrases, the V5 narrative-guidance phrases,
+// idempotency clause). Drift fails CI, not production.
+//
+// Migrations 024 / 025 / 026 / 027 / 028 are pinned by separate
+// migration-shape tests; the five tests together pin the
+// M8.2.a/b/c/d + M8.3 progression.
+func TestCoordinatorSeedV5_MigrationContainsExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	migrationPath := repoRelative(t, "deploy/migrations/028_coordinator_manifest_v5_seed.sql")
+	bytes, err := os.ReadFile(migrationPath) //nolint:gosec // test reads a fixed repo-relative path.
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", migrationPath, err)
+	}
+	body := string(bytes)
+
+	wantLiterals := []string{
+		// Stable ids — V5 manifest_version row + REUSED manifest id.
+		CoordinatorManifestVersionV5ID,
+		CoordinatorManifestID,
+		// Reused system tenant.
+		WatchmasterSystemOrganizationID,
+		// Version progression — V5 lands at version_no=5.
+		"  5,",
+		// System-prompt phrases (V1/V2/V3/V4 phrases unchanged; V5
+		// preserves them).
+		"NEVER reassign tickets",
+		"ALWAYS surface a",
+		"find_overdue_tickets to surface",
+		"fetch_watch_orders to read",
+		"nudge_reviewer to DM",
+		"post_daily_briefing to post",
+		"find_stale_prs to surface",
+		// V5 narrative-guidance appendix — pinned per-phrase so a
+		// future reword that drops one fails CI loudly.
+		"record_watch_order to persist",
+		"list_pending_lessons to surface",
+		// Toolset extension: V1/V2/V3/V4 entries preserved, V5
+		// entries added.
+		`"update_ticket_field"`,
+		`"find_overdue_tickets"`,
+		`"fetch_watch_orders"`,
+		`"nudge_reviewer"`,
+		`"post_daily_briefing"`,
+		`"find_stale_prs"`,
+		`"record_watch_order"`,
+		`"list_pending_lessons"`,
+		// Authority matrix entries — runtime vocab; M8.3 grants
+		// `self` on each of the two new tools.
+		`"update_ticket_field": "self"`,
+		`"find_overdue_tickets": "self"`,
+		`"fetch_watch_orders": "self"`,
+		`"nudge_reviewer": "self"`,
+		`"post_daily_briefing": "self"`,
+		`"find_stale_prs": "self"`,
+		`"record_watch_order": "self"`,
+		`"list_pending_lessons": "self"`,
 		`"manifest_version_bump": "lead"`,
 		// Model + autonomy unchanged from V1.
 		"claude-sonnet-4-6",

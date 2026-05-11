@@ -75,4 +75,17 @@ const (
 	// narrative guidance for the new tool. Personality, model,
 	// autonomy, and notebook recall tunables are unchanged from V3.
 	CoordinatorManifestVersionV4ID = "24000000-0000-4000-8000-000000000000"
+
+	// CoordinatorManifestVersionV5ID is the `manifest_version.id`
+	// (version_no=5) UUID seeded by migration 028 (M8.3). Supersedes
+	// [CoordinatorManifestVersionV4ID] for production boot. The V5
+	// row extends the toolset with `record_watch_order` (Watch Order
+	// persistence into the bot's notebook) and `list_pending_lessons`
+	// (24h cooling-off lesson digest for the daily briefing); grants
+	// `self` on each in the authority matrix; system prompt picks up
+	// narrative guidance for the new tools and the pending-lesson
+	// digest contract (including the lead's `forget <id>` Slack-DM
+	// reply path). Personality, model, autonomy, and notebook recall
+	// tunables are unchanged from V4.
+	CoordinatorManifestVersionV5ID = "25000000-0000-4000-8000-000000000000"
 )
