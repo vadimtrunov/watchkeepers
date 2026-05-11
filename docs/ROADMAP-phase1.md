@@ -451,14 +451,14 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 ---
 
-### M8 — Coordinator Watchkeeper + Jira adapter [ ]
+### M8 — Coordinator Watchkeeper + Jira adapter [x]
 
 **Goal**: A second role exists and performs real work.
 
 **Scope**
 
 - [x] **M8.1** **Jira adapter** — REST via `go-jira` or direct HTTP: JQL search, read, comment, and update of a whitelisted set of fields.
-- [ ] **M8.2** **Coordinator manifest + toolset** — system prompt and authority matrix (comment + field-update allowed; no reassignment without lead approval); tools `fetch_watch_orders` (reads Slack DMs from lead), `find_stale_prs`, `find_overdue_tickets`, `nudge_reviewer`, `post_daily_briefing`, `update_ticket_field`. Decomposed below by adapter scope so each sub-item is shippable end-to-end.
+- [x] **M8.2** **Coordinator manifest + toolset** — system prompt and authority matrix (comment + field-update allowed; no reassignment without lead approval); tools `fetch_watch_orders` (reads Slack DMs from lead), `find_stale_prs`, `find_overdue_tickets`, `nudge_reviewer`, `post_daily_briefing`, `update_ticket_field`. Decomposed below by adapter scope so each sub-item is shippable end-to-end.
   - [x] **M8.2.a** **Coordinator manifest seed + tool dispatch primitive + first Jira-write tool (`update_ticket_field`)** — migration seeding ONE `organization` (reuse system tenant `00000000-…`) + ONE `manifest` + ONE `manifest_version` row under stable `CoordinatorManifestID`, mirroring migration 017 (Watchmaster); system prompt encoding the Coordinator role, lead-deferral discipline, audit boundaries, and PII restrictions; authority matrix using the runtime authority vocabulary (`"self"`/`"lead"`/`"operator"`/`"watchmaster"` per `core/pkg/runtime/authority.go`) with `tools.update_ticket_field.assignee → lead` (no reassignment without lead approval) and other whitelisted writes → `self`; `core/pkg/manifest/coordinator.go` exporting `CoordinatorManifestID`; runtime tool-dispatch primitive — a `ToolHandler` registry on the wired runtime that maps `Toolset` names to concrete handler funcs and gates each `InvokeTool` call through both `Manifest.Toolset` membership AND `RequiresApproval`; first concrete handler `update_ticket_field` consuming the M8.1 `jira.Client.UpdateFields` whitelist write path; per-call resolver shape for the Jira `BasicAuthSource` so the Coordinator's tenant-scoped credentials never become a process-global static.
   - [x] **M8.2.b** **Jira read tool — `find_overdue_tickets`** — JQL composition with assignee + status + age threshold + project scope; cursor pagination via the M8.1 `jira.Client.Search` adapter; result projection through the shared M8.1 `issueWire.toIssue()` decoder; Coordinator manifest seed migration extends the `Toolset` array to include the new tool and the authority matrix grants `self` (read-only).
   - [x] **M8.2.c** **Slack tools bundle — `fetch_watch_orders` + `nudge_reviewer` + `post_daily_briefing`** — three tools sharing the M4.2 slack adapter: `fetch_watch_orders` reads Coordinator-DM history filtered to the lead's Slack user id (read-only, `self`); `nudge_reviewer` posts a templated nudge DM to a Slack user id (write, `self`); `post_daily_briefing` posts a structured briefing payload to a configured channel id (write, `self`); Coordinator manifest seed migration extends the `Toolset` and authority matrix; one shared briefing-formatter helper avoids per-tool duplication.
@@ -469,10 +469,10 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Verification**
 
-- [ ] Coordinator is spawned via the M7 flow.
-- [ ] Reads a Watch Order from a Slack DM; parser round-trips confirmation with the lead.
-- [ ] Finds an overdue ticket in the test Jira project; posts a nudge comment.
-- [ ] Posts a daily briefing to the configured Slack channel; briefing includes pending-lesson digest when applicable.
+- [x] Coordinator is spawned via the M7 flow.
+- [x] Reads a Watch Order from a Slack DM; parser round-trips confirmation with the lead.
+- [x] Finds an overdue ticket in the test Jira project; posts a nudge comment.
+- [x] Posts a daily briefing to the configured Slack channel; briefing includes pending-lesson digest when applicable.
 
 **Dependencies**: M7.
 **External prerequisite**: Jira test project provisioned with API credentials.
