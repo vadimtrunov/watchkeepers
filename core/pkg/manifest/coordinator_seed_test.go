@@ -180,19 +180,64 @@ func coordinatorSeedV3Fixture() *keepclient.ManifestVersion {
 	return v2
 }
 
-// TestCoordinatorSeed_LoadsViaLoadManifest is the happy-path proof:
-// pipe the V3 fixture mirroring `026_coordinator_manifest_v3_seed.sql`
-// through [LoadManifest] and assert the projected fields the M8.2.c
-// sub-item calls out — SystemPrompt still contains the reassignment-
-// boundary and lead-deferral phrases (unchanged from V1/V2), Toolset
-// carries the V1+V2+V3 tool names, AuthorityMatrix grants `self` on
-// each, and Autonomy is `autonomous`.
+// coordinatorSeedV4Fixture mirrors the manifest_version row written by
+// `deploy/migrations/027_coordinator_manifest_v4_seed.sql` (M8.2.d).
+// Supersedes [coordinatorSeedV3Fixture] for production boot.
 //
-// V3 is the right baseline for "what production loads" because
+// Shape diff vs V3: extends `Tools` with `find_stale_prs`; extends
+// `AuthorityMatrix` granting `self` on it; appends a narrative
+// paragraph to `SystemPrompt` documenting the new tool. Personality,
+// model, autonomy, and notebook recall tunables are unchanged from V3.
+func coordinatorSeedV4Fixture() *keepclient.ManifestVersion {
+	v3 := coordinatorSeedV3Fixture()
+	const v4AuthorityMatrix = `{
+		"update_ticket_field": "self",
+		"find_overdue_tickets": "self",
+		"fetch_watch_orders": "self",
+		"nudge_reviewer": "self",
+		"post_daily_briefing": "self",
+		"find_stale_prs": "self",
+		"manifest_version_bump": "lead"
+	}`
+	const v4PromptAppendix = "\n\nGitHub PRs: use find_stale_prs to surface pull requests" +
+		" awaiting a teammate's review for too long. Required args:" +
+		" repo_owner (GitHub user/org login), repo_name (repository" +
+		" name), reviewer_login (GitHub login of the reviewer to" +
+		" filter by), age_threshold_days (integer 1..365). The" +
+		" handler scans open PRs in the repo, filters to those where" +
+		" the supplied reviewer is in the requested-reviewers list AND" +
+		" the PR has not been updated in more than the threshold; caps" +
+		" at 200 PRs across 10 pages. Reviewer login matching is" +
+		" case-insensitive. Use this when composing the daily briefing" +
+		" or deciding which reviewer to nudge."
+	v3.ID = CoordinatorManifestVersionV4ID
+	v3.VersionNo = 4
+	v3.SystemPrompt += v4PromptAppendix
+	v3.Tools = json.RawMessage(`[
+		{"name": "update_ticket_field"},
+		{"name": "find_overdue_tickets"},
+		{"name": "fetch_watch_orders"},
+		{"name": "nudge_reviewer"},
+		{"name": "post_daily_briefing"},
+		{"name": "find_stale_prs"}
+	]`)
+	v3.AuthorityMatrix = json.RawMessage(v4AuthorityMatrix)
+	return v3
+}
+
+// TestCoordinatorSeed_LoadsViaLoadManifest is the happy-path proof:
+// pipe the V4 fixture mirroring `027_coordinator_manifest_v4_seed.sql`
+// through [LoadManifest] and assert the projected fields the M8.2.d
+// sub-item calls out — SystemPrompt still contains the reassignment-
+// boundary and lead-deferral phrases (unchanged from V1/V2/V3),
+// Toolset carries the V1+V2+V3+V4 tool names, AuthorityMatrix grants
+// `self` on each, and Autonomy is `autonomous`.
+//
+// V4 is the right baseline for "what production loads" because
 // keepclient.GetManifest returns the highest-version_no row
-// (`core/pkg/keepclient/read_manifest.go:63-67`). The V1/V2 baselines
-// are independently asserted by the corresponding migration-shape
-// tests reading migrations 024/025 off disk.
+// (`core/pkg/keepclient/read_manifest.go:63-67`). The V1/V2/V3
+// baselines are independently asserted by the corresponding
+// migration-shape tests reading migrations 024/025/026 off disk.
 //
 // The fixture path mirrors the existing `loader_test.go` fakeFetcher
 // pattern rather than spinning up a real test DB. Real-DB exercising
@@ -201,7 +246,7 @@ func coordinatorSeedV3Fixture() *keepclient.ManifestVersion {
 func TestCoordinatorSeed_LoadsViaLoadManifest(t *testing.T) {
 	t.Parallel()
 
-	f := &fakeFetcher{response: coordinatorSeedV3Fixture()}
+	f := &fakeFetcher{response: coordinatorSeedV4Fixture()}
 
 	got, err := LoadManifest(context.Background(), f, CoordinatorManifestID)
 	if err != nil {
@@ -240,12 +285,20 @@ func TestCoordinatorSeed_LoadsViaLoadManifest(t *testing.T) {
 		}
 	}
 
+	// V4 appendix: narrative guidance for the GitHub stale-PRs tool.
+	const wantFindStalePRsPhrase = "find_stale_prs to surface"
+	if !strings.Contains(got.SystemPrompt, wantFindStalePRsPhrase) {
+		t.Errorf("SystemPrompt missing V4 github-tool guidance %q; got:\n%s",
+			wantFindStalePRsPhrase, got.SystemPrompt)
+	}
+
 	wantNames := map[string]bool{
 		"update_ticket_field":  true,
 		"find_overdue_tickets": true,
 		"fetch_watch_orders":   true,
 		"nudge_reviewer":       true,
 		"post_daily_briefing":  true,
+		"find_stale_prs":       true,
 	}
 	names := got.Toolset.Names()
 	if len(names) != len(wantNames) {
@@ -263,6 +316,7 @@ func TestCoordinatorSeed_LoadsViaLoadManifest(t *testing.T) {
 		"fetch_watch_orders",
 		"nudge_reviewer",
 		"post_daily_briefing",
+		"find_stale_prs",
 	} {
 		if got, want := got.AuthorityMatrix[action], "self"; got != want {
 			t.Errorf("AuthorityMatrix[%s] = %q, want %q", action, got, want)
@@ -354,11 +408,10 @@ func TestCoordinatorSeed_AuthorityMatrixUsesRuntimeVocabulary(t *testing.T) {
 		"watchmaster": true,
 	}
 
-	// Pin the boundary on the V3 fixture (the one production loads
-	// after migration 026 ships) so a future M8.2.d add of
-	// `find_stale_prs` that drifts to `lead_approval` fails this
-	// test, not production.
-	f := &fakeFetcher{response: coordinatorSeedV3Fixture()}
+	// Pin the boundary on the V4 fixture (the one production loads
+	// after migration 027 ships) so any future add that drifts to
+	// `lead_approval` fails this test, not production.
+	f := &fakeFetcher{response: coordinatorSeedV4Fixture()}
 	got, err := LoadManifest(context.Background(), f, CoordinatorManifestID)
 	if err != nil {
 		t.Fatalf("LoadManifest: %v", err)
@@ -368,6 +421,76 @@ func TestCoordinatorSeed_AuthorityMatrixUsesRuntimeVocabulary(t *testing.T) {
 		if !allowed[value] {
 			t.Errorf("AuthorityMatrix[%q] = %q, want one of {self, lead, operator, watchmaster} "+
 				"(runtime vocabulary, not the M5.5.b.c.c.b enum)", action, value)
+		}
+	}
+}
+
+// TestCoordinatorSeedV4_MigrationContainsExpectedShape is the V4
+// equivalent of the V1/V2/V3 migration-shape tests: reads
+// `deploy/migrations/027_coordinator_manifest_v4_seed.sql` off disk
+// and asserts the load-bearing literals (V4 manifest_version id,
+// version_no=4, the toolset extension with `find_stale_prs`, the new
+// authority-matrix entry granting `self`, the unchanged system-prompt
+// phrases, the V4 narrative-guidance phrase, idempotency clause).
+// Drift fails CI, not production.
+//
+// Migrations 024 / 025 / 026 / 027 are pinned by separate
+// migration-shape tests; the four tests together pin the M8.2.a/b/c/d
+// progression.
+func TestCoordinatorSeedV4_MigrationContainsExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	migrationPath := repoRelative(t, "deploy/migrations/027_coordinator_manifest_v4_seed.sql")
+	bytes, err := os.ReadFile(migrationPath) //nolint:gosec // test reads a fixed repo-relative path.
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", migrationPath, err)
+	}
+	body := string(bytes)
+
+	wantLiterals := []string{
+		// Stable ids — V4 manifest_version row + REUSED manifest id.
+		CoordinatorManifestVersionV4ID,
+		CoordinatorManifestID,
+		// Reused system tenant.
+		WatchmasterSystemOrganizationID,
+		// Version progression — V4 lands at version_no=4.
+		"  4,",
+		// System-prompt phrases (V1/V2/V3 phrases unchanged; V4
+		// preserves them).
+		"NEVER reassign tickets",
+		"ALWAYS surface a",
+		"find_overdue_tickets to surface",
+		"fetch_watch_orders to read",
+		"nudge_reviewer to DM",
+		"post_daily_briefing to post",
+		// V4 narrative-guidance appendix — pinned so a future reword
+		// that drops the phrase fails CI loudly.
+		"find_stale_prs to surface",
+		// Toolset extension: V1/V2/V3 entries preserved, V4 entry added.
+		`"update_ticket_field"`,
+		`"find_overdue_tickets"`,
+		`"fetch_watch_orders"`,
+		`"nudge_reviewer"`,
+		`"post_daily_briefing"`,
+		`"find_stale_prs"`,
+		// Authority matrix entries — runtime vocab; M8.2.d grants
+		// `self` on the new tool.
+		`"update_ticket_field": "self"`,
+		`"find_overdue_tickets": "self"`,
+		`"fetch_watch_orders": "self"`,
+		`"nudge_reviewer": "self"`,
+		`"post_daily_briefing": "self"`,
+		`"find_stale_prs": "self"`,
+		`"manifest_version_bump": "lead"`,
+		// Model + autonomy unchanged from V1.
+		"claude-sonnet-4-6",
+		"'autonomous'",
+		// Idempotency clause.
+		"ON CONFLICT (id) DO NOTHING",
+	}
+	for _, lit := range wantLiterals {
+		if !strings.Contains(body, lit) {
+			t.Errorf("migration missing expected literal %q", lit)
 		}
 	}
 }
