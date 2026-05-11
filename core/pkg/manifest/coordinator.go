@@ -65,4 +65,14 @@ const (
 	// the new tools. Personality, model, autonomy, and notebook recall
 	// tunables are unchanged from V2.
 	CoordinatorManifestVersionV3ID = "23000000-0000-4000-8000-000000000000"
+
+	// CoordinatorManifestVersionV4ID is the `manifest_version.id`
+	// (version_no=4) UUID seeded by migration 027 (M8.2.d). Supersedes
+	// [CoordinatorManifestVersionV3ID] for production boot. The V4 row
+	// extends the toolset with `find_stale_prs` (the GitHub PR scan
+	// tool consuming the new `core/pkg/github` adapter) and grants
+	// `self` on it in the authority matrix; system prompt picks up
+	// narrative guidance for the new tool. Personality, model,
+	// autonomy, and notebook recall tunables are unchanged from V3.
+	CoordinatorManifestVersionV4ID = "24000000-0000-4000-8000-000000000000"
 )
