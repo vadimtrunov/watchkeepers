@@ -1,6 +1,10 @@
 package toolregistry
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // TopicSourceSynced is the [eventbus.Bus] topic the [Scheduler] emits
 // to after a successful clone / pull. M9.1.b's effective-toolset
@@ -22,6 +26,30 @@ const TopicSourceFailed = "toolregistry.source_failed"
 // in-flight calls already hold a reference to the old snapshot and
 // keep running on it until they release.
 const TopicEffectiveToolsetUpdated = "toolregistry.effective_toolset_updated"
+
+// TopicToolShadowed is the [eventbus.Bus] topic the M9.2 [Registry]
+// emits to once per shadowed tool detected during
+// [Registry.Recompute]. A tool is SHADOWED when a higher-priority
+// source already contributed the same [Manifest.Name] earlier in the
+// [SourceConfig] list — the lower-priority entry is dropped from the
+// snapshot AND surfaced via this topic so a downstream subscriber
+// can DM the lead with the message documented on
+// [ToolShadowed.Message].
+//
+// Publish order at the bus boundary is `tool_shadowed` events FIRST
+// (one per shadow, in the order they were detected) and
+// `effective_toolset_updated` LAST. NOTE on cross-topic delivery
+// order: [eventbus.Bus] runs a per-topic worker goroutine, so a
+// subscriber registered on both topics is NOT guaranteed to receive
+// `tool_shadowed` before `effective_toolset_updated` for the same
+// revision — the publish-call order is enforced, the
+// subscriber-delivery order across topics is not. Subscribers
+// requiring a strict before/after relationship correlate via
+// [ToolShadowed.CorrelationID] +
+// [EffectiveToolsetUpdated.CorrelationID] (set to the same value
+// for one recompute cycle) and key per-revision UI state off
+// [ToolShadowed.Revision] / [EffectiveToolsetUpdated.Revision].
+const TopicToolShadowed = "toolregistry.tool_shadowed"
 
 // SourceSynced is the payload published on [TopicSourceSynced] after
 // the scheduler has finished cloning / pulling a source AND the
@@ -112,8 +140,16 @@ type EffectiveToolsetUpdated struct {
 	// the same [Registry].
 	Revision int64
 
-	// BuiltAt is the wall-clock timestamp captured by
-	// [Registry.Recompute] before the swap, sourced from [Clock.Now].
+	// BuiltAt is the wall-clock timestamp captured at the START of
+	// [Registry.Recompute] (before the scan), sourced from
+	// [Clock.Now]. Subscribers measuring "publish-to-event latency"
+	// via `time.Since(ev.BuiltAt)` therefore observe the
+	// scan + swap + publish round-trip, not just the swap-to-publish
+	// delay. Under a healthy scan duration this distinction is
+	// sub-millisecond; under filesystem stalls the metric will
+	// include the stall time, which is usually the correct
+	// observability behaviour (the bump's wall-clock age IS the
+	// scan-stall duration).
 	BuiltAt time.Time
 
 	// ToolCount is the [EffectiveToolset.Len] of the new snapshot
@@ -131,4 +167,145 @@ type EffectiveToolsetUpdated struct {
 	// recompute cycle — same opaque shape as
 	// [SourceSynced.CorrelationID].
 	CorrelationID string
+}
+
+// ToolShadowed is the payload published on [TopicToolShadowed] once
+// per shadowed tool detected during [Registry.Recompute]. The
+// "winner" is the higher-priority source whose manifest landed in the
+// snapshot; the "shadowed" entry is the same-name manifest from a
+// lower-priority source that was dropped.
+//
+// Priority is the order of the [SourceConfig] list passed to
+// [NewRegistry]: an earlier entry has HIGHER priority (it wins the
+// merge), a later entry has LOWER priority (it gets shadowed).
+//
+// PII discipline: the payload carries source NAMES, the tool NAME,
+// and both Manifest VERSIONS — all operator / authoring-pipeline
+// identifiers, not credentials. The manifest's `Schema` / `Capabilities`
+// fields are deliberately NOT in the payload (a verbose subscriber
+// log would otherwise dump zod-schema bodies which can be
+// AI-authored under M9.4 and may contain proprietary code). The
+// `Revision` matches the [EffectiveToolset.Revision] this shadow was
+// observed on; the `CorrelationID` matches the
+// [EffectiveToolsetUpdated.CorrelationID] of the same recompute
+// cycle so subscribers can join the two streams.
+type ToolShadowed struct {
+	// ToolName is the [Manifest.Name] of the conflicting tool.
+	ToolName string
+
+	// WinnerSource is the [SourceConfig.Name] whose manifest landed in
+	// the snapshot.
+	WinnerSource string
+
+	// WinnerVersion is the [Manifest.Version] of the winning entry —
+	// duplicated onto the event so a subscriber building the DM
+	// message does not have to call back into [Registry.Snapshot].
+	WinnerVersion string
+
+	// ShadowedSource is the [SourceConfig.Name] whose manifest was
+	// dropped because [WinnerSource] already supplied [ToolName].
+	ShadowedSource string
+
+	// ShadowedVersion is the [Manifest.Version] of the dropped entry.
+	ShadowedVersion string
+
+	// Revision matches the [EffectiveToolset.Revision] of the
+	// snapshot this shadow was observed on. Strictly monotonic across
+	// publishes from the same [Registry]. Subscribers dedup
+	// repeat-shadow notifications by joining on
+	// (ToolName, ShadowedSource, ShadowedVersion, Revision) — the
+	// Revision is part of the dedup key because the same
+	// (ToolName, ShadowedSource, ShadowedVersion) tuple WILL fire on
+	// every subsequent Recompute that re-observes the conflict, and
+	// a subscriber that wants "DM the lead exactly once per
+	// new-arrival" gates on a max-seen revision rather than on the
+	// triple alone.
+	Revision int64
+
+	// BuiltAt mirrors [EffectiveToolset.BuiltAt] for this revision —
+	// captured at the START of [Registry.Recompute] (before the
+	// scan), sourced from [Clock.Now]. See
+	// [EffectiveToolsetUpdated.BuiltAt] for the latency-measurement
+	// implications.
+	BuiltAt time.Time
+
+	// CorrelationID matches the [EffectiveToolsetUpdated.CorrelationID]
+	// of the same recompute cycle — same opaque shape as
+	// [SourceSynced.CorrelationID]. The join key for subscribers
+	// observing both topics that need a strict before/after
+	// relationship across the per-topic worker boundary.
+	CorrelationID string
+}
+
+// newToolShadowedEvent constructs a [ToolShadowed] event payload
+// from a [ShadowedTool] (the in-process detection record returned by
+// [BuildEffective]) plus the per-recompute revision / builtAt /
+// correlationID context. Centralising the mapping keeps the field-
+// parity contract auditable: a future addition to [ShadowedTool]
+// that needs to land on the event flows through this constructor,
+// and the parallel reflection-based allowlist tests on BOTH structs
+// catch silent drift.
+func newToolShadowedEvent(sh ShadowedTool, revision int64, builtAt time.Time, correlationID string) ToolShadowed {
+	return ToolShadowed{
+		ToolName:        sh.ToolName,
+		WinnerSource:    sh.WinnerSource,
+		WinnerVersion:   sh.WinnerVersion,
+		ShadowedSource:  sh.ShadowedSource,
+		ShadowedVersion: sh.ShadowedVersion,
+		Revision:        revision,
+		BuiltAt:         builtAt,
+		CorrelationID:   correlationID,
+	}
+}
+
+// dmInjectionScrubber strips characters a malicious authoring
+// pipeline could embed in a [Manifest.Name] / [Manifest.Version] to
+// break out of the [ToolShadowed.Message] DM template: backticks
+// would close the inline-code-span, newlines would forge new lines,
+// `<@U…>` / `<!subteam^…>` Slack mention syntax would page an
+// unintended user, leading `>` would create a blockquote. The
+// scrubber is conservative — it strips rather than escapes — because
+// no rendering layer downstream of the bus is guaranteed to honour
+// escapes, and the only callers are DM-text builders.
+//
+// PII discipline: the scrubber operates on already-public identifier
+// strings (tool names + versions). It never sees credentials.
+var dmInjectionScrubber = strings.NewReplacer(
+	"`", "", "\n", " ", "\r", " ", "\t", " ",
+	"<", "", ">", "", "&", "", "|", "",
+)
+
+// Message returns the lead-facing DM text documented on the M9.2
+// roadmap entry: "<shadowed_source> now ships `<tool>` <shadowed_ver>;
+// <winner_source>'s `<tool>` <winner_ver> takes precedence. Review?".
+// The phrasing is asymmetric on purpose — the SHADOWED source is the
+// new arrival ("now ships"), the WINNER is the incumbent
+// ("takes precedence"). A subscriber wiring an actual Slack DM calls
+// this method to keep the wording consistent across deployments and
+// future re-wordings localised to one place.
+//
+// Untrusted-content discipline: [Manifest.Name] / [Manifest.Version]
+// flow into the template after [dmInjectionScrubber] strips
+// characters that could break out of the inline-code span or forge
+// Slack mention / formatting syntax. A hostile authoring pipeline
+// (M9.4 will land AI-authored tools) therefore cannot inject
+// markdown / Slack control sequences via the manifest itself.
+// Subscribers wrapping the output in further templates SHOULD
+// additionally escape per their own renderer's rules.
+//
+// Version-prefix note: the roadmap-entry example uses the SemVer "v"
+// prefix (`v1.2.0`) as illustration; the renderer here passes the
+// [Manifest.Version] verbatim, so a manifest authored with or
+// without a "v" prefix surfaces in the DM exactly as authored.
+func (e ToolShadowed) Message() string {
+	tool := dmInjectionScrubber.Replace(e.ToolName)
+	winnerVer := dmInjectionScrubber.Replace(e.WinnerVersion)
+	shadowedVer := dmInjectionScrubber.Replace(e.ShadowedVersion)
+	winnerSrc := dmInjectionScrubber.Replace(e.WinnerSource)
+	shadowedSrc := dmInjectionScrubber.Replace(e.ShadowedSource)
+	return fmt.Sprintf(
+		"%s now ships `%s` %s; %s's `%s` %s takes precedence. Review?",
+		shadowedSrc, tool, shadowedVer,
+		winnerSrc, tool, winnerVer,
+	)
 }

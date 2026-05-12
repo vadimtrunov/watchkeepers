@@ -162,8 +162,7 @@ func TestBuildEffective_PrecedenceFlatteningEarlierWins(t *testing.T) {
 	t.Parallel()
 	fakeFs := newFakeFS()
 	// `platform` and `private` both ship `count_open_prs`; platform is
-	// listed first → platform wins, private is silently dropped (M9.2
-	// will add the shadow event).
+	// listed first → platform wins, private becomes a shadow.
 	for _, src := range []string{"platform", "private"} {
 		parent := filepath.Join("/data", "tools", src)
 		fakeFs.dirEntries[parent] = []fs.DirEntry{
@@ -177,7 +176,7 @@ func TestBuildEffective_PrecedenceFlatteningEarlierWins(t *testing.T) {
 		{Name: "platform", Kind: SourceKindGit, URL: "https://x", PullPolicy: PullPolicyOnBoot},
 		{Name: "private", Kind: SourceKindGit, URL: "https://y", PullPolicy: PullPolicyOnBoot},
 	}
-	snap, err := BuildEffective(context.Background(), fakeFs, "/data", sources, 1, time.Now(), nil)
+	snap, shadows, err := BuildEffective(context.Background(), fakeFs, "/data", sources, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("BuildEffective: %v", err)
 	}
@@ -187,6 +186,13 @@ func TestBuildEffective_PrecedenceFlatteningEarlierWins(t *testing.T) {
 	got, _ := snap.Lookup("count_open_prs")
 	if got.Source != "platform" {
 		t.Errorf("expected platform-wins precedence, got Source=%q", got.Source)
+	}
+	if len(shadows) != 1 {
+		t.Fatalf("expected 1 shadow, got %d (%+v)", len(shadows), shadows)
+	}
+	sh := shadows[0]
+	if sh.ToolName != "count_open_prs" || sh.WinnerSource != "platform" || sh.ShadowedSource != "private" {
+		t.Errorf("shadow metadata: got %+v", sh)
 	}
 }
 
@@ -206,12 +212,15 @@ func TestBuildEffective_PerSourceReadDirErrorIsolated(t *testing.T) {
 		{Name: "good", Kind: SourceKindLocal, PullPolicy: PullPolicyOnBoot},
 	}
 	logger := &fakeLogger{}
-	snap, err := BuildEffective(context.Background(), fakeFs, "/data", sources, 1, time.Now(), logger)
+	snap, shadows, err := BuildEffective(context.Background(), fakeFs, "/data", sources, time.Now(), logger)
 	if err != nil {
 		t.Fatalf("BuildEffective should isolate per-source errors, got err=%v", err)
 	}
 	if snap.Len() != 1 || snap.Tools[0].Manifest.Name != "g1" {
 		t.Errorf("expected only [g1] to survive, got %+v", snap.Tools)
+	}
+	if len(shadows) != 0 {
+		t.Errorf("ReadDir-isolation does not produce shadows, got %+v", shadows)
 	}
 	// Source-failure log fired.
 	found := false
@@ -235,7 +244,7 @@ func TestBuildEffective_CtxCancel(t *testing.T) {
 	cancel()
 
 	sources := []SourceConfig{{Name: "x", Kind: SourceKindLocal, PullPolicy: PullPolicyOnBoot}}
-	_, err := BuildEffective(ctx, fakeFs, "/data", sources, 1, time.Now(), nil)
+	_, _, err := BuildEffective(ctx, fakeFs, "/data", sources, time.Now(), nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
@@ -249,7 +258,7 @@ func TestBuildEffective_NilFSPanics(t *testing.T) {
 			t.Fatal("expected panic on nil fs")
 		}
 	}()
-	_, _ = BuildEffective(context.Background(), nil, "/data", nil, 1, time.Now(), nil)
+	_, _, _ = BuildEffective(context.Background(), nil, "/data", nil, time.Now(), nil)
 }
 
 // TestScanSourceDir_IntraSourceDuplicateDeterministicWinner — when two
@@ -320,14 +329,19 @@ func TestScanSourceDir_IntraSourceDuplicateDeterministicWinner(t *testing.T) {
 
 func TestBuildEffective_EmptySourcesReturnsEmptySnapshot(t *testing.T) {
 	t.Parallel()
-	snap, err := BuildEffective(context.Background(), newFakeFS(), "/data", nil, 7, time.Now(), nil)
+	snap, shadows, err := BuildEffective(context.Background(), newFakeFS(), "/data", nil, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("BuildEffective: %v", err)
 	}
 	if snap.Len() != 0 {
 		t.Errorf("expected empty snapshot, got %d tools", snap.Len())
 	}
-	if snap.Revision != 7 {
-		t.Errorf("Revision: got %d, want 7", snap.Revision)
+	// BuildEffective stamps Revision=0; callers needing a monotonic
+	// counter (the Registry) stamp post-construction.
+	if snap.Revision != 0 {
+		t.Errorf("Revision: got %d, want 0 (caller stamps)", snap.Revision)
+	}
+	if len(shadows) != 0 {
+		t.Errorf("empty sources never produce shadows, got %+v", shadows)
 	}
 }

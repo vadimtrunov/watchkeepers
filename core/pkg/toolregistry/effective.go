@@ -5,12 +5,49 @@ import (
 	"time"
 )
 
+// ShadowedTool is one entry in the slice [BuildEffective] returns
+// alongside the [EffectiveToolset]: a manifest whose name collided
+// with an earlier-priority source's manifest and was dropped from
+// the snapshot. The struct carries enough metadata for a downstream
+// subscriber to construct the lead-facing DM documented on
+// [ToolShadowed.Message] — both the winner's source/version AND the
+// shadowed entry's source/version.
+//
+// Same-priority semantics: the FIRST source in the [SourceConfig]
+// list that contributes a given name wins; every later same-name
+// contribution is shadowed in the order it was seen. A single tool
+// name shadowed by three lower-priority sources produces three
+// distinct [ShadowedTool] entries (the same WinnerSource /
+// WinnerVersion repeated, distinct ShadowedSource / ShadowedVersion
+// per entry). Intra-source duplicates are NOT surfaced here — they
+// land in the [ScanSourceDir] log via
+// [ErrIntraSourceDuplicateManifestName] before reaching the
+// precedence-flattening loop.
+type ShadowedTool struct {
+	// ToolName is the [Manifest.Name] of the conflicting tool.
+	ToolName string
+
+	// WinnerSource is the [SourceConfig.Name] whose manifest landed
+	// in the snapshot.
+	WinnerSource string
+
+	// WinnerVersion is the [Manifest.Version] of the winning entry.
+	WinnerVersion string
+
+	// ShadowedSource is the [SourceConfig.Name] whose manifest was
+	// dropped by precedence flattening.
+	ShadowedSource string
+
+	// ShadowedVersion is the [Manifest.Version] of the dropped entry.
+	ShadowedVersion string
+}
+
 // EffectiveTool is one entry in an [EffectiveToolset]: a manifest
 // loaded from a configured source, projected after precedence
-// flattening. The struct is intentionally a shallow shape — M9.2 will
-// add shadow / conflict metadata (the lower-priority "winner" + a
-// list of shadowed entries); M9.1.b only flattens by name in
-// source-priority order.
+// flattening. The struct is intentionally a shallow shape — M9.2
+// records same-name conflicts on the side via [ShadowedTool] (returned
+// from [BuildEffective] alongside the snapshot) rather than embedding
+// per-tool conflict metadata onto every entry.
 //
 // The [Manifest.Source] field is already stamped by
 // [LoadManifestFromFile]; callers can read it directly off the
