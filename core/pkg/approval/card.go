@@ -52,12 +52,20 @@ import (
 // package's action_id codec (which is pinned to the M6.3 saga's
 // closed-set tool vocabulary). Operators marshal the slice with
 // [encoding/json] and POST it to Slack's `chat.postMessage`.
+//
+// `Elements` is `[]any` because the Block Kit `actions` block carries
+// [Element] (button) values while the `context` block carries
+// [ContextElement] (flat-text mrkdwn) values — the two element kinds
+// have INCOMPATIBLE JSON shapes (context-element `text` is a string;
+// action-element `text` is a nested [Text] object). A single typed
+// slice would force one shape on both blocks and Slack's API would
+// reject the resulting payload as malformed.
 type Block struct {
-	Type     string    `json:"type"`
-	Text     *Text     `json:"text,omitempty"`
-	BlockID  string    `json:"block_id,omitempty"`
-	Fields   []Text    `json:"fields,omitempty"`
-	Elements []Element `json:"elements,omitempty"`
+	Type     string `json:"type"`
+	Text     *Text  `json:"text,omitempty"`
+	BlockID  string `json:"block_id,omitempty"`
+	Fields   []Text `json:"fields,omitempty"`
+	Elements []any  `json:"elements,omitempty"`
 }
 
 // Text is the Block Kit text object. Either `plain_text` or `mrkdwn`.
@@ -68,13 +76,24 @@ type Text struct {
 }
 
 // Element is a Block Kit interactive element. M9.4.b emits only
-// `button` elements.
+// `button` elements (rendered inside an `actions` block). Slack's
+// context block uses a DIFFERENT shape — see [ContextElement].
 type Element struct {
 	Type     string `json:"type"`
 	Text     *Text  `json:"text,omitempty"`
 	ActionID string `json:"action_id,omitempty"`
 	Value    string `json:"value,omitempty"`
 	Style    string `json:"style,omitempty"`
+}
+
+// ContextElement is the Block Kit context-block element shape: a flat
+// `{"type":"mrkdwn","text":"..."}` object with `text` as a plain
+// string (NOT a nested [Text] object — that nesting fails Slack API
+// validation and drops the entire card payload, per Slack's Block
+// Kit composition-object reference).
+type ContextElement struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 // Block-kit vocabulary. Hoisted constants so the renderer and the
@@ -463,12 +482,16 @@ func sectionMrkdwn(text string) Block {
 	}
 }
 
-// contextLine returns a context block with a single mrkdwn line.
+// contextLine returns a context block with a single mrkdwn line. The
+// element is a flat [ContextElement] (not [Element]): Slack's context
+// block schema specifies `{"type":"mrkdwn","text":"..."}` with `text`
+// as a string. A nested [Text] object here fails Slack API validation
+// and drops the entire card payload.
 func contextLine(text string) Block {
 	return Block{
 		Type: blockTypeContext,
-		Elements: []Element{
-			{Type: textTypeMrkdwn, Text: &Text{Type: textTypeMrkdwn, Text: text}},
+		Elements: []any{
+			ContextElement{Type: textTypeMrkdwn, Text: text},
 		},
 	}
 }
@@ -479,28 +502,28 @@ func contextLine(text string) Block {
 func actionButtons(actionID string) Block {
 	return Block{
 		Type: blockTypeActions,
-		Elements: []Element{
-			{
+		Elements: []any{
+			Element{
 				Type:     elementTypeButton,
 				Text:     &Text{Type: textTypePlain, Text: "Approve", Emoji: true},
 				ActionID: actionID,
 				Value:    string(ButtonActionApprove),
 				Style:    buttonStylePrimary,
 			},
-			{
+			Element{
 				Type:     elementTypeButton,
 				Text:     &Text{Type: textTypePlain, Text: "Reject", Emoji: true},
 				ActionID: actionID,
 				Value:    string(ButtonActionReject),
 				Style:    buttonStyleDanger,
 			},
-			{
+			Element{
 				Type:     elementTypeButton,
 				Text:     &Text{Type: textTypePlain, Text: "Test in my DM", Emoji: true},
 				ActionID: actionID,
 				Value:    string(ButtonActionTestInDM),
 			},
-			{
+			Element{
 				Type:     elementTypeButton,
 				Text:     &Text{Type: textTypePlain, Text: "Ask questions", Emoji: true},
 				ActionID: actionID,

@@ -3,6 +3,7 @@ package approval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func TestReviewer_New_PanicsOnNilDeps(t *testing.T) {
 		defer func() {
 			if r := recover(); r != nil {
 				panicked = true
-				msg = r.(string)
+				msg = fmt.Sprintf("%v", r)
 			}
 		}()
 		deps := ReviewerDeps{Clock: newFakeClock(time.Now()), IDGenerator: &fakeIDGenerator{}}

@@ -63,7 +63,11 @@ func TestRenderApprovalCard_HappyPath(t *testing.T) {
 		"test_in_my_dm": false,
 		"ask_questions": false,
 	}
-	for _, el := range actionsBlock.Elements {
+	for _, raw := range actionsBlock.Elements {
+		el, ok := raw.(Element)
+		if !ok {
+			t.Fatalf("actions-block element: want Element, got %T", raw)
+		}
 		if el.ActionID != actionID {
 			t.Errorf("button action_id mismatch: %s", el.ActionID)
 		}
@@ -283,6 +287,64 @@ func TestRenderApprovalCard_PIICanary_CanaryStaysInsideDescriptionFence(t *testi
 	// payload is encoded only from the proposal id.
 	if strings.Contains(actionID, canary) {
 		t.Errorf("action_id leaked description canary: %s", actionID)
+	}
+}
+
+// TestRenderApprovalCard_ContextBlockElementShape pins the Slack
+// Block Kit schema for the context block's element: `text` MUST be a
+// string field, NOT a nested object. CodeRabbit caught a regression
+// where the prior shape `{"type":"mrkdwn","text":{"type":"mrkdwn",
+// "text":"..."}}` would fail Slack API validation and drop the card
+// payload.
+func TestRenderApprovalCard_ContextBlockElementShape(t *testing.T) {
+	in := newTestCardInput()
+	blocks, _, err := RenderApprovalCard(in, nil)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	var ctxBlock *Block
+	for i := range blocks {
+		if blocks[i].Type == blockTypeContext {
+			ctxBlock = &blocks[i]
+			break
+		}
+	}
+	if ctxBlock == nil {
+		t.Fatalf("no context block")
+	}
+	if len(ctxBlock.Elements) != 1 {
+		t.Fatalf("expected 1 context element, got %d", len(ctxBlock.Elements))
+	}
+	if _, ok := ctxBlock.Elements[0].(ContextElement); !ok {
+		t.Errorf("context element: want ContextElement (flat text string), got %T", ctxBlock.Elements[0])
+	}
+	// Marshal-then-decode pins the on-wire JSON shape.
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var decoded []struct {
+		Type     string `json:"type"`
+		Elements []struct {
+			Type string          `json:"type"`
+			Text json.RawMessage `json:"text"`
+		} `json:"elements"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	for _, b := range decoded {
+		if b.Type != blockTypeContext {
+			continue
+		}
+		for _, el := range b.Elements {
+			// `text` must decode as a JSON string ("..."), not an
+			// object ({...}). A JSON-string `text` field's first
+			// byte is `"`; an object's first byte is `{`.
+			if len(el.Text) == 0 || el.Text[0] != '"' {
+				t.Errorf("context element `text` must be a JSON string, got %s", string(el.Text))
+			}
+		}
 	}
 }
 

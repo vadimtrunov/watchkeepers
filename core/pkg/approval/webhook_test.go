@@ -77,7 +77,7 @@ func TestWebhook_NewWebhook_PanicsOnNilDeps(t *testing.T) {
 		defer func() {
 			if r := recover(); r != nil {
 				panicked = true
-				msg = r.(string)
+				msg = fmt.Sprintf("%v", r)
 			}
 		}()
 		deps := WebhookDeps{
