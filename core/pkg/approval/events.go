@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/vadimtrunov/watchkeepers/core/pkg/toolregistry"
 )
 
