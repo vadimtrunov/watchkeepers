@@ -311,3 +311,90 @@ var ErrInvalidDecisionKind = errors.New("approval: invalid decision kind")
 // records the conflicting attempt rather than silently overwriting the
 // recorded outcome.
 var ErrDecisionConflict = errors.New("approval: proposal already decided with a different kind")
+
+// ErrInvalidDryRunRequest is returned by [Request.Validate] when the
+// supplied [Request] is missing required fields (zero proposal id,
+// empty / over-bound tool name). Distinct from
+// [ErrInvalidBrokerInvocation] so an audit subscriber can group
+// "caller wired the request wrong" separately from "individual
+// invocation shape wrong".
+var ErrInvalidDryRunRequest = errors.New("approval: invalid dry-run request")
+
+// ErrInvalidBrokerKind is returned by [BrokerKind.Validate] when the
+// value is outside the closed set ([BrokerSlack], [BrokerJira]). The
+// set is closed by design — adding a new broker requires a new
+// rewrite branch in [Executor.executeScoped] AND a new validation
+// case.
+var ErrInvalidBrokerKind = errors.New("approval: invalid broker kind")
+
+// ErrInvalidBrokerInvocation is returned by [BrokerInvocation.Validate]
+// when the invocation's [BrokerInvocation.Op] field is empty / over-
+// bound. Distinct from [ErrInvalidBrokerKind] so callers can triage
+// "missing or malformed op" separately from "broker kind not in set".
+var ErrInvalidBrokerInvocation = errors.New("approval: invalid broker invocation")
+
+// ErrInvalidBrokerArgs is returned by [BrokerInvocation.Validate] when
+// the invocation's `Args` map exceeds [MaxBrokerArgCount] keys, or any
+// key / value exceeds its per-entry bound. The bound prevents an
+// adversarial agent from landing an unbounded per-invocation payload
+// on the in-process [Trace] return value.
+var ErrInvalidBrokerArgs = errors.New("approval: invalid broker invocation args")
+
+// ErrInvocationsExceedLimit is returned by [Request.Validate] when
+// `Invocations` exceeds [MaxInvocationsPerRequest]. A dry-running tool
+// emitting more than 32 broker writes in a single invocation is
+// almost certainly mis-scoped; the bound catches it at the entry
+// boundary.
+var ErrInvocationsExceedLimit = errors.New("approval: dry-run invocations exceed per-request limit")
+
+// ErrPreApprovalWarning is returned by [Executor.Execute] under
+// [toolregistry.DryRunModeNone]. The sentinel IS the warning: the
+// caller (runtime glue) surfaces it to the lead BEFORE any real
+// invocation reaches a broker. The wrapped message names the tool so
+// the lead-facing surface can render a per-tool message
+// ("tool X declares dry_run_mode=none — first call goes to production").
+var ErrPreApprovalWarning = errors.New("approval: pre-approval warning")
+
+// ErrScopeResolution wraps a non-nil [ScopeResolver] error. Mirrors
+// [ErrIdentityResolution]'s shape: callers can
+// `errors.Is(err, ErrScopeResolution)` for kind-of-failure and
+// `errors.Is(err, underlyingErr)` for the cause.
+var ErrScopeResolution = errors.New("approval: scope resolution failed")
+
+// ErrEmptyResolvedScope is returned by [Executor.Execute] when the
+// configured [ScopeResolver] returns `(Scope{}, nil)`. Same fail-loud
+// discipline as [ErrEmptyResolvedIdentity]: the resolver said "no
+// error" while supplying an empty value — either a bug in the
+// resolver or a misconfiguration silently erasing the dry-run scope.
+var ErrEmptyResolvedScope = errors.New("approval: scope resolver returned empty value")
+
+// ErrInvalidScope is returned by [Scope.Validate] when either
+// [Scope.LeadDMChannel] or [Scope.JiraSandboxProject] is empty / blank
+// after a non-error resolver return. Distinct from
+// [ErrEmptyResolvedScope] so callers can triage "fully zero-valued
+// scope" separately from "one field present, one missing".
+var ErrInvalidScope = errors.New("approval: invalid scope")
+
+// ErrBrokerForward wraps a non-nil [BrokerForwarder.Forward] error
+// under [toolregistry.DryRunModeScoped]. The returned [Trace] carries
+// the partial outcomes built up to (but not including) the failing
+// invocation so the caller surfaces "how far the dry-run got".
+// Callers `errors.Is(err, ErrBrokerForward)` for kind-of-failure and
+// `errors.Is(err, underlyingErr)` for the broker-specific cause.
+var ErrBrokerForward = errors.New("approval: broker forward failed")
+
+// ErrPublishDryRunExecuted wraps a [Publisher.Publish] failure for
+// [TopicDryRunExecuted]. Same "event is the durable record" contract
+// as [ErrPublishToolApproved]: a publish failure means the dry-run
+// outcome is NOT observable downstream (the M9.7 audit subscriber
+// will not record it), even though the per-invocation work was
+// performed. Caller MUST retry or surface to the operator.
+var ErrPublishDryRunExecuted = errors.New("approval: publish tool_dry_run_executed failed")
+
+// ErrInvalidDisposition is returned by [Disposition.Validate] when the
+// value is outside the closed set ([DispositionGhosted],
+// [DispositionScoped]). Symmetric with [ErrInvalidBrokerKind] /
+// [ErrInvalidRoute] / [ErrInvalidDryRunMode] — a future audit
+// subscriber decoding a [Trace] from a stored row uses this to
+// validate the incoming wire value uniformly (iter-1 critic m4 fix).
+var ErrInvalidDisposition = errors.New("approval: invalid disposition")

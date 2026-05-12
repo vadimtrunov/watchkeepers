@@ -335,6 +335,100 @@ func mustNewUUIDv7() uuid.UUID {
 	return id
 }
 
+// constScopeResolver returns a fixed [Scope] (or error) for every
+// call. The deterministic shape lets tests pin the scoped-mode
+// rewrite without spinning up a real lead-DM / Jira-sandbox lookup.
+func constScopeResolver(scope Scope, err error) ScopeResolver {
+	return func(_ context.Context, _ uuid.UUID) (Scope, error) {
+		return scope, err
+	}
+}
+
+// fakeBrokerForwarder captures every forwarded invocation and
+// optionally returns an error on the configured call (1-indexed). The
+// fake snapshots a defensive deep-copy of the supplied Args so a
+// caller-side mutation post-Forward cannot retroactively corrupt the
+// recorded trail.
+type fakeBrokerForwarder struct {
+	mu       sync.Mutex
+	calls    []BrokerInvocation
+	err      error
+	errAfter int
+}
+
+func (f *fakeBrokerForwarder) Forward(_ context.Context, inv BrokerInvocation) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	args := make(map[string]string, len(inv.Args))
+	for k, v := range inv.Args {
+		args[k] = v
+	}
+	f.calls = append(f.calls, BrokerInvocation{Kind: inv.Kind, Op: inv.Op, Args: args})
+	if f.err != nil && (f.errAfter == 0 || len(f.calls) >= f.errAfter) {
+		return f.err
+	}
+	return nil
+}
+
+func (f *fakeBrokerForwarder) snapshot() []BrokerInvocation {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]BrokerInvocation, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
+// mutatingBrokerForwarder injects a key into the supplied
+// invocation's Args map on Forward. Used by the iter-1 codex M1
+// defence-in-depth test to assert the executor's post-Forward
+// re-clone protects the stored Outcome.Effective from a buggy
+// forwarder mutation.
+type mutatingBrokerForwarder struct {
+	injectKey string
+	injectVal string
+}
+
+func (m *mutatingBrokerForwarder) Forward(_ context.Context, inv BrokerInvocation) error {
+	if inv.Args != nil {
+		inv.Args[m.injectKey] = m.injectVal
+	}
+	return nil
+}
+
+// cancellingBrokerForwarder cancels the supplied [context.CancelFunc]
+// on the configured Forward call (1-indexed). Used by the iter-1
+// critic M2/M3 fixes to drive the per-iteration ctx-check + the
+// publish-despite-cancel-after-side-effects path.
+type cancellingBrokerForwarder struct {
+	mu        sync.Mutex
+	callCount *int32
+	cancelOn  int32
+	cancel    context.CancelFunc
+	// onCancel, when non-nil, is Done()'d after firing cancel — so the
+	// publish-despite-cancel test can deterministically order the
+	// cancel against the loop's next iteration.
+	onCancel *sync.WaitGroup
+	calls    []BrokerInvocation
+}
+
+func (c *cancellingBrokerForwarder) Forward(_ context.Context, inv BrokerInvocation) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	*c.callCount++
+	args := make(map[string]string, len(inv.Args))
+	for k, v := range inv.Args {
+		args[k] = v
+	}
+	c.calls = append(c.calls, BrokerInvocation{Kind: inv.Kind, Op: inv.Op, Args: args})
+	if *c.callCount == c.cancelOn && c.cancel != nil {
+		c.cancel()
+		if c.onCancel != nil {
+			c.onCancel.Done()
+		}
+	}
+	return nil
+}
+
 // newTestProposal builds a fully-populated [Proposal] suitable for the
 // store / webhook / callback dispatcher tests. The caller may mutate
 // the returned struct freely.
