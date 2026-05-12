@@ -10,11 +10,63 @@ import (
 	"strings"
 )
 
+// DryRunMode is the closed-set enum a tool manifest declares to
+// describe how the runtime should execute the tool when the operator
+// has not yet approved it for real-world side effects (M9.4.c).
+//
+//   - [DryRunModeGhost] — every write-side broker call is stubbed; the
+//     runtime records a "would have done: X, Y, Z" trace.
+//   - [DryRunModeScoped] — broker calls run with per-deployment filter
+//     injection (Slack sends rerouted to the lead's DM, Jira writes
+//     redirected to a sandbox project). Real outbound side effects
+//     reach a contained surface.
+//   - [DryRunModeNone] — no dry-run is available; the runtime surfaces
+//     an explicit pre-approval warning before the first call. Authors
+//     declaring `none` MUST justify the choice in the proposal review.
+//
+// The set is closed by design (M9.1.a [SourceKind] / [PullPolicy]
+// pattern): adding a new mode requires a new wiring path in the M9.4.c
+// executor. The empty string is NOT a valid value — strict decoding
+// refuses an absent / blank `dry_run_mode` so an AI-authored manifest
+// cannot silently land without an explicit dry-run choice.
+type DryRunMode string
+
+const (
+	// DryRunModeGhost stubs every write-side broker call and records
+	// the would-have-done trace.
+	DryRunModeGhost DryRunMode = "ghost"
+
+	// DryRunModeScoped reroutes broker writes to a per-deployment
+	// sandbox surface (Slack → lead DM, Jira → sandbox project).
+	DryRunModeScoped DryRunMode = "scoped"
+
+	// DryRunModeNone declares no dry-run is available; the runtime
+	// MUST surface an explicit pre-approval warning. Authors choosing
+	// `none` accept that the lead reviews real-world side effects on
+	// first invocation.
+	DryRunModeNone DryRunMode = "none"
+)
+
+// Validate reports whether `m` is in the closed [DryRunMode] set.
+// Returns [ErrInvalidDryRunMode] otherwise (including the empty
+// string — see the [DryRunMode] godoc for why "no value" is rejected
+// rather than defaulted).
+func (m DryRunMode) Validate() error {
+	switch m {
+	case DryRunModeGhost, DryRunModeScoped, DryRunModeNone:
+		return nil
+	default:
+		return fmt.Errorf("%w: %q", ErrInvalidDryRunMode, string(m))
+	}
+}
+
 // Manifest is the wire-format per-tool `manifest.json` decoded by
 // [DecodeManifest] / [LoadManifestFromFile]. The schema mirrors the
 // roadmap M9.1 description: `name`, `version`, `capabilities`,
 // zod-compatible `schema`, auto-filled `source`, and optional
-// `signature`. Strict decoding rejects unknown fields so an
+// `signature`. M9.4.a additionally requires `dry_run_mode` on every
+// manifest so the M9.4.c executor never has to guess the runtime
+// posture. Strict decoding rejects unknown fields so an
 // operator-authored typo never silently degrades to defaults.
 type Manifest struct {
 	// Name is the tool identifier used by the runtime ACL gate at
@@ -63,6 +115,14 @@ type Manifest struct {
 	// still allows the field name to be absent entirely (the JSON tag
 	// is `omitempty`).
 	Signature string `json:"signature,omitempty"`
+
+	// DryRunMode is the closed-set declaration of how the runtime
+	// executes this tool pre-approval (M9.4.a schema extension; M9.4.c
+	// runtime executor). Required: a manifest that omits the field —
+	// or supplies an unknown value — is refused by [DecodeManifest]
+	// with [ErrManifestMissingRequired] / [ErrInvalidDryRunMode]. See
+	// the [DryRunMode] godoc for the three valid values.
+	DryRunMode DryRunMode `json:"dry_run_mode"`
 }
 
 // Validate runs the post-decode required-field check. Called by
@@ -85,6 +145,21 @@ func (m Manifest) Validate() error {
 	}
 	if len(bytes.TrimSpace(m.Schema)) == 0 || bytes.Equal(bytes.TrimSpace(m.Schema), []byte("null")) {
 		return fmt.Errorf("%w: schema", ErrManifestMissingRequired)
+	}
+	// `dry_run_mode` is checked LAST deliberately: the M9.4.a
+	// schema extension was added to ~25 pre-existing M9.1.a/b/M9.2
+	// happy-path JSON fixtures by adding the field; missing-required
+	// test fixtures targeting the earlier fields fire on their own
+	// field before reaching this check, so existing assertions on
+	// `ErrManifestMissingRequired` for name / version / capabilities
+	// / schema remain stable. A future refactor reordering this
+	// block would silently shift which sentinel ~25 fixtures return
+	// — keep the field LAST.
+	if strings.TrimSpace(string(m.DryRunMode)) == "" {
+		return fmt.Errorf("%w: dry_run_mode", ErrManifestMissingRequired)
+	}
+	if err := m.DryRunMode.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

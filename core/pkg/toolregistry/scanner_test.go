@@ -20,10 +20,10 @@ func TestScanSourceDir_HappyPathAlphaOrder(t *testing.T) {
 		fakeDirEntry{name: "ant", isDir: true},
 	}
 	fakeFs.files[filepath.Join(parent, "zebra", "manifest.json")] = []byte(
-		`{"name":"zebra","version":"1.0.0","capabilities":["c"],"schema":{}}`,
+		`{"name":"zebra","version":"1.0.0","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 	)
 	fakeFs.files[filepath.Join(parent, "ant", "manifest.json")] = []byte(
-		`{"name":"ant","version":"1.0.0","capabilities":["c"],"schema":{}}`,
+		`{"name":"ant","version":"1.0.0","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 	)
 
 	got, err := ScanSourceDir(context.Background(), fakeFs, "/data", "platform", nil)
@@ -79,7 +79,7 @@ func TestScanSourceDir_MalformedManifestSkippedAndLogged(t *testing.T) {
 		fakeDirEntry{name: "bad", isDir: true},
 	}
 	fakeFs.files[filepath.Join(parent, "good", "manifest.json")] = []byte(
-		`{"name":"good","version":"1","capabilities":["c"],"schema":{}}`,
+		`{"name":"good","version":"1","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 	)
 	fakeFs.files[filepath.Join(parent, "bad", "manifest.json")] = []byte("not json")
 
@@ -115,7 +115,7 @@ func TestScanSourceDir_NonDirEntriesIgnored(t *testing.T) {
 		fakeDirEntry{name: "good", isDir: true},
 	}
 	fakeFs.files[filepath.Join(parent, "good", "manifest.json")] = []byte(
-		`{"name":"good","version":"1","capabilities":["c"],"schema":{}}`,
+		`{"name":"good","version":"1","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 	)
 
 	got, err := ScanSourceDir(context.Background(), fakeFs, "/data", "x", nil)
@@ -136,7 +136,7 @@ func TestScanSourceDir_CtxCancelMidScan(t *testing.T) {
 		fakeDirEntry{name: "b", isDir: true},
 	}
 	fakeFs.files[filepath.Join(parent, "a", "manifest.json")] = []byte(
-		`{"name":"a","version":"1","capabilities":["c"],"schema":{}}`,
+		`{"name":"a","version":"1","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -169,7 +169,7 @@ func TestBuildEffective_PrecedenceFlatteningEarlierWins(t *testing.T) {
 			fakeDirEntry{name: "count_open_prs", isDir: true},
 		}
 		fakeFs.files[filepath.Join(parent, "count_open_prs", "manifest.json")] = []byte(
-			`{"name":"count_open_prs","version":"1.0.0","capabilities":["c"],"schema":{}}`,
+			`{"name":"count_open_prs","version":"1.0.0","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 		)
 	}
 	sources := []SourceConfig{
@@ -203,7 +203,7 @@ func TestBuildEffective_PerSourceReadDirErrorIsolated(t *testing.T) {
 	bad := filepath.Join("/data", "tools", "bad")
 	fakeFs.dirEntries[good] = []fs.DirEntry{fakeDirEntry{name: "g1", isDir: true}}
 	fakeFs.files[filepath.Join(good, "g1", "manifest.json")] = []byte(
-		`{"name":"g1","version":"1","capabilities":["c"],"schema":{}}`,
+		`{"name":"g1","version":"1","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 	)
 	fakeFs.readDirErr[bad] = errSentinel
 
@@ -296,10 +296,10 @@ func TestScanSourceDir_IntraSourceDuplicateDeterministicWinner(t *testing.T) {
 			fakeFs.dirEntries[parent] = order.entries
 			// Both directories declare the SAME manifest name.
 			fakeFs.files[filepath.Join(parent, "z_winner", "manifest.json")] = []byte(
-				`{"name":"dup","version":"1.0","capabilities":["c"],"schema":{}}`,
+				`{"name":"dup","version":"1.0","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 			)
 			fakeFs.files[filepath.Join(parent, "a_loser", "manifest.json")] = []byte(
-				`{"name":"dup","version":"2.0","capabilities":["c"],"schema":{}}`,
+				`{"name":"dup","version":"2.0","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 			)
 			logger := &fakeLogger{}
 			got, err := ScanSourceDir(context.Background(), fakeFs, "/data", "src", logger)

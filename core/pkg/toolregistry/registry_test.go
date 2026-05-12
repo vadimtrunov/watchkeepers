@@ -54,7 +54,7 @@ func writeManifest(fakeFs *fakeFS, dataDir, sourceName, toolName, version string
 		caps = []string{"placeholder"}
 	}
 	body := fmt.Sprintf(
-		`{"name":%q,"version":%q,"capabilities":[%q],"schema":{}}`,
+		`{"name":%q,"version":%q,"capabilities":[%q],"schema":{},"dry_run_mode":"none"}`,
 		toolName, version, caps[0],
 	)
 	fakeFs.files[filepath.Join(parent, toolName, "manifest.json")] = []byte(body)
