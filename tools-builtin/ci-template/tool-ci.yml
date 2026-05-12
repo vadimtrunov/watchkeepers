@@ -1,0 +1,333 @@
+# tool-ci.yml — Shared CI workflow template for Watchkeeper tool repos
+# (M9.4.d).
+#
+# Distribution: published to the platform `watchkeeper-tools` repo at
+#   .github/workflows/tool-ci.yml
+# under semver-tagged releases (vX.Y.Z). Consumers (the platform repo
+# itself + customer-private tool repos) pin a release via:
+#
+#   uses: watchkeeper-tools/watchkeeper-tools/.github/workflows/tool-ci.yml@vX.Y.Z
+#
+# Gate vocabulary is pinned by `core/pkg/approval/reviewer.go`'s
+# `GateName` closed set (M9.4.b): typecheck / undeclared_fs_net /
+# vitest / capability_declaration. The `name:` of each gate step
+# matches the `GateName` value verbatim so the audit subscriber that
+# joins M9.4.b slack-native review outcomes to M9.4.d git-pr review
+# outcomes sees a uniform vocabulary.
+#
+# Inlined linters: the `undeclared_fs_net` and `capability_declaration`
+# gates inline node scripts via heredoc so the template is fully
+# self-contained — a customer-private tool repo adopting this template
+# does not need to vendor or `npm install` any external lint package.
+# The patterns are copied verbatim from the M9.4.b reviewer
+# (`core/pkg/approval/reviewer.go:fsNetPattern` /
+# `capabilityIDFormat`) and the manifest decoder
+# (`core/pkg/toolregistry/manifest.go:DryRunMode`); a Go contract test
+# (`core/pkg/approval/tool_ci_template_test.go`) pins parity, including
+# byte-for-byte mirroring of the needle table, the capability-id regex,
+# the dry_run_mode closed set, the action SHA pinning, the permissions
+# block, the input defaults, and the reusable-workflow outputs wiring.
+
+name: Tool CI (Watchkeeper shared template)
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: "Node.js version (semver, full)."
+        type: string
+        required: false
+        default: "24.15.0"
+      pnpm_version:
+        description: "pnpm version (semver, full)."
+        type: string
+        required: false
+        default: "10.33.0"
+      coverage_threshold:
+        description: "Vitest coverage floor (percent, applied to lines/functions/branches/statements)."
+        type: number
+        required: false
+        default: 80
+      enable_signing:
+        description: "If true, the optional signing step runs on merge to main or on a v* tag."
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      tool_bundle_sha256:
+        description: >-
+          Deterministic SHA-256 over (manifest.json + non-test src/**/*.ts)
+          emitted by the optional sign step. Empty when enable_signing=false
+          or when the run is not on the default branch / v* tag.
+        value: ${{ jobs.tool-ci.outputs.tool_bundle_sha256 }}
+
+permissions:
+  contents: read
+
+jobs:
+  tool-ci:
+    name: Tool CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      tool_bundle_sha256: ${{ steps.sign.outputs.tool_bundle_sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          version: ${{ inputs.pnpm_version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Gate 1: typecheck. Mirrors core/pkg/approval/reviewer.go:GateTypecheck.
+      # The M9.4.b stub heuristically asserted "TS-shaped surface"; the
+      # M9.4.d real gate runs `tsc --noEmit` against the consumer's
+      # tsconfig.json so a type error fails the gate loud.
+      - name: typecheck
+        run: pnpm exec tsc --noEmit
+
+      # Gate 2: undeclared_fs_net. Mirrors
+      # core/pkg/approval/reviewer.go:GateUndeclaredFSNet. The needles
+      # and required-capability ids are copied verbatim from the
+      # reviewer's `fsNetPattern` table; the Go contract test pins
+      # parity. The script reads manifest.json + walks src/**/*.ts
+      # (skipping *.test.ts) and fails when a needle is present but
+      # the matching capability is absent from `manifest.capabilities`.
+      # The walker uses `fs.statSync` (follows symlinks) with a
+      # realpath visited-set so symlinked source files / directories
+      # are scanned but cycles cannot blow the stack — codex/critic
+      # iter-1 M9 flagged the original `Dirent.isFile()` shape as
+      # silently underscanning symlinked sources.
+      - name: undeclared_fs_net
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/lint-fs-net.mjs" <<'NODESCRIPT'
+          import fs from 'node:fs';
+          import path from 'node:path';
+
+          // Mirrors core/pkg/approval/reviewer.go:fsNetPattern (M9.4.b).
+          const needles = [
+            { needle: 'from "fs"',        cap: 'filesystem:read' },
+            { needle: "from 'fs'",        cap: 'filesystem:read' },
+            { needle: 'from "node:fs"',   cap: 'filesystem:read' },
+            { needle: "from 'node:fs'",   cap: 'filesystem:read' },
+            { needle: 'require("fs")',    cap: 'filesystem:read' },
+            { needle: "require('fs')",    cap: 'filesystem:read' },
+            { needle: 'import("fs")',     cap: 'filesystem:read' },
+            { needle: "import('fs')",     cap: 'filesystem:read' },
+            { needle: 'fetch(',           cap: 'network:http' },
+            { needle: 'from "http"',      cap: 'network:http' },
+            { needle: "from 'http'",      cap: 'network:http' },
+            { needle: 'from "node:http"', cap: 'network:http' },
+            { needle: "from 'node:http'", cap: 'network:http' },
+          ];
+
+          let manifest;
+          try {
+            manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+          } catch (e) {
+            console.error(`undeclared_fs_net: cannot read manifest.json: ${e.message}`);
+            process.exit(1);
+          }
+          const declared = new Set(
+            Array.isArray(manifest.capabilities) ? manifest.capabilities : []
+          );
+
+          const root = 'src';
+          if (!fs.existsSync(root)) {
+            console.error('undeclared_fs_net: no src/ directory found');
+            process.exit(1);
+          }
+          const files = [];
+          const visited = new Set();
+          const walk = (dir) => {
+            const realDir = fs.realpathSync(dir);
+            if (visited.has(realDir)) return;
+            visited.add(realDir);
+            for (const entry of fs.readdirSync(dir)) {
+              const p = path.join(dir, entry);
+              let stat;
+              try { stat = fs.statSync(p); } catch { continue; }
+              if (stat.isDirectory()) walk(p);
+              else if (
+                stat.isFile() &&
+                /\.ts$/.test(entry) &&
+                !/\.test\.ts$/.test(entry)
+              ) {
+                files.push(p);
+              }
+            }
+          };
+          walk(root);
+
+          // Empty src/ with non-empty capabilities is a contradictory
+          // state — codex/critic iter-1 m1 flagged the silent-pass.
+          if (files.length === 0 && declared.size > 0) {
+            console.error(
+              `undeclared_fs_net: src/ has 0 non-test *.ts files but manifest declares ${declared.size} capabilities`
+            );
+            process.exit(1);
+          }
+
+          let failures = 0;
+          for (const f of files) {
+            const src = fs.readFileSync(f, 'utf8');
+            for (const { needle, cap } of needles) {
+              if (src.includes(needle) && !declared.has(cap)) {
+                console.error(
+                  `undeclared_fs_net: ${f}: uses ${needle.trim()} but capability ${cap} is not declared`
+                );
+                failures++;
+              }
+            }
+          }
+          if (failures > 0) process.exit(1);
+          console.log(
+            `undeclared_fs_net: ${files.length} file(s) scanned, no undeclared fs/net usage`
+          );
+          NODESCRIPT
+          node --no-warnings "$RUNNER_TEMP/lint-fs-net.mjs"
+
+      # Gate 3: vitest. Mirrors core/pkg/approval/reviewer.go:GateVitest.
+      # The M9.4.b stub asserted "describe/test/it present"; the M9.4.d
+      # real gate runs vitest with coverage and enforces the
+      # `coverage_threshold` input across lines / functions / branches /
+      # statements via vitest CLI flags so a tool repo with no coverage
+      # block in its vitest.config.ts still enforces the floor.
+      - name: vitest
+        run: |
+          set -euo pipefail
+          pnpm exec vitest run --coverage \
+            --coverage.thresholds.lines=${{ inputs.coverage_threshold }} \
+            --coverage.thresholds.functions=${{ inputs.coverage_threshold }} \
+            --coverage.thresholds.branches=${{ inputs.coverage_threshold }} \
+            --coverage.thresholds.statements=${{ inputs.coverage_threshold }}
+
+      # Gate 4: capability_declaration. Mirrors
+      # core/pkg/approval/reviewer.go:GateCapabilityDeclaration. The
+      # name pattern, capability-id pattern and dry_run_mode closed set
+      # are copied verbatim from the M9.4.b reviewer + the M9.1.a
+      # manifest decoder; the Go contract test pins parity. Catches the
+      # six shapes the in-process reviewer cannot: missing/empty
+      # `version` (including whitespace-only — mirrors the Go decoder's
+      # `strings.TrimSpace` discipline; codex iter-1 M2 flagged the
+      # original length-zero check as looser than the runtime),
+      # missing/empty `capabilities`, malformed capability ids,
+      # duplicate capability ids, absent/invalid `dry_run_mode` (the
+      # M9.4.a strict-decode guarantee), AND unknown top-level keys
+      # (mirrors `core/pkg/toolregistry/manifest.go`'s
+      # `DisallowUnknownFields`; critic iter-1 M8 flagged the original
+      # permissive JSON.parse as a slack-native ↔ git-pr asymmetry).
+      # The name regex is stricter than the manifest decoder's
+      # `strings.TrimSpace(name) == ""` check by design: the decoder
+      # explicitly defers lower_snake_case enforcement to "a linter
+      # rule" (manifest.go:Name godoc) and this gate IS that rule.
+      - name: capability_declaration
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/lint-capability.mjs" <<'NODESCRIPT'
+          import fs from 'node:fs';
+
+          // Mirrors core/pkg/approval/proposal.go and reviewer.go (M9.4.a/b).
+          const namePattern = /^[a-z][a-z0-9_]*$/;
+          const capPattern = /^[a-z][a-z0-9_:.-]*$/;
+          // Mirrors core/pkg/toolregistry/manifest.go:DryRunMode (M9.4.a).
+          const dryRunModes = new Set(['ghost', 'scoped', 'none']);
+          // Mirrors core/pkg/toolregistry/manifest.go:DecodeManifest's
+          // DisallowUnknownFields. Adding a new manifest field requires
+          // bumping BOTH the Go decoder allowlist AND this set.
+          const allowedTopLevelKeys = new Set([
+            'name', 'version', 'capabilities', 'schema', 'source',
+            'signature', 'dry_run_mode',
+          ]);
+
+          let m;
+          try {
+            m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+          } catch (e) {
+            console.error(`capability_declaration: cannot read manifest.json: ${e.message}`);
+            process.exit(1);
+          }
+
+          const errs = [];
+          if (m === null || typeof m !== 'object' || Array.isArray(m)) {
+            errs.push('manifest.json must decode to an object');
+          } else {
+            for (const k of Object.keys(m)) {
+              if (!allowedTopLevelKeys.has(k)) {
+                errs.push(`unknown top-level key ${JSON.stringify(k)} (mirrors DisallowUnknownFields)`);
+              }
+            }
+          }
+          if (typeof m.name !== 'string' || !namePattern.test(m.name)) {
+            errs.push(`name must match ${namePattern} (got ${JSON.stringify(m.name)})`);
+          }
+          // Trim then check empty — matches manifest.go's
+          // `strings.TrimSpace(m.Version) == ""` discipline so a
+          // whitespace-only version that the Go decoder rejects also
+          // fails CI (codex iter-1 M2).
+          if (typeof m.version !== 'string' || m.version.trim().length === 0) {
+            errs.push('version must be a non-empty string (after trimming whitespace)');
+          }
+          if (!Array.isArray(m.capabilities) || m.capabilities.length === 0) {
+            errs.push('capabilities must be a non-empty array');
+          } else {
+            const seen = new Set();
+            for (const c of m.capabilities) {
+              if (typeof c !== 'string' || !capPattern.test(c)) {
+                errs.push(`capability ${JSON.stringify(c)} must match ${capPattern}`);
+              } else if (seen.has(c)) {
+                errs.push(`capability ${JSON.stringify(c)} declared more than once`);
+              } else {
+                seen.add(c);
+              }
+            }
+          }
+          if (!dryRunModes.has(m.dry_run_mode)) {
+            errs.push(
+              `dry_run_mode must be one of {ghost, scoped, none} (got ${JSON.stringify(m.dry_run_mode)})`
+            );
+          }
+          if (errs.length > 0) {
+            for (const e of errs) console.error(`capability_declaration: ${e}`);
+            process.exit(1);
+          }
+          console.log(
+            `capability_declaration: manifest.json OK (name=${m.name} version=${m.version} caps=${m.capabilities.length} dry_run_mode=${m.dry_run_mode})`
+          );
+          NODESCRIPT
+          node --no-warnings "$RUNNER_TEMP/lint-capability.mjs"
+
+      # Optional signing. Fires only when `enable_signing = true` AND
+      # the workflow runs on the default branch (post-merge) OR a v*
+      # release tag. The real cosign / kms integration lands in M9.5
+      # (signing keys + release-tag publish); this step emits a
+      # deterministic SHA-256 over (manifest.json + non-test src/**)
+      # so the M9.6 hosted ↔ git migration tooling can pin a bundle
+      # shape today without depending on the future kms key path.
+      #
+      # `find -L src` follows symlinks so the bundle hash covers
+      # symlinked sources symmetrically with the undeclared_fs_net
+      # walker (codex/critic iter-1 M9).
+      - name: sign
+        id: sign
+        if: ${{ inputs.enable_signing && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+        run: |
+          set -euo pipefail
+          sha=$(
+            { cat manifest.json; find -L src -type f -name '*.ts' ! -name '*.test.ts' -print0 | sort -z | xargs -0 cat; } \
+              | sha256sum | awk '{print $1}'
+          )
+          echo "tool_bundle_sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "Bundle SHA-256: $sha"
+          echo "::notice title=Signing stub::Real cosign integration deferred to M9.5; emitted bundle SHA-256 only."

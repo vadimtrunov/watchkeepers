@@ -66,8 +66,10 @@ const (
 	// GateVitest flags absence of `describe(` / `test(` / `it(`
 	// blocks in the source — a vitest stub adapter expects each
 	// proposed tool to ship at least one test. The real M9.4.d
-	// gate runs `vitest --coverage` and enforces a per-tool coverage
-	// floor.
+	// gate runs `vitest --coverage` and enforces a per-metric
+	// coverage floor (lines / functions / branches / statements
+	// all gated against the consumer-supplied `coverage_threshold`
+	// input).
 	GateVitest GateName = "vitest"
 
 	// GateCapabilityDeclaration validates the per-entry shape of

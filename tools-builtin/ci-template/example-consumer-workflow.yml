@@ -1,0 +1,29 @@
+# example-consumer-workflow.yml — One-line CI stub a customer-private
+# tool repo (or the platform `watchkeeper-tools` repo) drops at
+# `.github/workflows/ci.yml` to adopt the shared template (M9.4.d).
+#
+# Replace the `@v1.0.0` pin with the latest tagged release of the
+# `watchkeeper-tools` repo. The `@v1.0.0` reference is a FORWARD
+# REFERENCE — the platform repo's first release lands after this
+# template is published; until then a consumer pin will resolve
+# against the `main` branch of the platform repo. See
+# docs/operator-runbook.md for the versioning policy and the
+# per-gate semantics + remediation guide.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tool-ci:
+    uses: watchkeeper-tools/watchkeeper-tools/.github/workflows/tool-ci.yml@v1.0.0
+    with:
+      coverage_threshold: 80
+      enable_signing: false
