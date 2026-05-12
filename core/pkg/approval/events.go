@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/toolregistry"
 )
 
 // TopicToolProposed is the [eventbus.Bus] topic [Proposer.Submit]
@@ -141,6 +142,16 @@ const (
 	// the M9.7 audit row) record that the lead wants a human-readable
 	// follow-up; M9.4.b does not itself open a thread.
 	TopicQuestionAsked = "approval.tool_question_asked"
+
+	// TopicDryRunExecuted is emitted by the M9.4.c [Executor] after a
+	// `ghost` or `scoped` mode execution completes. The payload is
+	// metadata-only (proposal id, tool name, mode, per-broker invocation
+	// counts, timestamp, correlation id) — the full per-invocation
+	// trace (with caller-supplied `Args` bodies) is returned to the
+	// in-process caller via [Trace] but NEVER flows onto the eventbus.
+	// The `none` mode does not emit this topic (the executor returns
+	// [ErrPreApprovalWarning] before any side effect).
+	TopicDryRunExecuted = "approval.tool_dry_run_executed"
 )
 
 // Route identifies which approval flow produced a decision.
@@ -288,6 +299,75 @@ type QuestionAsked struct {
 
 	// CorrelationID mirrors [ToolApproved.CorrelationID].
 	CorrelationID string
+}
+
+// DryRunExecuted is the metadata-only payload published on
+// [TopicDryRunExecuted]. Same PII boundary as [ToolProposed]: the
+// payload carries opaque identifiers + counts, NEVER the per-
+// invocation `Args` bodies. The full per-invocation trace stays
+// in-process on the [Trace] return value of [Executor.Execute].
+//
+// `BrokerKindCounts` is a per-[BrokerKind] count of invocations the
+// dry-running tool would have made; the SHAPE (not the bodies) lands
+// on the eventbus so a downstream operator dashboard can render
+// "tool X would have made 3 Slack sends, 1 Jira write in dry-run".
+// The shape is fixed at the M9.4.c [BrokerKind] closed set; adding a
+// new broker requires bumping the allowlist test AND documenting the
+// new key's PII shape (none of the broker count keys are PII — they
+// are public dictionary entries).
+type DryRunExecuted struct {
+	// ProposalID matches [Proposal.ID]; the join key for any subscriber
+	// querying the proposal store.
+	ProposalID uuid.UUID
+
+	// ToolName is the proposed [ProposalInput.Name].
+	ToolName string
+
+	// Mode is the [toolregistry.DryRunMode] the executor branched on
+	// (`ghost` or `scoped` — `none` never publishes this event).
+	// Carried as the typed string so a future decoder validates
+	// incoming wire values uniformly (iter-1 codex D fix).
+	Mode toolregistry.DryRunMode
+
+	// BrokerKindCounts is a per-[BrokerKind] count of invocations.
+	// Defensively-deep-copied map (the executor builds a fresh map on
+	// each publish; downstream subscribers receive a fresh map shape
+	// over the eventbus).
+	BrokerKindCounts map[string]int
+
+	// InvocationCount is the total number of invocations across all
+	// brokers — redundant with `sum(BrokerKindCounts)` but carried for
+	// dashboard ergonomics (a single field beats a map fold).
+	InvocationCount int
+
+	// ExecutedAt mirrors [Trace.ExecutedAt] — captured from the
+	// configured [Clock] inside [Executor.Execute].
+	ExecutedAt time.Time
+
+	// CorrelationID mirrors [Trace.CorrelationID].
+	CorrelationID string
+}
+
+// newDryRunExecutedEvent constructs the [DryRunExecuted] payload from
+// the [Executor]'s per-mode outcome list. Centralising the mapping
+// keeps the field-parity contract auditable (mirrors
+// [newToolProposedEvent]). The constructor builds a FRESH
+// `BrokerKindCounts` map so caller-side mutation of the returned
+// event does not corrupt any in-memory state.
+func newDryRunExecutedEvent(req Request, outcomes []Outcome, executedAt time.Time, corrID string) DryRunExecuted {
+	counts := make(map[string]int, 2)
+	for _, o := range outcomes {
+		counts[string(o.Original.Kind)]++
+	}
+	return DryRunExecuted{
+		ProposalID:       req.ProposalID,
+		ToolName:         req.ToolName,
+		Mode:             req.Mode,
+		BrokerKindCounts: counts,
+		InvocationCount:  len(outcomes),
+		ExecutedAt:       executedAt,
+		CorrelationID:    corrID,
+	}
 }
 
 // Validate reports whether `r` is in the closed [Route] set.
