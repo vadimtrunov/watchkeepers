@@ -198,6 +198,21 @@ var ErrPublishAfterSwap = errors.New("toolregistry: publish after swap")
 // [Logger] but not chained into the return.
 var ErrPublishToolShadowed = errors.New("toolregistry: publish tool_shadowed failed")
 
+// ErrInvalidDryRunMode is returned by [DryRunMode.Validate] /
+// [Manifest.Validate] when the manifest's `dry_run_mode` field
+// declares a value outside the closed set documented on [DryRunMode]
+// (`ghost`, `scoped`, `none`). The set is closed by design — adding a
+// new mode requires a new wiring path in the M9.4.c runtime
+// executor — so a typo at the authoring boundary surfaces here rather
+// than silently degrading to a default the executor cannot interpret.
+//
+// Distinct from [ErrManifestMissingRequired] for the empty-string
+// case: the validator first checks "field present" (missing-required)
+// then "field membership" (this sentinel). Callers needing to
+// distinguish "author forgot to declare it" from "author typoed the
+// value" branch on these two sentinels.
+var ErrInvalidDryRunMode = errors.New("toolregistry: invalid dry-run mode")
+
 // ErrIntraSourceDuplicateManifestName is logged by [ScanSourceDir]
 // (and silently dropped after logging) when two per-tool
 // subdirectories within the same configured source declare the same

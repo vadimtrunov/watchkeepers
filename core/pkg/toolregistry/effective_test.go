@@ -17,6 +17,7 @@ func mkManifest(name, version string, caps ...string) Manifest {
 		Version:      version,
 		Capabilities: cp,
 		Schema:       json.RawMessage(`{"type":"object"}`),
+		DryRunMode:   DryRunModeNone,
 	}
 }
 

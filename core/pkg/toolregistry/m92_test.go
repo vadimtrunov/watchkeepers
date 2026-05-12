@@ -32,7 +32,7 @@ func TestBuildEffective_DetectsShadowsAcrossSources(t *testing.T) {
 		}
 		ver := map[string]string{"a": "1.0", "b": "2.0", "c": "3.0"}[src]
 		fakeFs.files[filepath.Join(parent, "shared", "manifest.json")] = []byte(fmt.Sprintf(
-			`{"name":"shared","version":%q,"capabilities":["c"],"schema":{}}`, ver,
+			`{"name":"shared","version":%q,"capabilities":["c"],"schema":{},"dry_run_mode":"none"}`, ver,
 		))
 	}
 	sources := []SourceConfig{
@@ -72,7 +72,7 @@ func TestBuildEffective_NoShadowsWhenNoConflicts(t *testing.T) {
 		toolName := fmt.Sprintf("tool_%d", i)
 		fakeFs.dirEntries[parent] = []fs.DirEntry{fakeDirEntry{name: toolName, isDir: true}}
 		fakeFs.files[filepath.Join(parent, toolName, "manifest.json")] = []byte(fmt.Sprintf(
-			`{"name":%q,"version":"1.0","capabilities":["c"],"schema":{}}`, toolName,
+			`{"name":%q,"version":"1.0","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`, toolName,
 		))
 	}
 	sources := []SourceConfig{
@@ -106,10 +106,10 @@ func TestBuildEffective_IntraSourceDuplicateNotSurfacedAsShadow(t *testing.T) {
 		fakeDirEntry{name: "b_loser", isDir: true},
 	}
 	fakeFs.files[filepath.Join(parent, "a_winner", "manifest.json")] = []byte(
-		`{"name":"dup","version":"1","capabilities":["c"],"schema":{}}`,
+		`{"name":"dup","version":"1","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 	)
 	fakeFs.files[filepath.Join(parent, "b_loser", "manifest.json")] = []byte(
-		`{"name":"dup","version":"2","capabilities":["c"],"schema":{}}`,
+		`{"name":"dup","version":"2","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 	)
 	sources := []SourceConfig{{Name: "src", Kind: SourceKindLocal, PullPolicy: PullPolicyOnBoot}}
 	logger := &fakeLogger{}
@@ -620,20 +620,20 @@ func TestBuildEffective_FourSourceThreeConflictDetectionOrder(t *testing.T) {
 				fakeDirEntry{name: "t2", isDir: true},
 			}
 			fakeFs.files[filepath.Join(parent, "t1", "manifest.json")] = []byte(
-				`{"name":"t1","version":"1","capabilities":["c"],"schema":{}}`,
+				`{"name":"t1","version":"1","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 			)
 			fakeFs.files[filepath.Join(parent, "t2", "manifest.json")] = []byte(
-				`{"name":"t2","version":"1","capabilities":["c"],"schema":{}}`,
+				`{"name":"t2","version":"1","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 			)
 		case "b":
 			fakeFs.dirEntries[parent] = []fs.DirEntry{fakeDirEntry{name: "t1", isDir: true}}
 			fakeFs.files[filepath.Join(parent, "t1", "manifest.json")] = []byte(
-				`{"name":"t1","version":"2","capabilities":["c"],"schema":{}}`,
+				`{"name":"t1","version":"2","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 			)
 		case "c":
 			fakeFs.dirEntries[parent] = []fs.DirEntry{fakeDirEntry{name: "t2", isDir: true}}
 			fakeFs.files[filepath.Join(parent, "t2", "manifest.json")] = []byte(
-				`{"name":"t2","version":"2","capabilities":["c"],"schema":{}}`,
+				`{"name":"t2","version":"2","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 			)
 		case "d":
 			fakeFs.dirEntries[parent] = []fs.DirEntry{
@@ -641,10 +641,10 @@ func TestBuildEffective_FourSourceThreeConflictDetectionOrder(t *testing.T) {
 				fakeDirEntry{name: "t2", isDir: true},
 			}
 			fakeFs.files[filepath.Join(parent, "t1", "manifest.json")] = []byte(
-				`{"name":"t1","version":"3","capabilities":["c"],"schema":{}}`,
+				`{"name":"t1","version":"3","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 			)
 			fakeFs.files[filepath.Join(parent, "t2", "manifest.json")] = []byte(
-				`{"name":"t2","version":"3","capabilities":["c"],"schema":{}}`,
+				`{"name":"t2","version":"3","capabilities":["c"],"schema":{},"dry_run_mode":"none"}`,
 			)
 		}
 	}

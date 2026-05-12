@@ -14,7 +14,8 @@ func TestDecodeManifest_HappyPath(t *testing.T) {
 		"name": "find_overdue_tickets",
 		"version": "1.0.0",
 		"capabilities": ["jira:read"],
-		"schema": {"type": "object"}
+		"schema": {"type": "object"},
+		"dry_run_mode": "ghost"
 	}`)
 	m, err := DecodeManifest(raw)
 	if err != nil {
@@ -38,6 +39,9 @@ func TestDecodeManifest_HappyPath(t *testing.T) {
 	if m.Signature != "" {
 		t.Errorf("Signature: got %q, want empty", m.Signature)
 	}
+	if m.DryRunMode != DryRunModeGhost {
+		t.Errorf("DryRunMode: got %q, want %q", m.DryRunMode, DryRunModeGhost)
+	}
 }
 
 func TestDecodeManifest_WithOptionalFields(t *testing.T) {
@@ -48,7 +52,8 @@ func TestDecodeManifest_WithOptionalFields(t *testing.T) {
 		"capabilities": ["github:read", "github:list"],
 		"schema": {"type": "object", "properties": {}},
 		"source": "platform",
-		"signature": "deadbeef"
+		"signature": "deadbeef",
+		"dry_run_mode": "scoped"
 	}`)
 	m, err := DecodeManifest(raw)
 	if err != nil {
@@ -59,6 +64,9 @@ func TestDecodeManifest_WithOptionalFields(t *testing.T) {
 	}
 	if m.Signature != "deadbeef" {
 		t.Errorf("Signature: got %q, want %q", m.Signature, "deadbeef")
+	}
+	if m.DryRunMode != DryRunModeScoped {
+		t.Errorf("DryRunMode: got %q, want %q", m.DryRunMode, DryRunModeScoped)
 	}
 }
 
@@ -135,7 +143,7 @@ func TestDecodeManifest_TrailingGarbage(t *testing.T) {
 
 func TestDecodeManifest_DefensiveCopy(t *testing.T) {
 	t.Parallel()
-	raw := []byte(`{"name":"x","version":"1","capabilities":["a","b"],"schema":{"type":"object"}}`)
+	raw := []byte(`{"name":"x","version":"1","capabilities":["a","b"],"schema":{"type":"object"},"dry_run_mode":"none"}`)
 	m, err := DecodeManifest(raw)
 	if err != nil {
 		t.Fatalf("DecodeManifest: %v", err)
@@ -159,7 +167,7 @@ func TestLoadManifestFromFile_HappyPath(t *testing.T) {
 	t.Parallel()
 	fakeFs := newFakeFS()
 	fakeFs.files["tools/platform/count_open_prs/manifest.json"] = []byte(
-		`{"name":"count_open_prs","version":"1.0.0","capabilities":["github:read"],"schema":{}}`,
+		`{"name":"count_open_prs","version":"1.0.0","capabilities":["github:read"],"schema":{},"dry_run_mode":"none"}`,
 	)
 	m, err := LoadManifestFromFile(fakeFs, "tools/platform/count_open_prs", "platform")
 	if err != nil {
@@ -174,7 +182,7 @@ func TestLoadManifestFromFile_SourceMatch(t *testing.T) {
 	t.Parallel()
 	fakeFs := newFakeFS()
 	fakeFs.files["tools/platform/x/manifest.json"] = []byte(
-		`{"name":"x","version":"1","capabilities":["c"],"schema":{},"source":"platform"}`,
+		`{"name":"x","version":"1","capabilities":["c"],"schema":{},"source":"platform","dry_run_mode":"none"}`,
 	)
 	m, err := LoadManifestFromFile(fakeFs, "tools/platform/x", "platform")
 	if err != nil {
@@ -189,7 +197,7 @@ func TestLoadManifestFromFile_SourceCollision(t *testing.T) {
 	t.Parallel()
 	fakeFs := newFakeFS()
 	fakeFs.files["tools/platform/x/manifest.json"] = []byte(
-		`{"name":"x","version":"1","capabilities":["c"],"schema":{},"source":"private"}`,
+		`{"name":"x","version":"1","capabilities":["c"],"schema":{},"source":"private","dry_run_mode":"none"}`,
 	)
 	_, err := LoadManifestFromFile(fakeFs, "tools/platform/x", "platform")
 	if !errors.Is(err, ErrManifestSourceCollision) {
