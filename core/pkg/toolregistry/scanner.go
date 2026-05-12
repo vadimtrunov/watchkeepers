@@ -148,14 +148,22 @@ func logIntraSourceDuplicate(ctx context.Context, logger Logger, sourceName, man
 // BuildEffective scans every configured source's directory, flattens
 // the manifests by name in source-priority order (earlier source
 // wins for a duplicated name), and returns the resulting
-// [EffectiveToolset]. The `revision` is assigned verbatim onto the
-// snapshot; callers (the registry) supply a monotonic counter.
+// [EffectiveToolset] alongside the list of [ShadowedTool] entries
+// dropped by the flattening. The returned snapshot's [EffectiveToolset.Revision]
+// is zero — callers that need a monotonic revision (the
+// [Registry]) stamp it post-construction; standalone callers
+// (M9.4 dry-run, M9.5 local-patch validation) ignore the field.
 // `builtAt` is the timestamp imprinted on the snapshot.
 //
-// Precedence flattening only — M9.2 will add shadow + Slack-DM
-// warning events when a lower-priority source's tool is hidden by a
-// higher-priority same-name tool. M9.1.b records nothing about
-// shadowed tools; the loser is simply absent from the snapshot.
+// Shadow detection (M9.2): when the same [Manifest.Name] appears in
+// two configured sources, the EARLIER-listed source's manifest
+// becomes the winner and the LATER source's manifest is appended to
+// the returned `shadows` slice (in the order it was detected) instead
+// of the snapshot. Three lower-priority sources contributing the same
+// name produce three entries with the same WinnerSource/Version
+// repeated. Intra-source duplicates are NOT surfaced here — they
+// land in the [ScanSourceDir] log via
+// [ErrIntraSourceDuplicateManifestName] before reaching this loop.
 //
 // Per-source ReadDir errors are logged (via `logger`) and the source
 // contributes zero manifests; the rest of the sources still build.
@@ -166,40 +174,55 @@ func BuildEffective(
 	filesystem FS,
 	dataDir string,
 	sources []SourceConfig,
-	revision int64,
 	builtAt time.Time,
 	logger Logger,
-) (*EffectiveToolset, error) {
+) (*EffectiveToolset, []ShadowedTool, error) {
 	if filesystem == nil {
 		panic("toolregistry: BuildEffective: fs must not be nil")
 	}
-	seen := make(map[string]struct{})
-	merged := make([]EffectiveTool, 0)
+	// Capacity hints — a tool name index that anticipates one
+	// manifest per source per "tools-per-source" bucket of 8 keeps
+	// the map from rehashing across the loop. The merged + shadows
+	// slices share the same bound because (sources × tools_per_src)
+	// is the worst-case combined cardinality and the split between
+	// them depends on conflict density.
+	hint := len(sources) * 8
+	winnerIdx := make(map[string]int, hint)
+	merged := make([]EffectiveTool, 0, hint)
+	shadows := make([]ShadowedTool, 0)
 
 	for _, src := range sources {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		manifests, err := ScanSourceDir(ctx, filesystem, dataDir, src.Name, logger)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil, err
+				return nil, nil, err
 			}
 			logBuildSourceFailure(ctx, logger, src.Name, err)
 			continue
 		}
 		for _, m := range manifests {
-			if _, dup := seen[m.Name]; dup {
+			if idx, dup := winnerIdx[m.Name]; dup {
+				winner := merged[idx]
+				shadows = append(shadows, ShadowedTool{
+					ToolName:        m.Name,
+					WinnerSource:    winner.Source,
+					WinnerVersion:   winner.Manifest.Version,
+					ShadowedSource:  src.Name,
+					ShadowedVersion: m.Version,
+				})
 				continue
 			}
-			seen[m.Name] = struct{}{}
 			merged = append(merged, EffectiveTool{
 				Source:   src.Name,
 				Manifest: m,
 			})
+			winnerIdx[m.Name] = len(merged) - 1
 		}
 	}
-	return newEffectiveToolset(revision, builtAt, merged), nil
+	return newEffectiveToolset(0, builtAt, merged), shadows, nil
 }
 
 // logBuildSourceFailure logs the per-source ReadDir failure surfaced

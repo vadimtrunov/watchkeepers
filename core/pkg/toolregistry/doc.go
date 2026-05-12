@@ -12,13 +12,24 @@
 // M9.1.b (runtime): a [Registry] subscribes to [TopicSourceSynced],
 // rescans the synced directories via [BuildEffective], builds the
 // [EffectiveToolset] under precedence flattening (earlier-source-
-// wins on same-name conflicts — M9.2 will add the shadow + Slack-DM
-// warning), atomically installs it as current, and (when a
-// [Publisher] is wired) emits [TopicEffectiveToolsetUpdated]. The
-// in-flight-vs-new boundary is preserved by `atomic.Pointer` capture
-// + a per-entry refcount tracked on retiring snapshots; the
-// configurable [RegistryDeps.GracePeriod] controls how long the
-// registry tracks each retiring entry for telemetry.
+// wins on same-name conflicts), atomically installs it as current,
+// and (when a [Publisher] is wired) emits
+// [TopicEffectiveToolsetUpdated]. The in-flight-vs-new boundary is
+// preserved by `atomic.Pointer` capture + a per-entry refcount
+// tracked on retiring snapshots; the configurable
+// [RegistryDeps.GracePeriod] controls how long the registry tracks
+// each retiring entry for telemetry.
+//
+// M9.2 (shadow safety): same-name conflicts dropped by precedence
+// flattening surface as [ShadowedTool] entries returned alongside the
+// snapshot from [BuildEffective] and as [ToolShadowed] events emitted
+// on [TopicToolShadowed]. The event payload carries the winner +
+// shadowed source names + manifest versions; the
+// [ToolShadowed.Message] helper renders the lead-facing DM text
+// documented on the M9.2 roadmap entry. Shadow events are emitted
+// BEFORE the corresponding [TopicEffectiveToolsetUpdated] event so a
+// subscriber observing both topics on the same eventbus learns about
+// every shadow before the revision bump.
 //
 // # Seams
 //
@@ -47,9 +58,8 @@
 // # Atomic-ship boundary
 //
 // M9.1.a defines the data + sync layer; M9.1.b adds the runtime
-// [Registry] in-process. M9.2 will add the priority + shadow warning
-// path (a SHADOWED lower-priority same-name tool fires a
-// `tool_shadowed` event and a Slack DM); M9.3 will plug a real
-// cosign / minisign verifier into [SignatureVerifier]. Both extend
-// the existing seams without rewriting them.
+// [Registry] in-process; M9.2 layers shadow detection + the
+// [TopicToolShadowed] event onto the same registry; M9.3 will plug
+// a real cosign / minisign verifier into [SignatureVerifier]. All
+// extensions reuse the existing seams without rewriting them.
 package toolregistry

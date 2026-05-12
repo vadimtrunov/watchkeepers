@@ -12,8 +12,9 @@ var ErrInvalidSourceName = errors.New("toolregistry: invalid source name")
 // ErrDuplicateSourceName is returned during [Validate] when two
 // configured sources share the same `name`. Names are the resolution key
 // for [Scheduler.SyncOnce] and the path component under `$DATA_DIR/tools/`;
-// a duplicate would create an ambiguous overlay (M9.2 conflict resolution
-// resolves SAME-tool-NAME conflicts across sources, not same-source-name).
+// a duplicate would create an ambiguous overlay (M9.2's shadow
+// resolution covers SAME-tool-NAME conflicts across sources, not
+// same-source-name, which the M9.1.a validator rejects up-front).
 var ErrDuplicateSourceName = errors.New("toolregistry: duplicate source name")
 
 // ErrInvalidSourceKind is returned during [Validate] when a configured
@@ -177,6 +178,25 @@ var ErrInvalidGracePeriod = errors.New("toolregistry: invalid grace period")
 // revision; external monitoring SHOULD treat the wrapped error as a
 // signal to re-read [Registry.Snapshot].
 var ErrPublishAfterSwap = errors.New("toolregistry: publish after swap")
+
+// ErrPublishToolShadowed is returned by [Registry.Recompute] when the
+// atomic snapshot swap has already committed but one or more of the
+// per-shadow [TopicToolShadowed] publishes failed. The wrapped
+// underlying error is chained so callers can distinguish "state
+// committed, shadow notification missed"
+// (`errors.Is(err, ErrPublishToolShadowed)`) from a publish failure on
+// [TopicEffectiveToolsetUpdated] (`errors.Is(err, ErrPublishAfterSwap)`)
+// or a scan abort (`errors.Is(err, context.Canceled)` AND NOT
+// `errors.Is(err, ErrPublishToolShadowed)`).
+//
+// Recompute attempts every shadow publish even when an earlier one
+// failed — partial-delivery is preferable to first-error-aborts because
+// each event is independent and a downstream subscriber that
+// observes K of N notifications is strictly better off than zero.
+// The returned error carries the FIRST publish failure as the
+// underlying cause; subsequent failures are logged via the optional
+// [Logger] but not chained into the return.
+var ErrPublishToolShadowed = errors.New("toolregistry: publish tool_shadowed failed")
 
 // ErrIntraSourceDuplicateManifestName is logged by [ScanSourceDir]
 // (and silently dropped after logging) when two per-tool
