@@ -139,3 +139,175 @@ var ErrIdentityResolution = errors.New("approval: identity resolution failed")
 // observable downstream; the caller MUST treat the returned error
 // as "proposal not landed" and retry or surface to the operator.
 var ErrPublishToolProposed = errors.New("approval: publish tool_proposed failed")
+
+// ErrInvalidRoute is returned by [Route.Validate] when
+// the value is outside the closed set (`git-pr`, `slack-native`). The
+// validator surfaces the typo loudly rather than silently degrading the
+// downstream M9.7 audit-row's `route` field.
+var ErrInvalidRoute = errors.New("approval: invalid approval route")
+
+// ErrProposalNotFound is returned by [ProposalLookup.Lookup] when no
+// proposal with the supplied id is in the store. Mirrors the
+// [toolregistry] "missing referent" discipline; webhook receivers and
+// callback dispatchers wrap this sentinel so an out-of-band caller
+// (replay of an old webhook after a process restart, a forged button
+// click referencing an unknown id) is logged with the proposal id but
+// does not panic.
+var ErrProposalNotFound = errors.New("approval: proposal not found")
+
+// ErrWebhookMissingHeader is returned by the webhook receiver when the
+// `X-Watchkeeper-Signature-256` or `X-Watchkeeper-Request-Timestamp`
+// header is absent. Mirrors [slack/inbound.ErrMissingHeader]. The
+// handler maps this to HTTP 401 with reason `missing_header` on the
+// downstream M9.7 audit row.
+var ErrWebhookMissingHeader = errors.New("approval: webhook missing signing header")
+
+// ErrWebhookStaleTimestamp is returned by the webhook receiver when the
+// request timestamp is outside the configured replay-attack window
+// (default 5 minutes — same as Slack's guidance) OR when the timestamp
+// header is not a parseable integer. Mirrors
+// [slack/inbound.ErrStaleTimestamp]. Maps to HTTP 401 with reason
+// `stale_timestamp`.
+var ErrWebhookStaleTimestamp = errors.New("approval: webhook stale or unparseable timestamp")
+
+// ErrWebhookBadSignature is returned by the webhook receiver when the
+// computed HMAC does not match the supplied header (constant-time
+// compare via [hmac.Equal]). Also covers the case where the header is
+// missing the `sha256=` version prefix or contains non-hex bytes.
+// Mirrors [slack/inbound.ErrBadSignature]. Maps to HTTP 401 with reason
+// `bad_signature`.
+var ErrWebhookBadSignature = errors.New("approval: webhook bad signature")
+
+// ErrWebhookOversizeBody is returned by the webhook receiver when the
+// inbound body exceeds the configured cap (default 1 MiB, same as the
+// slack-inbound default). The cap is in place so an adversarial poster
+// cannot DOS the process by streaming an unbounded body before the
+// HMAC compare runs. Maps to HTTP 413 with reason `oversize_body`.
+var ErrWebhookOversizeBody = errors.New("approval: webhook body exceeds size cap")
+
+// ErrWebhookMalformedPayload is returned by the webhook receiver when
+// the body decodes but the resulting JSON does not carry the expected
+// fields (proposal_id / action / timestamp) or carries values outside
+// their closed sets (action ∈ {approved, rejected}). Maps to HTTP 400
+// with reason `malformed_payload`.
+var ErrWebhookMalformedPayload = errors.New("approval: webhook malformed payload")
+
+// ErrWebhookEmptySecret is returned by the webhook receiver when the
+// configured [WebhookSecretResolver] returns an empty byte slice (or a
+// nil slice). Mirrors [ErrEmptyResolvedIdentity]'s fail-loud discipline:
+// the resolver said "no error" while supplying an empty value — either
+// a bug in the resolver or a misconfiguration silently disabling the
+// HMAC compare. Maps to HTTP 500 (the per-deployment secret rotation
+// failed) with reason `secret_resolution`.
+var ErrWebhookEmptySecret = errors.New("approval: webhook secret resolver returned empty value")
+
+// ErrWebhookSecretResolution wraps a non-nil
+// [WebhookSecretResolver] error. Mirrors [ErrIdentityResolution]'s
+// shape: callers `errors.Is(err, ErrWebhookSecretResolution)` for
+// kind-of-failure and `errors.Is(err, underlyingErr)` for the cause.
+// Maps to HTTP 500 with reason `secret_resolution`.
+var ErrWebhookSecretResolution = errors.New("approval: webhook secret resolution failed")
+
+// ErrSchedulerSync wraps a non-nil [SchedulerSyncer.SyncOnce] failure
+// surfaced by the webhook receiver. A sync failure means the
+// now-approved tool is NOT yet observable to running runtimes; the
+// caller MUST treat the returned error as "approval landed on the event
+// stream BUT the registry has not yet re-scanned the source — re-drive
+// the sync manually". Asymmetric to [ErrPublishToolApproved]: the
+// publish failure means the approval event itself was lost; this
+// sentinel means the event landed but the consequent sync did not.
+var ErrSchedulerSync = errors.New("approval: tool source sync failed")
+
+// ErrSourceMappingFailed is returned by the webhook receiver when the
+// configured [SourceForTarget] resolver returns a non-nil error or an
+// empty source name. Maps to HTTP 422 with reason
+// `source_mapping_failed`: the proposal carries a valid
+// [TargetSource] but no [toolregistry.SourceConfig] in this deployment
+// matches it (e.g. the operator removed the `private` source between
+// proposal time and approval time).
+var ErrSourceMappingFailed = errors.New("approval: source mapping failed")
+
+// ErrPublishToolApproved wraps a [Publisher.Publish] failure for
+// [TopicToolApproved]. Same "event is the durable record" contract as
+// [ErrPublishToolProposed]: a publish failure means the approval is
+// NOT observable downstream and the caller MUST retry or surface to
+// the operator.
+var ErrPublishToolApproved = errors.New("approval: publish tool_approved failed")
+
+// ErrPublishToolRejected wraps a [Publisher.Publish] failure for
+// [TopicToolRejected]. Same contract as [ErrPublishToolApproved].
+var ErrPublishToolRejected = errors.New("approval: publish tool_rejected failed")
+
+// ErrPublishDryRunRequested wraps a [Publisher.Publish] failure for
+// [TopicDryRunRequested]. Same contract as [ErrPublishToolApproved];
+// subscribers (M9.4.c dry-run executor) cannot react to a dropped
+// event.
+var ErrPublishDryRunRequested = errors.New("approval: publish tool_dry_run_requested failed")
+
+// ErrPublishQuestionAsked wraps a [Publisher.Publish] failure for
+// [TopicQuestionAsked]. Same contract as [ErrPublishToolApproved].
+var ErrPublishQuestionAsked = errors.New("approval: publish tool_question_asked failed")
+
+// ErrReviewerNilProposal is returned by [Reviewer.Review] when the
+// supplied [Proposal] has a zero-valued [Proposal.ID] OR
+// [Proposal.Input.Name] empty. The reviewer pre-condition is that the
+// proposal already passed [ProposalInput.Validate]; a zero-id /
+// empty-name proposal indicates the caller bypassed [Proposer.Submit].
+var ErrReviewerNilProposal = errors.New("approval: reviewer received zero-valued proposal")
+
+// ErrInvalidActionID is returned by [DecodeActionID] when the input
+// does not parse as `tool_approval:<proposal_id>:<button>`, when the
+// prefix mismatches, when the proposal id does not parse as a UUID, or
+// when the button value is outside the closed [ButtonAction] set.
+// Distinct from the [cards.ErrInvalidActionID] in
+// `messenger/slack/cards`: the M9.4.b approval card carries its OWN
+// action_id namespace so the M6.3 dispatcher cannot accidentally route
+// an M9.4.b click into the spawn approval saga.
+var ErrInvalidActionID = errors.New("approval: invalid action_id")
+
+// ErrInvalidButtonValue is returned by the callback dispatcher when the
+// decoded [ButtonAction] is outside the closed set
+// (`approve`, `reject`, `test_in_my_dm`, `ask_questions`). Distinct
+// from [ErrInvalidActionID] so an audit subscriber can group the two
+// failure modes independently.
+var ErrInvalidButtonValue = errors.New("approval: invalid button value")
+
+// ErrCardMissingInput is returned by [RenderApprovalCard] when any of
+// the required fields on [CardInput] are zero-valued (proposal
+// id, tool name, plain-language description, capabilities, review
+// result). The renderer is pure — it does not silently produce an
+// empty card; callers receive a sentinel so the wiring path can
+// distinguish "no proposal" from "render failed".
+var ErrCardMissingInput = errors.New("approval: approval card missing required input")
+
+// ErrCardMissingLeadDM is returned by the callback dispatcher when a
+// `[Test in my DM]` click is dispatched without a resolved lead DM
+// channel id. The dry-run executor cannot run without a forced DM
+// destination; the click is rejected at the dispatcher boundary so an
+// audit row records the failure rather than M9.4.c silently dropping
+// it.
+var ErrCardMissingLeadDM = errors.New("approval: callback missing lead DM channel")
+
+// ErrCardProposalMismatch is returned by [RenderApprovalCard] when the
+// supplied [CardInput.Review.ProposalID] does not equal
+// [CardInput.ProposalID]. The renderer fails closed on this
+// orchestration bug so a card never ships with the proposal-identity
+// of A and the gate-result body of B (a class of mismatched-card
+// confusion the M9.4.b iter-1 review flagged on `card.go`).
+var ErrCardProposalMismatch = errors.New("approval: card review.proposal_id does not match card.proposal_id")
+
+// ErrInvalidDecisionKind is returned by [DecisionKind.Validate] when
+// the value is outside the closed approve/reject set. Mirrors
+// [ErrInvalidRoute]'s discipline; the decision-recorder seam
+// refuses to claim a decision for an unknown kind so an audit row never
+// records a typo.
+var ErrInvalidDecisionKind = errors.New("approval: invalid decision kind")
+
+// ErrDecisionConflict is returned by [DecisionRecorder.MarkDecided]
+// when a different decision kind was already claimed for the supplied
+// proposal id (e.g. a `[Reject]` click arrives after an `[Approve]`
+// click already landed). The first decision is final by construction —
+// the dispatcher surfaces this sentinel so the operator's audit row
+// records the conflicting attempt rather than silently overwriting the
+// recorded outcome.
+var ErrDecisionConflict = errors.New("approval: proposal already decided with a different kind")

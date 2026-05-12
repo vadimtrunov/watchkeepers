@@ -427,6 +427,11 @@ func TestSourceGrepAC_NoAuditCallsInProductionSources(t *testing.T) {
 		"proposal.go",
 		"events.go",
 		"proposer.go",
+		"proposalstore.go",
+		"webhook.go",
+		"reviewer.go",
+		"card.go",
+		"callbacks.go",
 	}
 	for _, name := range productionFiles {
 		raw, err := os.ReadFile(name)
