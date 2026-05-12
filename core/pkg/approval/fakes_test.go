@@ -165,3 +165,186 @@ func newTestProposer() (*Proposer, *fakePublisher, *fakeClock, *fakeIDGenerator,
 	})
 	return p, pub, clk, idGen, logger
 }
+
+// fakeSchedulerSyncer captures SyncOnce calls and optionally returns an
+// error. Used by webhook tests.
+type fakeSchedulerSyncer struct {
+	mu    sync.Mutex
+	calls []string
+	err   error
+}
+
+func (s *fakeSchedulerSyncer) SyncOnce(_ context.Context, source string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, source)
+	return s.err
+}
+
+func (s *fakeSchedulerSyncer) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.calls))
+	copy(out, s.calls)
+	return out
+}
+
+// constSourceResolver returns a fixed source name for every call.
+func constSourceResolver(name string, err error) SourceForTarget {
+	return func(_ context.Context, _ TargetSource) (string, error) {
+		return name, err
+	}
+}
+
+// constSecretResolver returns a fixed secret-byte slice for every
+// call.
+func constSecretResolver(secret []byte, err error) WebhookSecretResolver {
+	return func(_ context.Context) ([]byte, error) {
+		return secret, err
+	}
+}
+
+// fakeDecisionRecorder captures MarkDecided / UnmarkDecided calls.
+// Default behaviour mirrors a fresh [*InMemoryProposalStore]: the
+// first MarkDecided per id wins; same-kind replay → (false, nil);
+// different-kind replay → (false, ErrDecisionConflict).
+type fakeDecisionRecorder struct {
+	mu        sync.Mutex
+	decisions map[uuid.UUID]DecisionKind
+	marks     []struct {
+		ID   uuid.UUID
+		Kind DecisionKind
+	}
+	unmarks []struct {
+		ID   uuid.UUID
+		Kind DecisionKind
+	}
+	// markErr is returned by MarkDecided when non-nil; otherwise the
+	// fake applies the normal claim semantics.
+	markErr error
+}
+
+func newFakeDecisionRecorder() *fakeDecisionRecorder {
+	return &fakeDecisionRecorder{decisions: make(map[uuid.UUID]DecisionKind)}
+}
+
+func (r *fakeDecisionRecorder) MarkDecided(_ context.Context, id uuid.UUID, kind DecisionKind) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.marks = append(r.marks, struct {
+		ID   uuid.UUID
+		Kind DecisionKind
+	}{ID: id, Kind: kind})
+	if r.markErr != nil {
+		return false, r.markErr
+	}
+	if prior, ok := r.decisions[id]; ok {
+		if prior == kind {
+			return false, nil
+		}
+		return false, ErrDecisionConflict
+	}
+	r.decisions[id] = kind
+	return true, nil
+}
+
+func (r *fakeDecisionRecorder) UnmarkDecided(_ context.Context, id uuid.UUID, kind DecisionKind) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.unmarks = append(r.unmarks, struct {
+		ID   uuid.UUID
+		Kind DecisionKind
+	}{ID: id, Kind: kind})
+	if prior, ok := r.decisions[id]; ok && prior == kind {
+		delete(r.decisions, id)
+	}
+	return nil
+}
+
+func (r *fakeDecisionRecorder) markCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.marks)
+}
+
+func (r *fakeDecisionRecorder) unmarkCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.unmarks)
+}
+
+// fakeDryRunRequester captures RequestDryRun calls.
+type fakeDryRunRequester struct {
+	mu    sync.Mutex
+	calls []struct {
+		ProposalID uuid.UUID
+		LeadDM     string
+	}
+	err error
+}
+
+func (r *fakeDryRunRequester) RequestDryRun(_ context.Context, id uuid.UUID, leadDM string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, struct {
+		ProposalID uuid.UUID
+		LeadDM     string
+	}{ProposalID: id, LeadDM: leadDM})
+	return r.err
+}
+
+// fakeProposalLookup is a hand-rolled [ProposalLookup] for the
+// callback dispatcher tests. Distinct from [InMemoryProposalStore]
+// so tests can drive lookup-error branches independently.
+type fakeProposalLookup struct {
+	mu    sync.Mutex
+	items map[uuid.UUID]Proposal
+	err   error
+}
+
+func newFakeProposalLookup() *fakeProposalLookup {
+	return &fakeProposalLookup{items: make(map[uuid.UUID]Proposal)}
+}
+
+func (l *fakeProposalLookup) Lookup(_ context.Context, id uuid.UUID) (Proposal, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.err != nil {
+		return Proposal{}, l.err
+	}
+	p, ok := l.items[id]
+	if !ok {
+		return Proposal{}, ErrProposalNotFound
+	}
+	return p, nil
+}
+
+func (l *fakeProposalLookup) put(p Proposal) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.items[p.ID] = p
+}
+
+// mustNewUUIDv7 mints a UUIDv7 and t.Fatal()s on error. Used to seed
+// test proposals.
+func mustNewUUIDv7() uuid.UUID {
+	id, err := uuid.NewV7()
+	if err != nil {
+		panic("test: uuid.NewV7: " + err.Error())
+	}
+	return id
+}
+
+// newTestProposal builds a fully-populated [Proposal] suitable for the
+// store / webhook / callback dispatcher tests. The caller may mutate
+// the returned struct freely.
+func newTestProposal() Proposal {
+	id := mustNewUUIDv7()
+	return Proposal{
+		ID:            id,
+		ProposerID:    "agent-1",
+		Input:         validInput(),
+		ProposedAt:    time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC),
+		CorrelationID: id.String(),
+	}
+}
