@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 )
 
@@ -95,10 +96,14 @@ func (c *Client) ListPullRequests(
 	var linkParseErr error
 	err := c.do(ctx, doParams{
 		method: "GET",
-		path:   "/repos/" + string(owner) + "/" + string(repo) + "/pulls",
-		query:  q,
-		dst:    &wire,
-		kind:   endpointRepo,
+		// Iter-1 m8 fix (reviewer A): apply url.PathEscape to match
+		// the new M9.6 write methods. Today's validators preclude
+		// escape-needing chars in owner/repo, but the asymmetry was
+		// a latent regression risk if either validator loosened.
+		path:  "/repos/" + url.PathEscape(string(owner)) + "/" + url.PathEscape(string(repo)) + "/pulls",
+		query: q,
+		dst:   &wire,
+		kind:  endpointRepo,
 		headerFn: func(h http.Header) {
 			nextPage, linkParseErr = parseLinkHeaderNextPage(h.Get("Link"))
 		},
