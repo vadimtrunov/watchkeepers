@@ -228,3 +228,212 @@ an M9.5 follow-up.
 - Build artifacts: the `sign` step's `tool_bundle_sha256` output is
   consumable by downstream workflows (release publishers, audit
   trail) via the GitHub Actions outputs surface.
+
+## M9.6 — Hosted ↔ git migration + tool sharing
+
+M9.6 ships two operator-facing CLI surfaces plus one agent-facing
+JSON-RPC method. Together they cover the lifecycle "hosted tool
+graduates to git" (export → branch → commit → PR → notify lead).
+
+### Credentials
+
+Two credential shapes are supported. The `github.TokenSource`
+interface is the boundary; the deployment supplies a concrete
+implementation backed by its secrets store.
+
+- **Personal Access Token (PAT)** — the Phase 1 quickstart default.
+  Create a fine-grained PAT on the bot account with `Contents: read
+& write` and `Pull requests: read & write` on the platform
+  `watchkeeper-tools` repo (and the customer-private repo if the
+  deployment shares to private). Bake the PAT into the deployment's
+  secrets store; the CLI reads it from the env var named by
+  `--token-env` (default `WATCHKEEPER_GITHUB_TOKEN`).
+- **GitHub App** — production-recommended. Install the App on the
+  target repo(s) with the minimal scope set (Contents R/W, Pull
+  Requests R/W). A follow-up `github.TokenSource` implementation
+  mints an installation token on demand from the App's private key;
+  the toolshare orchestrator's per-call seam discipline lets the
+  token rotate without a process restart. The M9.6 CLI ships PAT
+  only; the orchestrator interface is App-ready.
+
+The `tool:share` capability is **off by default**. The lead grants
+it per-Watchkeeper by issuing a capability token via
+`capability.Broker.Issue("tool:share", ttl)` and binding the token
+to the agent's session. A revoked or expired token fails the
+`watchmaster.promote_share_tool` RPC with code `-32005`
+(ToolUnauthorized).
+
+### `wk-tool hosted-export` — operator flow
+
+Exports a tool tree from a `kind: hosted` source on the local
+deployment's data directory into a self-contained bundle the
+operator imports into a fresh git repo.
+
+```bash
+WATCHKEEPER_DATA_DIR=/var/lib/watchkeepers \
+  wk-tool hosted-export \
+    --source hosted-private \
+    --tool weekly_digest \
+    --destination /tmp/weekly_digest-bundle \
+    --reason "graduating weekly_digest for community use" \
+    --operator alice@example.com
+```
+
+Requirements:
+
+- The destination directory MUST be absent OR empty. The CLI
+  refuses with `ErrDestinationNotEmpty` if the directory exists
+  and contains entries — overwriting an arbitrary on-disk tree
+  would be an irreversible operator surprise.
+- The source MUST be a configured `kind: hosted` source. Local /
+  git kinds are refused.
+- A self-contained bundle imports cleanly into a fresh repo:
+  `cd /tmp/weekly_digest-bundle && git init && git add . && git
+commit -m "initial"`. The M9.4.d CI template runs unmodified.
+
+Stdout shape: one JSONL event line on
+`hostedexport.hosted_tool_exported` plus a one-line summary
+ending with `correlation_id=<value>`.
+
+### `wk-tool share` — operator flow
+
+Opens a PR on the target repo from the deployment's on-disk tool
+tree.
+
+```bash
+WATCHKEEPER_DATA_DIR=/var/lib/watchkeepers \
+  WATCHKEEPER_GITHUB_TOKEN=ghp_... \
+  wk-tool share \
+    --source private \
+    --tool weekly_digest \
+    --target platform \
+    --target-owner watchkeepers \
+    --target-repo watchkeeper-tools \
+    --target-base main \
+    --reason "graduating weekly_digest" \
+    --proposer alice@example.com
+```
+
+Stdout shape: TWO JSONL event lines on
+`toolshare.tool_share_proposed` (BEFORE github calls) and
+`toolshare.tool_share_pr_opened` (AFTER github calls succeed)
+plus a one-line summary with `pr=<number>` and the PR HTML URL.
+
+The CLI does NOT send a Slack DM; that path is exclusive to the
+agent-facing `promote_share_tool` flow where the deployment's
+`*slack.Client` is already wired.
+
+### `promote_share_tool` — agent flow
+
+The TS-side `promote_share_tool` builtin tool dispatches to the
+Go-side `watchmaster.promote_share_tool` RPC handler. Wire shape:
+
+```json
+{
+  "proposer_id": "agent-coordinator-001",
+  "source_name": "private",
+  "tool_name": "weekly_digest",
+  "target_hint": "platform",
+  "reason": "graduating weekly_digest",
+  "capability_token": "wkc_..."
+}
+```
+
+The handler:
+
+1. Validates `capability_token` against scope `tool:share` via
+   `capability.Broker.Validate`. An invalid / expired / mismatched
+   token fails with `-32005` (ToolUnauthorized).
+2. Forwards to `toolshare.Sharer.Share`. The orchestrator emits
+   `tool_share_proposed` BEFORE the github calls, then runs the
+   github chain, then emits `tool_share_pr_opened` AFTER the PR
+   is open.
+3. The orchestrator sends a Slack DM to the lead (best-effort —
+   a Slack outage logs but does not undo the PR open). The lead's
+   user id is resolved via a per-call `LeadResolver` closure
+   bound at process-wiring time.
+
+Response shape:
+
+```json
+{
+  "pr_number": 42,
+  "pr_html_url": "https://github.com/watchkeepers/watchkeeper-tools/pull/42",
+  "branch_name": "watchkeepers/share/weekly_digest/1.0.0/1",
+  "tool_version": "1.0.0",
+  "correlation_id": "1700000000000000000-1",
+  "lead_notified": true
+}
+```
+
+### Half-uploaded share branch — manual cleanup
+
+The `toolshare.Sharer.Share` chain is `GetRef → CreateRef → N×CreateOrUpdateFile → CreatePullRequest`. The Contents API commits one
+file per HTTP call, so a network outage or GitHub rate-limit
+between file `k` and file `k+1` leaves the share branch on the
+target repo with the first `k` files committed and no open PR.
+
+Iter-1 fix (reviewer B M3): the orchestrator surfaces the branch
+name + completed-count on the error wrap and also via the
+optional `Logger`, e.g.:
+
+```text
+toolshare: github create file failed: branch="watchkeepers/share/weekly_digest/1.0.0/1700000000000000000-1"
+file="src/index.ts" completed=3/12: github: api error: status=429 ...
+```
+
+Operator cleanup procedure when this fires:
+
+```bash
+gh pr close --delete-branch \
+  --repo watchkeepers/watchkeeper-tools \
+  watchkeepers/share/weekly_digest/1.0.0/1700000000000000000-1 \
+  || gh api -X DELETE \
+       /repos/watchkeepers/watchkeeper-tools/git/refs/heads/watchkeepers/share/weekly_digest/1.0.0/1700000000000000000-1
+```
+
+The first command runs when a PR was somehow opened against the
+branch (rare for this failure mode); the fallback `gh api -X DELETE`
+removes the branch directly when no PR exists. A subsequent
+`wk-tool share` invocation produces a NEW branch name (different
+nanosecond timestamp + atomic nonce) so the cleanup does NOT race
+the retry.
+
+The `CreatePullRequest` failure path (last step) leaves the
+fully-uploaded share branch without a PR. Same `gh api -X DELETE`
+cleanup applies; the audit subscriber sees the
+`tool_share_proposed` event with no matching `tool_share_pr_opened`
+(see `core/pkg/toolshare/events.go` for the orphan-row tolerance
+discipline).
+
+### Deferred webhooks
+
+The M9.7 audit-surface list names `tool_share_pr_merged` and
+`tool_share_pr_rejected` as topics. M9.6 ships the PR-create side
+only; the merge / rejected webhook handlers land in a follow-up.
+
+In the meantime, two operator-friendly paths cover the gap:
+
+- **Cron-scheduled re-sync** (M9.1.a/b default). The lead merges
+  the share PR on the target repo. On the next scheduled pull
+  cycle, `ToolSyncScheduler` re-clones the source and the M9.1.b
+  effective-toolset recompute picks up the new tool version
+  automatically.
+- **Manual `wk tool sync` invocation** for an operator-triggered
+  refresh on an `on-demand` source.
+
+### Audit-event vocabulary
+
+Per `docs/ROADMAP-phase1.md` M9.7's topic list, this milestone
+emits three of the topics:
+
+- `hostedexport.hosted_tool_exported` — emitted by
+  `hostedexport.Exporter.Export` after the destination tree is
+  written.
+- `toolshare.tool_share_proposed` — emitted by
+  `toolshare.Sharer.Share` BEFORE the github calls begin.
+- `toolshare.tool_share_pr_opened` — emitted by
+  `toolshare.Sharer.Share` AFTER the PR is open.
+
+`tool_share_pr_merged` and `tool_share_pr_rejected` ship in the
+M9.7 audit-surface follow-up.

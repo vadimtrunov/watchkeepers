@@ -27,7 +27,7 @@ import (
 //	    malformed input caught by the validator)
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, env envLookup) int {
 	if len(args) == 0 {
-		stderrf(stderr, "wk-tool: missing subcommand (expected one of: local-install, rollback)\n")
+		stderrf(stderr, "wk-tool: missing subcommand (expected one of: local-install, rollback, hosted-export, share)\n")
 		return 2
 	}
 	switch args[0] {
@@ -35,11 +35,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, env envLo
 		return runLocalInstall(ctx, args[1:], stdout, stderr, env)
 	case "rollback":
 		return runRollback(ctx, args[1:], stdout, stderr, env)
+	case "hosted-export":
+		return runHostedExport(ctx, args[1:], stdout, stderr, env)
+	case "share":
+		return runShare(ctx, args[1:], stdout, stderr, env)
 	case "-h", "--help", "help":
 		writeUsage(stdout)
 		return 0
 	default:
-		stderrf(stderr, fmt.Sprintf("wk-tool: unknown subcommand %q (expected one of: local-install, rollback)\n", args[0]))
+		stderrf(stderr, fmt.Sprintf("wk-tool: unknown subcommand %q (expected one of: local-install, rollback, hosted-export, share)\n", args[0]))
 		return 2
 	}
 }
@@ -390,7 +394,13 @@ func writeUsage(stdout io.Writer) {
 	fmt.Fprintln(stdout, "Subcommands:")
 	fmt.Fprintln(stdout, "  local-install --folder <path> --source <name> --reason <text> --operator <id> [--data-dir <dir>]")
 	fmt.Fprintln(stdout, "  rollback --name <tool> --to <version> [--source <name>] --reason <text> --operator <id> [--data-dir <dir>]")
-	fmt.Fprintln(stdout, "Audit channel: localpatch.local_patch_applied — JSONL events written to stdout, one per line.")
-	fmt.Fprintln(stdout, "Source allowlist: set "+localSourcesEnvKey+"=name1,name2 to extend the default ('local').")
+	fmt.Fprintln(stdout, "  hosted-export --source <name> --tool <name> --destination <abs-path>")
+	fmt.Fprintln(stdout, "                --reason <text> --operator <id> [--data-dir <dir>]")
+	fmt.Fprintln(stdout, "  share --source <name> --tool <name> --target <platform|private>")
+	fmt.Fprintln(stdout, "        --target-owner <owner> --target-repo <repo> [--target-base main]")
+	fmt.Fprintln(stdout, "        --reason <text> --proposer <id>")
+	fmt.Fprintln(stdout, "        [--token-env WATCHKEEPER_GITHUB_TOKEN] [--data-dir <dir>]")
+	fmt.Fprintln(stdout, "Audit channels: localpatch.local_patch_applied, hostedexport.hosted_tool_exported, toolshare.tool_share_proposed, toolshare.tool_share_pr_opened — JSONL events written to stdout, one per line.")
+	fmt.Fprintln(stdout, "Source allowlist (local-install only): set "+localSourcesEnvKey+"=name1,name2 to extend the default ('local').")
 	fmt.Fprintln(stdout, "Snapshot retention: <DataDir>/_history/<source>/<tool>/<version>/ accumulates indefinitely; operator must prune manually.")
 }
