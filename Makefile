@@ -194,6 +194,51 @@ spawn-dev-bot-dry-run: spawn-dev-bot-build ## Validate the manifest WITHOUT cont
 	  --credentials-out "$(SPAWN_DEV_BOT_CREDENTIALS_OUT)" \
 	  --dry-run
 
+# ---------------------------------------------------------------------------
+# wk-tool — operator CLI for the M9.5 local-patch lifecycle.
+#
+# `make tools-local-install` copies an operator-supplied folder into a
+# kind=local source's tools directory under
+# $WATCHKEEPER_DATA_DIR/tools/<source>/<tool>/, snapshotting the prior
+# contents under $WATCHKEEPER_DATA_DIR/_history/<source>/<tool>/<priorVersion>/
+# so a later rollback can restore them. Emits `local_patch_applied`
+# audit events as JSONL on stdout (one event per line; pipe to your
+# audit-log capture path). The `--reason` field is REQUIRED — it is the
+# operator's accountability statement and lands verbatim on the audit
+# event.
+#
+# Required env vars:
+#
+#   FOLDER             path to the new tool folder (must contain manifest.json)
+#   REASON             operator-supplied audit text (REQUIRED — M9.5 contract)
+#   OPERATOR           operator identity (UUID / agent handle / human handle)
+#   WATCHKEEPER_DATA_DIR  deployment data root (sibling of $DATA_DIR/tools/)
+#
+# Optional:
+#
+#   SOURCE             defaults to `local` (the canonical local-source name)
+# ---------------------------------------------------------------------------
+
+WK_TOOL_SOURCE ?= local
+
+.PHONY: wk-tool-build
+wk-tool-build: ## Build the wk-tool CLI binary into ./bin/wk-tool
+	@mkdir -p bin
+	@$(GO) build -trimpath -o bin/wk-tool ./core/cmd/wk-tool
+
+.PHONY: tools-local-install
+tools-local-install: wk-tool-build ## Install an operator-supplied tool folder into a kind=local source (M9.5; --reason REQUIRED)
+	@: "$${FOLDER:?ERROR: FOLDER required (path to the new tool folder containing manifest.json)}"
+	@: "$${REASON:?ERROR: REASON required (operator-supplied audit text — M9.5 contract)}"
+	@: "$${OPERATOR:?ERROR: OPERATOR required (operator identity)}"
+	@: "$${WATCHKEEPER_DATA_DIR:?ERROR: WATCHKEEPER_DATA_DIR required (deployment data root)}"
+	@./bin/wk-tool local-install \
+	  --folder "$(FOLDER)" \
+	  --source "$(WK_TOOL_SOURCE)" \
+	  --reason "$(REASON)" \
+	  --operator "$(OPERATOR)" \
+	  --data-dir "$(WATCHKEEPER_DATA_DIR)"
+
 .PHONY: govulncheck
 govulncheck: ## Scan Go dependencies for known vulnerabilities
 	@$(GOVULNCHECK) ./...
