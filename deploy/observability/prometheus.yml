@@ -1,0 +1,20 @@
+# Prometheus scrape config for the Phase 1 compose stack (M10.3).
+#
+# The single scrape job targets the Keep service's `/metrics` endpoint
+# (mounted outside the auth wall by core/internal/keep/server/server.go
+# §M10.1). The 15s interval matches Grafana's default refresh cadence
+# so dashboards see fresh samples within one tick.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    deployment: watchkeeper-phase1
+
+scrape_configs:
+  - job_name: keep
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - keep:8080
+        labels:
+          service: keep

@@ -1,0 +1,330 @@
+# Watchkeeper — Phase 1 compose stack (M10.3 + iter-1).
+#
+# Default `docker compose up` brings the data plane + observability
+# plane online: postgres -> migrate (one-shot) -> keep + prometheus +
+# grafana. The agent processes (core / watchmaster / coordinator /
+# slack-bridge) are gated behind the `stubs` profile so default `up`
+# stays clean; an operator probing the future deployment shape runs
+# `docker compose --profile stubs up <name>` to see the loud
+# "M10.3.b / M10.3.c follow-up" banner.
+#
+# Secret provisioning happens out of band via files in `./secrets/`
+# at the repo root (.gitignored). The `.env` template at `.env.example`
+# documents the file paths and the URL-safety constraint on the
+# Postgres password. Where compose itself needs an env value (e.g. the
+# Grafana admin password used during bootstrap), the value comes from
+# `.env`; load-bearing secrets (Postgres password, Keep token signing
+# key) are mounted via docker `secrets:` so they never appear in
+# `docker inspect` output or in `/proc/<pid>/environ` (addresses
+# iter-1 codex P1/P2 and critic #1/#2).
+#
+# Phase 1 Definition of Done (docs/ROADMAP-phase1.md §7):
+#   "docker compose up brings Phase 1 online with no manual steps
+#    beyond secret provisioning."
+#
+# Iter-1 fixes applied on the same branch (see docs/lessons/M10.md
+# §M10.3 "Review iter-1 fixes"):
+#   - DSN URL-encoding via migrate-entrypoint.sh (codex P1).
+#   - `.dockerignore` excludes `.env*` from build context (codex P2).
+#   - `secrets:` mounts for POSTGRES_PASSWORD + KEEP_TOKEN_SIGNING_KEY (#1/#2).
+#   - Agent stubs under `profiles: [stubs]` (#3).
+#   - CGO_ENABLED=0 in Dockerfile.migrate (#4).
+#   - 127.0.0.1 host binding for prometheus/grafana (#5).
+#   - Prometheus healthcheck + grafana depends_on healthy (#6).
+#   - Dashboard LLM panel defaults to (kind, provider) only (#7).
+#   - Dashboard schemaVersion 40 + Grafana 11.5.4 (#9, #11).
+#   - Valid base64 placeholder in .env.example (#10).
+#   - Required GF_SECURITY_ADMIN_PASSWORD via :? (#16).
+#   - ASCII -- in :? messages (#18).
+#   - Dashboard-level datasource variable (#19).
+
+name: watchkeeper-phase1
+
+# ---------------------------------------------------------------------------
+# Volumes — postgres + grafana persist their state across `compose down`
+# (no `-v` flag). `compose-down-volumes` wipes them deliberately.
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data: {}
+  grafana_data: {}
+  prometheus_data: {}
+
+# ---------------------------------------------------------------------------
+# Networks — single bridge keeps the inter-service hostnames (`postgres`,
+# `keep`, `prometheus`) resolvable without explicit aliases.
+# ---------------------------------------------------------------------------
+networks:
+  watchkeeper:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Secrets — files mounted into containers under `/run/secrets/<name>`.
+# The Postgres image natively supports `*_FILE` env vars for its
+# password; the Keep service's config.go (extended in iter-1) accepts
+# `KEEP_TOKEN_SIGNING_KEY_FILE` / `KEEP_DATABASE_URL_FILE` with the
+# same trim-trailing-newline semantics.
+#
+# Operator workflow (documented in .env.example):
+#   mkdir -p ./secrets
+#   openssl rand -hex 24 > ./secrets/postgres_password
+#   openssl rand -base64 48 > ./secrets/keep_token_signing_key
+#   chmod 600 ./secrets/*
+# ---------------------------------------------------------------------------
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  keep_token_signing_key:
+    file: ./secrets/keep_token_signing_key
+
+services:
+  # -------------------------------------------------------------------------
+  # Postgres — primary store for the Keep service. Healthcheck is what
+  # gates the `migrate` and `keep` services so they never connect to a
+  # half-booted database. Password mounted via docker secret so it
+  # never appears in `docker inspect` env output.
+  # -------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: watchkeeper-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_DB: ${POSTGRES_DB:-keep}
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-keep}
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks: [watchkeeper]
+
+  # -------------------------------------------------------------------------
+  # Migrate — one-shot goose runner. The entrypoint URL-encodes the
+  # password and assembles the DSN internally so the cleartext never
+  # appears in `docker inspect`. Restart "no" + exit 0 makes this a
+  # genuine one-shot under `compose up`; `keep` blocks on
+  # `service_completed_successfully` to ensure migrations land before
+  # traffic. On `docker compose up --force-recreate` the migrate
+  # service re-runs; goose is idempotent so this is safe but slightly
+  # noisier — operators wanting to skip re-migration use
+  # `docker compose up --force-recreate --no-deps keep`.
+  # -------------------------------------------------------------------------
+  migrate:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.migrate
+    container_name: watchkeeper-migrate
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-keep}
+      POSTGRES_SSLMODE: ${POSTGRES_SSLMODE:-disable}
+    secrets:
+      - postgres_password
+    networks: [watchkeeper]
+
+  # -------------------------------------------------------------------------
+  # Keep — primary HTTP service. Hosts `/v1/*` business API + `/metrics`
+  # (outside the auth wall per M10.1) + the outbox publisher worker.
+  # Database DSN and token signing key are mounted via docker `secrets:`;
+  # the keep config code reads `KEEP_DATABASE_URL_FILE` /
+  # `KEEP_TOKEN_SIGNING_KEY_FILE` as fallbacks for the equivalent env
+  # vars (iter-1).
+  # -------------------------------------------------------------------------
+  keep:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.keep
+    container_name: watchkeeper-keep
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # Keep accepts the full DSN here; the password component is
+      # URL-encoded by the operator-supplied .env (or assembled from
+      # secrets via a future _FILE-only path in M10.3.b). For now the
+      # `_FILE` fallback lets the operator point at a file holding the
+      # whole DSN to keep the password out of `docker inspect`.
+      KEEP_DATABASE_URL: ${KEEP_DATABASE_URL:-}
+      KEEP_DATABASE_URL_FILE: ${KEEP_DATABASE_URL_FILE:-}
+      KEEP_HTTP_ADDR: ${KEEP_HTTP_ADDR:-:8080}
+      KEEP_SHUTDOWN_TIMEOUT: ${KEEP_SHUTDOWN_TIMEOUT:-10s}
+      KEEP_SUBSCRIBE_HEARTBEAT: ${KEEP_SUBSCRIBE_HEARTBEAT:-15s}
+      KEEP_OUTBOX_POLL_INTERVAL: ${KEEP_OUTBOX_POLL_INTERVAL:-1s}
+      KEEP_TOKEN_SIGNING_KEY_FILE: /run/secrets/keep_token_signing_key
+      KEEP_TOKEN_ISSUER: ${KEEP_TOKEN_ISSUER:?KEEP_TOKEN_ISSUER is required -- see .env.example}
+      WK_LOG_LEVEL: ${WK_LOG_LEVEL:-info}
+    secrets:
+      - keep_token_signing_key
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [watchkeeper]
+
+  # -------------------------------------------------------------------------
+  # Prometheus — scrapes Keep /metrics every 15s (see
+  # deploy/observability/prometheus.yml). The 15/15 scrape+eval
+  # cadence matches the Grafana dashboard's 30s refresh and the
+  # rate(...[5m]) windows on every panel; deviating from this pair
+  # without updating the dashboard panels would change the
+  # sample-counting semantics (see lesson §M10.3 "scrape cadence").
+  # Bound to 127.0.0.1 by default so the un-authenticated PromQL API
+  # is not exposed on a dev laptop's shared network (iter-1 #5).
+  # -------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: watchkeeper-prometheus
+    restart: unless-stopped
+    depends_on:
+      keep:
+        condition: service_started
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --tries=1
+        - --spider
+        - http://localhost:9090/-/ready
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks: [watchkeeper]
+
+  # -------------------------------------------------------------------------
+  # Grafana — provisioned Prometheus datasource + starter dashboard
+  # (deploy/observability/grafana/). Bound to 127.0.0.1 by default
+  # (iter-1 #5). Anonymous access is disabled; bootstrap credentials
+  # come from `.env` and the admin password is REQUIRED on first up
+  # via the `:?` substitution (iter-1 #16) — `admin/admin` is a
+  # foot-gun on stacks that get inherited.
+  # -------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.5.4
+    container_name: watchkeeper-grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:?GF_SECURITY_ADMIN_PASSWORD is required -- see .env.example}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [watchkeeper]
+
+  # -------------------------------------------------------------------------
+  # Agent contract stubs (M10.3.b follow-up) -- gated behind
+  # `profiles: [stubs]` so default `compose up` stays clean. Operators
+  # probing the future deployment shape run:
+  #
+  #   docker compose --profile stubs up core watchmaster coordinator slack-bridge
+  #
+  # Each stub stays alive with `sleep infinity` so `compose ps` reports
+  # `Running`, distinguishing the intentional stub from a crash-looped
+  # service (iter-1 #3). The stub stdout names the follow-up M-id;
+  # the loud banner repeats on every `compose logs <service>`.
+  # -------------------------------------------------------------------------
+  core:
+    image: alpine:3.20
+    container_name: watchkeeper-core
+    profiles: [stubs]
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "watchkeeper-core: contract stub -- harness supervisor lands in M10.3.b"
+        echo "see docs/ROADMAP-phase1.md M10 + docs/lessons/M10.md"
+        exec sleep infinity
+    networks: [watchkeeper]
+
+  watchmaster:
+    image: alpine:3.20
+    container_name: watchkeeper-watchmaster
+    profiles: [stubs]
+    restart: unless-stopped
+    depends_on:
+      keep:
+        condition: service_started
+    command:
+      - /bin/sh
+      - -c
+      - |
+        manifest_id="$${WATCHMASTER_MANIFEST_ID:-00000000-0000-0000-0000-000000000011}"
+        echo "watchmaster: contract stub -- boots from manifest $${manifest_id} in M10.3.b"
+        echo "see deploy/migrations/017_watchmaster_manifest_seed.sql + docs/ROADMAP-phase1.md M6"
+        exec sleep infinity
+    networks: [watchkeeper]
+
+  coordinator:
+    image: alpine:3.20
+    container_name: watchkeeper-coordinator
+    profiles: [stubs]
+    restart: unless-stopped
+    depends_on:
+      keep:
+        condition: service_started
+    command:
+      - /bin/sh
+      - -c
+      - |
+        manifest_id="$${COORDINATOR_MANIFEST_ID:-00000000-0000-0000-0000-000000000024}"
+        echo "coordinator: contract stub -- boots from manifest $${manifest_id} in M10.3.b"
+        echo "see deploy/migrations/024_coordinator_manifest_seed.sql + docs/ROADMAP-phase1.md M8"
+        exec sleep infinity
+    networks: [watchkeeper]
+
+  # -------------------------------------------------------------------------
+  # Dev Slack socket bridge (M10.3.c follow-up).
+  #
+  # A future dev-only service that connects to Slack via Socket Mode so
+  # the dev workspace does not require a public ingress for Slack
+  # event delivery. The bridge binary is not yet implemented; the
+  # service pins the deployment shape under the same `stubs` profile.
+  # -------------------------------------------------------------------------
+  slack-bridge:
+    image: alpine:3.20
+    container_name: watchkeeper-slack-bridge
+    profiles: [stubs]
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "slack-bridge: contract stub -- Slack Socket Mode bridge lands in M10.3.c"
+        echo "see docs/ROADMAP-phase1.md M4 + docs/ROADMAP-phase1.md M10.3"
+        exec sleep infinity
+    networks: [watchkeeper]

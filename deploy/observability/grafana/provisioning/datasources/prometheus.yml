@@ -1,0 +1,20 @@
+# Provisioned Prometheus datasource for the Phase 1 compose stack (M10.3).
+#
+# Grafana loads this file at boot via the file-provider in
+# /etc/grafana/provisioning/datasources/. Mounted read-only by the
+# `grafana` service in docker-compose.yml. The datasource name MUST
+# match the `datasource.uid` field in every dashboard JSON — the
+# starter dashboard uses `uid: prometheus` so a single rename here
+# would orphan every panel.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
