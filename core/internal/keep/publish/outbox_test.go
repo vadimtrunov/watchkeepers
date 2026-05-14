@@ -1,14 +1,17 @@
 package publish_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/publish"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/wkmetrics"
 )
 
 // stubPublisher records every event passed to Publish and always returns nil.
@@ -86,5 +89,53 @@ func TestWorkerCancelStops(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return within 2s after context cancel")
+	}
+}
+
+// TestWorker_WithObservability_NilSurfacesAreNoOp asserts the M10.1
+// contract: a worker built via NewWorker/NewWorkerWithPublisher and
+// NEVER given a logger or metrics must not panic on any code path.
+// Production main.go always wires both, but tests and ad-hoc callers
+// should be free to skip the call without surprise.
+func TestWorker_WithObservability_NilSurfacesAreNoOp(t *testing.T) {
+	pub := &stubPublisher{}
+	cfg := publish.WorkerConfig{PollInterval: 10 * time.Second}
+	w := publish.NewWorkerWithPublisher(nil, pub, cfg)
+
+	// Both nil — explicitly. Mirrors a hypothetical caller that wants
+	// to clear an earlier WithObservability binding.
+	w.WithObservability(nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := w.Run(ctx); err != nil && err != context.Canceled {
+		t.Errorf("Run with nil observability surfaces: %v", err)
+	}
+}
+
+// TestWorker_WithObservability_LoggerAndMetricsAreReused asserts that
+// repeated WithObservability calls swap previous bindings without
+// leaking state — important because production main.go calls it
+// exactly once but tests may chain it across cases.
+func TestWorker_WithObservability_LoggerAndMetricsAreReused(t *testing.T) {
+	pub := &stubPublisher{}
+	cfg := publish.WorkerConfig{PollInterval: 10 * time.Second}
+	w := publish.NewWorkerWithPublisher(nil, pub, cfg)
+
+	var buf1, buf2 bytes.Buffer
+	m1 := wkmetrics.New()
+	m2 := wkmetrics.New()
+
+	w.WithObservability(slog.New(slog.NewJSONHandler(&buf1, nil)), m1)
+	w.WithObservability(slog.New(slog.NewJSONHandler(&buf2, nil)), m2)
+
+	// We cannot directly observe the swap without reaching into
+	// unexported fields, but we can prove Run still terminates cleanly
+	// after the swap — the regression we are guarding against is a
+	// panic on cleared / reused fields.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := w.Run(ctx); err != nil && err != context.Canceled {
+		t.Errorf("Run after WithObservability swap: %v", err)
 	}
 }

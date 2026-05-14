@@ -7,15 +7,19 @@
 //  3. Run the HTTP server until SIGINT/SIGTERM, then call http.Server.Shutdown
 //     with the configured timeout and close the pool.
 //
-// Business endpoints land in M2.7.c-e; this binary currently serves GET
-// /health only.
+// M10.1 adds the observability surface: a process-wide
+// [*wkmetrics.Metrics] is constructed at boot, mounted at GET /metrics
+// on the HTTP router (outside the auth wall), and threaded into the
+// outbox worker so publish outcomes are recorded. Structured JSON
+// logging is via [wklog] — env vars WK_LOG_LEVEL[_KEEP_*] tune levels
+// per subsystem.
 package main
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,6 +31,8 @@ import (
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/config"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/publish"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/server"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/wklog"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/wkmetrics"
 )
 
 // pingTimeout bounds the initial pgxpool.Pool.Ping on boot so an unreachable
@@ -41,9 +47,11 @@ func main() {
 // slice so the main function stays a thin os.Exit wrapper. M2.7.a has no
 // flags; args is reserved for future subcommands (e.g. `keep migrate`).
 func run(_ []string, _ io.Writer, stderr io.Writer) int {
+	logger := wklog.NewWithWriter("keep", stderr, wklog.Options{})
+
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintf(stderr, "keep: config: %v\n", err)
+		logger.Error("config load failed", slog.String("error", err.Error()))
 		return 1
 	}
 
@@ -55,21 +63,27 @@ func run(_ []string, _ io.Writer, stderr io.Writer) int {
 
 	pool, err := pgxpool.New(pingCtx, cfg.DatabaseURL)
 	if err != nil {
-		fmt.Fprintf(stderr, "keep: pgxpool: %v\n", err)
+		logger.Error("pgxpool init failed", slog.String("error", err.Error()))
 		return 1
 	}
 	defer pool.Close()
 
 	if err := pool.Ping(pingCtx); err != nil {
-		fmt.Fprintf(stderr, "keep: pgxpool ping: %v\n", err)
+		logger.Error("pgxpool ping failed", slog.String("error", err.Error()))
 		return 1
 	}
 
 	verifier, err := auth.NewHMACVerifier(cfg.TokenSigningKey, cfg.TokenIssuer, time.Now)
 	if err != nil {
-		fmt.Fprintf(stderr, "keep: auth: %v\n", err)
+		logger.Error("auth verifier init failed", slog.String("error", err.Error()))
 		return 1
 	}
+
+	// Process-wide metrics instance. Owned by main; threaded into both
+	// the HTTP router (mounts GET /metrics) and the outbox worker (so
+	// publish outcomes accumulate). Constructed BEFORE the registry so
+	// outbox handlers can refer to it on dispatch.
+	metrics := wkmetrics.New()
 
 	// Registry is process-owned and closed by Server.Run during shutdown;
 	// do not call reg.Close() here or the second close would be a no-op
@@ -81,11 +95,12 @@ func run(_ []string, _ io.Writer, stderr io.Writer) int {
 	//   cancel(workerCtx) → workerDone → reg.Close() → httpSrv.Shutdown
 	workerCfg := publish.WorkerConfig{PollInterval: cfg.OutboxPollInterval}
 	worker := publish.NewWorker(pool, reg, workerCfg)
+	worker.WithObservability(wklog.NewWithWriter("keep.outbox", stderr, wklog.Options{}), metrics)
 
-	srv := server.New(cfg, pool, verifier, reg)
+	srv := server.NewWithMetrics(cfg, pool, verifier, reg, metrics)
 	srv.WithWorker(worker)
 	if err := srv.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintf(stderr, "keep: server: %v\n", err)
+		logger.Error("server exited", slog.String("error", err.Error()))
 		return 1
 	}
 	return 0

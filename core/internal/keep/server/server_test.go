@@ -14,6 +14,7 @@ import (
 
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/config"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/server"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/wkmetrics"
 )
 
 func TestHealthHandler_OK(t *testing.T) {
@@ -49,6 +50,57 @@ func TestNewRouter_HealthRoute(t *testing.T) {
 	// /health must remain reachable even when no verifier is provided —
 	// the M2.7.a health contract (LESSON) has never required auth.
 	h := server.NewRouter(nil, nil, nil, 0)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("/health status = %d, want 200", rec.Code)
+	}
+}
+
+func TestNewRouter_MetricsRouteAbsentWithoutMetrics(t *testing.T) {
+	// Without a *wkmetrics.Metrics, /metrics MUST NOT be served — a
+	// dev test build with no metrics wiring should not surprise an
+	// operator scraper into thinking the surface is up.
+	h := server.NewRouter(nil, nil, nil, 0)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("/metrics with no metrics: status = %d, want 404", rec.Code)
+	}
+}
+
+func TestNewRouterWithMetrics_MountsMetricsOutsideAuthWall(t *testing.T) {
+	// /metrics MUST be mounted outside the auth wall: a Prometheus
+	// scraper has no bearer token and the dashboard stack needs to
+	// work out of the box. Passing v=nil here exercises the no-verifier
+	// path AND proves the route still answers (which it would not if
+	// it were behind AuthMiddleware).
+	m := wkmetrics.New()
+	h := server.NewRouterWithMetrics(nil, nil, nil, 0, m)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "go_goroutines") {
+		t.Errorf("/metrics body missing go_goroutines line; got %q", got[:min(len(got), 200)])
+	}
+}
+
+func TestNewRouterWithMetrics_HealthStillUnauthed(t *testing.T) {
+	// Regression guard: adding a /metrics handler must not change the
+	// /health contract.
+	m := wkmetrics.New()
+	h := server.NewRouterWithMetrics(nil, nil, nil, 0, m)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()

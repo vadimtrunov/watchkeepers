@@ -18,6 +18,7 @@ import (
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/auth"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/config"
 	"github.com/vadimtrunov/watchkeepers/core/internal/keep/publish"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/wkmetrics"
 )
 
 // healthBody is the exact, byte-stable payload returned by GET /health.
@@ -50,28 +51,67 @@ func HealthHandler() http.Handler {
 // tests that exit before the DB round-trip (the router never dereferences
 // the pool directly — it is captured by the handlers that need it).
 func NewRouter(v auth.Verifier, pool *pgxpool.Pool, reg *publish.Registry, heartbeat time.Duration) http.Handler {
+	return NewRouterWithMetrics(v, pool, reg, heartbeat, nil)
+}
+
+// NewRouterWithMetrics is NewRouter + a [*wkmetrics.Metrics] hook. When
+// m is non-nil:
+//
+//   - GET /metrics is mounted OUTSIDE the auth wall (Prometheus scrapers
+//     typically authenticate by network ACL or sidecar, not by bearer
+//     token, and forcing a JWT here would prevent the dashboard stack
+//     from working out of the box). Operators deploying onto a hostile
+//     network MUST ACL the listener at the network level and/or set
+//     [wkmetrics.Options.DisableProcessCollectors] to drop process+Go
+//     collectors so /metrics does not leak process_resident_memory_bytes,
+//     process_open_fds, etc.
+//   - Every /v1/* handler is wrapped in [wkmetrics.Metrics.Instrument]
+//     so the http_request_duration_seconds histogram is partitioned by
+//     the static route template (NOT the raw URL path — cardinality
+//     would explode otherwise). The Instrument wrap sits OUTSIDE
+//     AuthMiddleware so 401 responses still register in the histogram
+//     and operators see auth-failure volume on the same panel as the
+//     happy-path traffic (iter-1 review: codex P1a).
+//
+// A nil m makes this function behaviourally identical to NewRouter; it
+// is the entry point production callers use through main.go.
+func NewRouterWithMetrics(v auth.Verifier, pool *pgxpool.Pool, reg *publish.Registry, heartbeat time.Duration, m *wkmetrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", HealthHandler())
+	if m != nil {
+		mux.Handle("GET /metrics", m.Handler())
+	}
 
 	if v != nil {
 		authed := AuthMiddleware(v)
 		runner := poolRunner{pool: pool}
-		mux.Handle("POST /v1/search", authed(handleSearch(runner)))
-		mux.Handle("GET /v1/manifests/{manifest_id}", authed(handleGetManifest(runner)))
-		mux.Handle("GET /v1/keepers-log", authed(handleLogTail(runner)))
-		mux.Handle("GET /v1/cost-rollups", authed(handleCostRollups(runner)))
-		mux.Handle("POST /v1/knowledge-chunks", authed(handleStore(runner)))
-		mux.Handle("POST /v1/keepers-log", authed(handleLogAppend(runner)))
-		mux.Handle("PUT /v1/manifests/{manifest_id}/versions", authed(handlePutManifestVersion(runner)))
-		mux.Handle("POST /v1/watchkeepers", authed(handleInsertWatchkeeper(runner)))
-		mux.Handle("PATCH /v1/watchkeepers/{id}/status", authed(handleUpdateWatchkeeperStatus(runner)))
-		mux.Handle("PATCH /v1/watchkeepers/{id}/lead", authed(handleSetWatchkeeperLead(runner)))
-		mux.Handle("GET /v1/watchkeepers/{id}", authed(handleGetWatchkeeper(runner)))
-		mux.Handle("GET /v1/watchkeepers", authed(handleListWatchkeepers(runner)))
-		mux.Handle("POST /v1/humans", authed(handleInsertHuman(runner)))
-		mux.Handle("GET /v1/humans/by-slack/{slack_user_id}", authed(handleLookupHumanBySlackID(runner)))
+		// instrument wraps the WHOLE auth+handler chain with the
+		// per-route latency histogram when m is set. Order matters:
+		// `instrument(route, authed(h))` so 401s contribute to the
+		// histogram; `authed(instrument(route, h))` would silently
+		// drop them.
+		instrument := func(route string, h http.Handler) http.Handler {
+			if m == nil {
+				return h
+			}
+			return m.Instrument(route, h)
+		}
+		mux.Handle("POST /v1/search", instrument("/v1/search", authed(handleSearch(runner))))
+		mux.Handle("GET /v1/manifests/{manifest_id}", instrument("/v1/manifests/{manifest_id}", authed(handleGetManifest(runner))))
+		mux.Handle("GET /v1/keepers-log", instrument("/v1/keepers-log", authed(handleLogTail(runner))))
+		mux.Handle("GET /v1/cost-rollups", instrument("/v1/cost-rollups", authed(handleCostRollups(runner))))
+		mux.Handle("POST /v1/knowledge-chunks", instrument("/v1/knowledge-chunks", authed(handleStore(runner))))
+		mux.Handle("POST /v1/keepers-log", instrument("/v1/keepers-log", authed(handleLogAppend(runner))))
+		mux.Handle("PUT /v1/manifests/{manifest_id}/versions", instrument("/v1/manifests/{manifest_id}/versions", authed(handlePutManifestVersion(runner))))
+		mux.Handle("POST /v1/watchkeepers", instrument("/v1/watchkeepers", authed(handleInsertWatchkeeper(runner))))
+		mux.Handle("PATCH /v1/watchkeepers/{id}/status", instrument("/v1/watchkeepers/{id}/status", authed(handleUpdateWatchkeeperStatus(runner))))
+		mux.Handle("PATCH /v1/watchkeepers/{id}/lead", instrument("/v1/watchkeepers/{id}/lead", authed(handleSetWatchkeeperLead(runner))))
+		mux.Handle("GET /v1/watchkeepers/{id}", instrument("/v1/watchkeepers/{id}", authed(handleGetWatchkeeper(runner))))
+		mux.Handle("GET /v1/watchkeepers", instrument("/v1/watchkeepers", authed(handleListWatchkeepers(runner))))
+		mux.Handle("POST /v1/humans", instrument("/v1/humans", authed(handleInsertHuman(runner))))
+		mux.Handle("GET /v1/humans/by-slack/{slack_user_id}", instrument("/v1/humans/by-slack/{slack_user_id}", authed(handleLookupHumanBySlackID(runner))))
 		if reg != nil {
-			mux.Handle("GET /v1/subscribe", authed(handleSubscribe(reg, heartbeat)))
+			mux.Handle("GET /v1/subscribe", instrument("/v1/subscribe", authed(handleSubscribe(reg, heartbeat))))
 		}
 	}
 	return mux
@@ -114,7 +154,16 @@ type Server struct {
 // /health can pass nil for v and reg — the router will then skip the
 // /v1/* wiring. Production main.go always supplies all three.
 func New(cfg config.Config, pool *pgxpool.Pool, v auth.Verifier, reg *publish.Registry) *Server {
-	srv := NewWithHandler(cfg, pool, NewRouter(v, pool, reg, cfg.SubscribeHeartbeat))
+	return NewWithMetrics(cfg, pool, v, reg, nil)
+}
+
+// NewWithMetrics is New + a [*wkmetrics.Metrics] hook. Production
+// main.go calls this with a non-nil metrics; tests that do not care
+// keep calling New. The metrics instance is owned by the caller — the
+// Server does not Close it during shutdown (metrics has no resources
+// requiring teardown beyond what the http.Server already manages).
+func NewWithMetrics(cfg config.Config, pool *pgxpool.Pool, v auth.Verifier, reg *publish.Registry, m *wkmetrics.Metrics) *Server {
+	srv := NewWithHandler(cfg, pool, NewRouterWithMetrics(v, pool, reg, cfg.SubscribeHeartbeat, m))
 	srv.reg = reg
 	return srv
 }

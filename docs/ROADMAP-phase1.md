@@ -32,7 +32,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 | M7  | Spawn Flow end-to-end             | ⬜     | 4–6d      |                              |
 | M8  | Coordinator + Jira adapter        | ⬜     | 5–7d      | requires Jira test project   |
 | M9  | Tool Registry + self-modification | ⬜     | 14–20d    | requires platform tool repo  |
-| M10 | Observability, CLI, runbook       | ⬜     | 4–6d      |                              |
+| M10 | Observability, CLI, runbook       | 🟨     | 4–6d      |                              |
 
 ---
 
@@ -541,7 +541,7 @@ Both private modes are read by the same overlay resolver — the runtime sees no
 
 **Scope**
 
-- [ ] **M10.1** **Observability** — Prometheus metrics (per-Watchkeeper token spend, latency histograms, tool-invocation counts, event-bus queue depth, Slack/Jira rate-limit headroom) plus structured JSON logs with correlation IDs and configurable per-subsystem log levels.
+- [x] **M10.1** **Observability** — Prometheus metrics (per-Watchkeeper token spend, latency histograms, tool-invocation counts, event-bus queue depth, Slack/Jira rate-limit headroom) plus structured JSON logs with correlation IDs and configurable per-subsystem log levels.
 - [ ] **M10.2** **`wk` CLI + Make targets** — `spawn`, `retire`, `list`, `logs <wk>`, `inspect <wk>`, `tail-keepers-log`, `tool list | rollback`, `tool hosted list | show | export`, `tool share <name> --target <repo>`, `tools sources list | status | sync`, `notebook show <wk> | forget <wk> <id> | export <wk> | import <wk> <archive> | archive <wk> | list-archives <wk>`, `personality show <wk> | set <wk>`, `language show <wk> | set <wk>`, `budget show | set`, `approvals pending | inspect <id>` — every command mirrored behind a `make wk CMD="..."` shortcut.
 - [ ] **M10.3** **docker-compose + Grafana** — finalize compose stack (core, keep, postgres, watchmaster, sample coordinator, dev Slack socket bridge) and ship a Grafana starter dashboard.
 - [ ] **M10.4** **Operator runbook + smoke** — runbook covers workspace bootstrap, credential rotation, Keep backup/restore, Notebook archive backup/restore via `ArchiveStore`, runaway-agent incident response, upgrade procedure, and disaster scenarios; `make smoke` reproduces the M7 + M8 + M9 success scenarios against an isolated dev environment.
