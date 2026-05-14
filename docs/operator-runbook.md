@@ -263,15 +263,18 @@ to the agent's session. A revoked or expired token fails the
 `watchmaster.promote_share_tool` RPC with code `-32005`
 (ToolUnauthorized).
 
-### `wk-tool hosted-export` — operator flow
+### `wk tool hosted export` — operator flow
 
 Exports a tool tree from a `kind: hosted` source on the local
 deployment's data directory into a self-contained bundle the
-operator imports into a fresh git repo.
+operator imports into a fresh git repo. Replaces the M9.7-era
+`wk-tool hosted-export` invocation; M10.2 subsumed the standalone
+`wk-tool` binary under the unified `wk` CLI (the flag shape is
+preserved verbatim — only the invocation prefix changed).
 
 ```bash
 WATCHKEEPER_DATA_DIR=/var/lib/watchkeepers \
-  wk-tool hosted-export \
+  wk tool hosted export \
     --source hosted-private \
     --tool weekly_digest \
     --destination /tmp/weekly_digest-bundle \
@@ -295,15 +298,17 @@ Stdout shape: one JSONL event line on
 `hostedexport.hosted_tool_exported` plus a one-line summary
 ending with `correlation_id=<value>`.
 
-### `wk-tool share` — operator flow
+### `wk tool share` — operator flow
 
 Opens a PR on the target repo from the deployment's on-disk tool
-tree.
+tree. Replaces the M9.4.b-era `wk-tool share` invocation; M10.2
+subsumed the standalone `wk-tool` binary under the unified `wk`
+CLI.
 
 ```bash
 WATCHKEEPER_DATA_DIR=/var/lib/watchkeepers \
   WATCHKEEPER_GITHUB_TOKEN=ghp_... \
-  wk-tool share \
+  wk tool share \
     --source private \
     --tool weekly_digest \
     --target platform \
@@ -395,7 +400,7 @@ gh pr close --delete-branch \
 The first command runs when a PR was somehow opened against the
 branch (rare for this failure mode); the fallback `gh api -X DELETE`
 removes the branch directly when no PR exists. A subsequent
-`wk-tool share` invocation produces a NEW branch name (different
+`wk tool share` invocation produces a NEW branch name (different
 nanosecond timestamp + atomic nonce) so the cleanup does NOT race
 the retry.
 
