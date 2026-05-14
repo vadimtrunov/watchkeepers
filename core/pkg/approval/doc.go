@@ -21,7 +21,7 @@
 //     [toolregistry.ToolShadowed]. Deliberate deviation from the
 //     M9.4 roadmap text "capability count": the M9.4.b approval-card
 //     renderer needs the capability ID list to look up
-//     human-readable translations (M9.3 `dict/capabilities.yaml`),
+//     human-readable translations (M9.3.a `dict/capabilities.yaml`),
 //     and capability IDs are public dictionary entries (not PII), so
 //     the payload carries the list rather than just a count.
 //

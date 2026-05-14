@@ -113,6 +113,25 @@ const (
 	buttonStyleDanger  = "danger"
 )
 
+// FallbackTranslationDictionaryNotLoaded is the placeholder rendered
+// on the approval card when the [CapabilityTranslator] argument is
+// nil (the dictionary has not been loaded yet — boot ordering, test
+// harness without a yaml fixture). Hoisted as an exported package-
+// level const so producer (`capabilityTranslationsMrkdwn`) and the
+// tests share one source of truth — a renamer-refactor cannot land
+// stale references in just one site. Distinct from the
+// [FallbackTranslationNotRegistered] placeholder, which fires only
+// when the translator IS wired but the id is unknown.
+const FallbackTranslationDictionaryNotLoaded = "translation pending — dictionary not loaded"
+
+// FallbackTranslationNotRegistered is the placeholder rendered when
+// the supplied [CapabilityTranslator] returns the empty string for
+// the queried id — the dictionary IS loaded but the id is absent
+// (bijection violation surface). Distinct from
+// [FallbackTranslationDictionaryNotLoaded] so the two failure modes
+// are operator-distinguishable in the rendered card body.
+const FallbackTranslationNotRegistered = "no translation registered"
+
 // ButtonAction is the closed-set vocabulary the approval card emits
 // on its 4 buttons. The dispatcher decodes the `value` field to pick
 // the action — see [DecodeActionID].
@@ -159,9 +178,10 @@ const (
 // CapabilityTranslator is the optional seam the renderer consumes to
 // produce a human-readable line per capability id. Mirrors the
 // per-call resolver discipline from M9.1.a / M9.4.a — production
-// wiring satisfies it via a closure over M9.3's
-// `dict/capabilities.yaml` (mandatory at M9.3 ship, but the renderer
-// degrades gracefully when M9.3 is not yet wired).
+// wiring satisfies it via `capdict.Translator(loadedDictionary)`,
+// a closure over M9.3.a's `dict/capabilities.yaml`. The renderer
+// degrades gracefully when the dictionary has not been loaded yet
+// (boot order, test harness without a yaml fixture).
 //
 // Contract:
 //
@@ -172,8 +192,8 @@ const (
 //     still review the raw capability id.
 //
 // A nil [CapabilityTranslator] is the documented degradation path
-// for "M9.3 not yet wired". Every cap renders as
-// `<cap_id> (translation pending — M9.3)`.
+// for "dictionary not loaded yet". Every cap renders as
+// `<cap_id> (translation pending — dictionary not loaded)`.
 type CapabilityTranslator func(capabilityID string) string
 
 // CardInput is the typed projection of a [Proposal] +
@@ -359,9 +379,12 @@ func descriptionMrkdwn(desc string) string {
 
 // capabilityTranslationsMrkdwn renders one bullet per capability id.
 // Translation comes from the optional [CapabilityTranslator]; a nil
-// translator OR an empty-string translation falls back to a "pending
-// — M9.3" placeholder so the operator sees the raw cap id and knows
-// the dictionary is not yet wired.
+// translator falls back to a "translation pending — dictionary not
+// loaded" placeholder so the operator sees the raw cap id and knows
+// the dictionary has not been wired yet. An empty-string translation
+// (translator is wired but the id is unknown) surfaces a distinct
+// "no translation registered" placeholder so the bijection-violation
+// case is operator-distinguishable from the boot-order case.
 //
 // The list is capped at [cardCapabilityListMaxLines] bullets — above
 // the cap the renderer surfaces a trailing `… (+N more)` line.
@@ -381,9 +404,9 @@ func capabilityTranslationsMrkdwn(caps []string, translate CapabilityTranslator)
 		}
 		switch {
 		case translation == "" && translate == nil:
-			fmt.Fprintf(&b, "• `%s` (translation pending — M9.3)\n", c)
+			fmt.Fprintf(&b, "• `%s` (%s)\n", c, FallbackTranslationDictionaryNotLoaded)
 		case translation == "":
-			fmt.Fprintf(&b, "• `%s` (no translation registered)\n", c)
+			fmt.Fprintf(&b, "• `%s` (%s)\n", c, FallbackTranslationNotRegistered)
 		default:
 			fmt.Fprintf(&b, "• `%s`: %s\n", c, translation)
 		}
