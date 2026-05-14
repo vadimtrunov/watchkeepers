@@ -59,6 +59,13 @@ jobs:
           printf "Go coverage: %s%%\n" "$coverage"
           awk -v c="$coverage" 'BEGIN { if (c+0 < 60) { print "coverage below 60%"; exit 1 } }'
 
+      # M10.4 smoke gate: re-invokes the curated M7 + M8 + M9 success
+      # paths through scripts/smoke.sh so the operator-facing entry
+      # point stays green. Cheap on a warm go-cache; catches drift
+      # between the script's package set and the contract test.
+      - name: make smoke
+        run: make smoke
+
       - name: govulncheck
         uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1.0.4
         with:
