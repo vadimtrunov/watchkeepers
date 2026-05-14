@@ -384,13 +384,20 @@ commit-lint: ## Lint the most recent commit message
 	@$(COMMITLINT) --from=HEAD~1 --to=HEAD
 
 # ---------------------------------------------------------------------------
-# Smoke (wired in later milestones)
+# Smoke (M10.4)
+#
+# `make smoke` reproduces the M7 + M8 + M9 success scenarios against an
+# isolated dev environment. The script lives at `scripts/smoke.sh` and
+# runs `go build ./...` followed by `go test -race -count=1` against the
+# curated package set covering each milestone family. Host-only — no
+# docker compose, no Postgres, no real Slack required. See the smoke
+# section of `docs/operator-runbook.md` for the contract and the
+# matching contract test at `core/internal/deploy/smoke_test.go`.
 # ---------------------------------------------------------------------------
 
 .PHONY: smoke
-smoke: ## Run end-to-end smoke test (scaffolded; full wiring in M10)
-	@echo "smoke: placeholder — see docs/ROADMAP-phase1.md §4 M10"
-	@exit 0
+smoke: ## Run the Phase 1 smoke test (M7 + M8 + M9 success paths + wk CLI seam against in-memory fakes)
+	@scripts/smoke.sh
 
 # ---------------------------------------------------------------------------
 # Compose stack (M10.3)
