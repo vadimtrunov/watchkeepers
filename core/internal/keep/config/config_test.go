@@ -3,6 +3,8 @@ package config_test
 import (
 	"encoding/base64"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -273,5 +275,67 @@ func TestLoad_OutboxPollIntervalInvalid(t *testing.T) {
 				t.Fatalf("Load() returned nil for KEEP_OUTBOX_POLL_INTERVAL=%q", tc.raw)
 			}
 		})
+	}
+}
+
+// TestIter1_DatabaseURL_FileFallback pins the M10.3 iter-1 fix: when
+// KEEP_DATABASE_URL_FILE points at a readable file, Load reads the
+// DSN from that file (trimming the trailing newline) instead of from
+// the env var. The env var itself need not be set. Addresses the
+// "credentials visible to `docker inspect`" review finding by letting
+// the compose stack mount secrets via docker `secrets:` files.
+func TestIter1_DatabaseURL_FileFallback(t *testing.T) {
+	setTokenEnv(t)
+	path := filepath.Join(t.TempDir(), "dsn.txt")
+	if err := os.WriteFile(path, []byte(fakeDSN+"\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	t.Setenv("KEEP_DATABASE_URL_FILE", path)
+	// KEEP_DATABASE_URL intentionally unset.
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DatabaseURL != fakeDSN {
+		t.Errorf("DatabaseURL = %q, want %q (trailing newline must be trimmed)", cfg.DatabaseURL, fakeDSN)
+	}
+}
+
+// TestIter1_TokenSigningKey_FileFallback pins the same file-fallback
+// shape for the token signing key. The fixture writes the same
+// base64-encoded value the env-form would carry; Load must decode it
+// to the same 32-byte key.
+func TestIter1_TokenSigningKey_FileFallback(t *testing.T) {
+	t.Setenv("KEEP_TOKEN_ISSUER", "keep-test")
+	t.Setenv("KEEP_DATABASE_URL", fakeDSN)
+	path := filepath.Join(t.TempDir(), "key.b64")
+	if err := os.WriteFile(path, []byte(fakeSigningKey32+"\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	t.Setenv("KEEP_TOKEN_SIGNING_KEY_FILE", path)
+	// KEEP_TOKEN_SIGNING_KEY intentionally unset.
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.TokenSigningKey) != 32 {
+		t.Errorf("TokenSigningKey length = %d, want 32", len(cfg.TokenSigningKey))
+	}
+}
+
+// TestIter1_DatabaseURL_FileMissing surfaces the file-read error
+// instead of silently falling back to the empty env var.
+func TestIter1_DatabaseURL_FileMissing(t *testing.T) {
+	setTokenEnv(t)
+	t.Setenv("KEEP_DATABASE_URL_FILE", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatalf("Load() returned nil for missing KEEP_DATABASE_URL_FILE")
+	}
+	if !strings.Contains(err.Error(), "KEEP_DATABASE_URL_FILE") {
+		t.Errorf("error %q must name KEEP_DATABASE_URL_FILE so operator sees the diagnostic path", err)
 	}
 }

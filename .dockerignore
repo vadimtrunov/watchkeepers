@@ -1,0 +1,49 @@
+# Docker build-context exclusions (M10.3 iter-1).
+#
+# Without this file every `docker compose build` uploads the repo-root
+# `.env` to the Docker daemon as part of the build context, leaking
+# operator-provisioned secrets to the daemon (and any daemon-side cache
+# / image-layer tar) even though no Dockerfile references them.
+# Addresses the iter-1 codex P2 finding.
+#
+# Patterns mirror .gitignore plus build-output dirs that explode the
+# context size needlessly.
+
+# Secrets — every form .env.example documents.
+.env
+.env.*
+!.env.example
+secrets/
+
+# Git metadata (heavy; never referenced by a build).
+.git/
+.gitignore
+
+# Build outputs (the build stage regenerates these inside the image).
+bin/
+dist/
+coverage/
+coverage.out
+coverage.html
+node_modules/
+
+# IDE / OS noise.
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Claude Code / OMC harness artefacts (already .gitignored at repo
+# root but worth duplicating here in case an operator pulls a fresh
+# clone before the global rule fires).
+.claude/
+.omc/
+
+# Test fixtures + runbook drill outputs.
+runtime.test
+*.log
+
+# Lessons / docs are referenced by the build only via COPY layers
+# that name them explicitly; the broader docs tree is dead-weight.
+docs/

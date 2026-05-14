@@ -15,3 +15,7 @@ docs/watchkeeper-business-concept.md
 docs/watchkeeper-spawn-flow.md
 docs/superpowers/
 
+# Env file templates — prettier has no parser for KEY=VALUE shell-style
+# files (M10.3). Reviewed by visual inspection.
+.env.example
+.env

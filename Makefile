@@ -391,3 +391,51 @@ commit-lint: ## Lint the most recent commit message
 smoke: ## Run end-to-end smoke test (scaffolded; full wiring in M10)
 	@echo "smoke: placeholder — see docs/ROADMAP-phase1.md §4 M10"
 	@exit 0
+
+# ---------------------------------------------------------------------------
+# Compose stack (M10.3)
+#
+# Phase 1 compose stack — postgres + migrate + keep + prometheus +
+# grafana + agent contract stubs. The data plane is fully wired and
+# bootable; the agent plane prints loud follow-up M-id messages and
+# exits 0 (same pattern as the M10.2 `wk` CLI's exit-3 stubs).
+#
+# Secrets are env-driven via `.env` at repo root (template at
+# `.env.example`). Defaults to docker compose v2 plugin syntax.
+# ---------------------------------------------------------------------------
+
+# Docker Compose v2 plugin (`docker compose ...`) is the supported invocation.
+# Operators on legacy engines without the v2 plugin can override to the
+# hyphenated v1 binary via `make compose-up DOCKER_COMPOSE="docker-compose"`
+# but the compose-file syntax assumes v2.10+ semantics (notably the
+# `condition: service_completed_successfully` gate used by `keep` and the
+# `secrets:` mount shape used for the Postgres password). iter-1 #20.
+DOCKER_COMPOSE ?= docker compose
+
+.PHONY: compose-up
+compose-up: ## Start the Phase 1 compose stack in the foreground
+	@$(DOCKER_COMPOSE) up
+
+.PHONY: compose-up-d
+compose-up-d: ## Start the Phase 1 compose stack detached
+	@$(DOCKER_COMPOSE) up -d
+
+.PHONY: compose-build
+compose-build: ## Build / rebuild all locally-built compose images
+	@$(DOCKER_COMPOSE) build
+
+.PHONY: compose-down
+compose-down: ## Stop and remove compose containers (keeps named volumes)
+	@$(DOCKER_COMPOSE) down
+
+.PHONY: compose-down-volumes
+compose-down-volumes: ## Stop and remove compose containers AND named volumes (full reset)
+	@$(DOCKER_COMPOSE) down --volumes
+
+.PHONY: compose-logs
+compose-logs: ## Tail compose logs (all services)
+	@$(DOCKER_COMPOSE) logs -f
+
+.PHONY: compose-ps
+compose-ps: ## List compose service status
+	@$(DOCKER_COMPOSE) ps

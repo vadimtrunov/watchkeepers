@@ -13,8 +13,35 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// envValue resolves a configuration value with file-fallback support.
+//
+// If `<envName>_FILE` is set, the file at that path is read and its
+// contents (trimmed of leading/trailing whitespace, including the
+// trailing newline that text editors add) returned. Otherwise the
+// value of `<envName>` itself is returned (possibly empty). The
+// `_FILE` variant exists so the compose stack (M10.3) can pass
+// secrets through docker `secrets:` mounts without the cleartext
+// value appearing in `docker inspect` output or in the container's
+// `/proc/<pid>/environ` — addresses iter-1 finding #1/#2.
+//
+// Both forms cannot be set simultaneously; if both are present the
+// `_FILE` variant wins because that is the documented secret-bearing
+// path. On read failure the original error is wrapped so the
+// operator's diagnostic names the file path.
+func envValue(envName string) (string, error) {
+	if path := os.Getenv(envName + "_FILE"); path != "" {
+		raw, err := os.ReadFile(path) //nolint:gosec // path supplied by trusted operator-provided env var
+		if err != nil {
+			return "", fmt.Errorf("read %s_FILE (%q): %w", envName, path, err)
+		}
+		return strings.TrimRight(string(raw), " \t\r\n"), nil
+	}
+	return os.Getenv(envName), nil
+}
 
 // MinTokenSigningKeyBytes is the enforced minimum length of the HS256
 // signing key (after base64 decode). Mirrors auth.MinSigningKeyBytes so
@@ -88,8 +115,12 @@ type Config struct {
 // auth middleware; both are validated fail-fast so an operator cannot boot
 // a Keep process that would 401 every request at first traffic.
 func Load() (Config, error) {
+	dbURL, err := envValue("KEEP_DATABASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
-		DatabaseURL:        os.Getenv("KEEP_DATABASE_URL"),
+		DatabaseURL:        dbURL,
 		HTTPAddr:           os.Getenv("KEEP_HTTP_ADDR"),
 		ShutdownTimeout:    DefaultShutdownTimeout,
 		TokenIssuer:        os.Getenv("KEEP_TOKEN_ISSUER"),
@@ -179,16 +210,21 @@ func (c *Config) applyOptionalInts() error {
 	return nil
 }
 
-// loadTokenSigningKey reads KEEP_TOKEN_SIGNING_KEY from the environment,
+// loadTokenSigningKey reads KEEP_TOKEN_SIGNING_KEY (or its
+// KEEP_TOKEN_SIGNING_KEY_FILE file-fallback variant added in M10.3
+// iter-1 for compose `secrets:` mounts) from the environment,
 // base64-decodes it, and validates its length.
 func loadTokenSigningKey() ([]byte, error) {
-	rawKey := os.Getenv("KEEP_TOKEN_SIGNING_KEY")
+	rawKey, err := envValue("KEEP_TOKEN_SIGNING_KEY")
+	if err != nil {
+		return nil, err
+	}
 	if rawKey == "" {
 		return nil, ErrMissingTokenSigningKey
 	}
-	key, err := base64.StdEncoding.DecodeString(rawKey)
-	if err != nil {
-		return nil, fmt.Errorf("invalid KEEP_TOKEN_SIGNING_KEY: base64 decode: %w", err)
+	key, decodeErr := base64.StdEncoding.DecodeString(rawKey)
+	if decodeErr != nil {
+		return nil, fmt.Errorf("invalid KEEP_TOKEN_SIGNING_KEY: base64 decode: %w", decodeErr)
 	}
 	if len(key) < MinTokenSigningKeyBytes {
 		return nil, fmt.Errorf("%w (got %d)", ErrTokenSigningKeyTooShort, len(key))

@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.10
+# Migration sidecar for the Phase 1 compose stack (M10.3).
+#
+# Compiles `pressly/goose v3.27.0` from source in a builder stage so the
+# image stays inside the trusted-registry set (golang:1.26-alpine +
+# alpine:3.20 — both on docker.io per .hadolint.yaml trustedRegistries)
+# and the goose version stays pinned to the same constant as the
+# Makefile (`GOOSE_VERSION ?= v3.27.0`). The runtime stage carries
+# only the static goose binary, the migration files, and a tiny shell
+# wrapper so the compose service can pass the DSN components via env
+# without tripping shell-form ENTRYPOINT word-splitting hazards.
+#
+# Iter-1: CGO_ENABLED=0 guarantees a statically-linked goose so the
+# alpine:3.20 runtime stage never resolves libc symbols absent from
+# the smaller runtime image — mirrors the deploy/Dockerfile.keep
+# pattern that already builds CGO-free. The runtime image is a plain
+# alpine (no ca-certificates) because the migrate sidecar connects
+# to Postgres over the docker bridge with `sslmode=disable`; the
+# trust store would be dead weight (iter-1 #17).
+FROM golang:1.26-alpine AS build
+
+# hadolint ignore=DL3018
+RUN apk add --no-cache git \
+ && CGO_ENABLED=0 go install github.com/pressly/goose/v3/cmd/goose@v3.27.0
+
+FROM alpine:3.20 AS runtime
+
+COPY --from=build /go/bin/goose /usr/local/bin/goose
+COPY deploy/migrations /migrations
+COPY deploy/migrate-entrypoint.sh /usr/local/bin/migrate
+
+RUN chmod +x /usr/local/bin/migrate
+
+ENTRYPOINT ["/usr/local/bin/migrate"]
+CMD ["up"]
