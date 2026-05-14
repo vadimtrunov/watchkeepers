@@ -26,6 +26,10 @@ Thumbs.db
 /bin/
 /dist/
 /keep
+/wk
+/wk-tool
+/spawn-dev-bot
+/watchkeeper
 *.test
 *.out
 coverage.out

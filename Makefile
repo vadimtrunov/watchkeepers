@@ -195,44 +195,56 @@ spawn-dev-bot-dry-run: spawn-dev-bot-build ## Validate the manifest WITHOUT cont
 	  --dry-run
 
 # ---------------------------------------------------------------------------
-# wk-tool — operator CLI for the M9.5 local-patch lifecycle.
+# wk — unified Watchkeeper operator CLI (ROADMAP §M10.2).
 #
-# `make tools-local-install` copies an operator-supplied folder into a
-# kind=local source's tools directory under
-# $WATCHKEEPER_DATA_DIR/tools/<source>/<tool>/, snapshotting the prior
-# contents under $WATCHKEEPER_DATA_DIR/_history/<source>/<tool>/<priorVersion>/
-# so a later rollback can restore them. Emits `local_patch_applied`
-# audit events as JSONL on stdout (one event per line; pipe to your
-# audit-log capture path). The `--reason` field is REQUIRED — it is the
-# operator's accountability statement and lands verbatim on the audit
-# event.
+# `make wk CMD="<noun-group> <subcommand> [flags]"` is the composite
+# shortcut every operator workflow flows through. CMD is passed verbatim
+# to ./bin/wk; the binary is built on demand. This is the SOLE general
+# entry point — per-noun-group make targets are not defined because the
+# composite shortcut already covers every present and future verb (the
+# `tools-local-install` target is preserved separately for M9.5 runbook
+# compatibility ONLY).
 #
-# Required env vars:
+# CMD-with-spaces caveat (iter-1 critic m1): Make word-splits `$(CMD)`.
+# Flag values containing literal spaces (e.g. `--reason "with space"`)
+# are not preserved through the wrapper. Operators who need a
+# space-bearing reason should invoke `./bin/wk` directly OR set the
+# field via a single-token value (`--reason graduating-tool`). The
+# wrapper is a thin convenience; the binary is the contract.
 #
-#   FOLDER             path to the new tool folder (must contain manifest.json)
-#   REASON             operator-supplied audit text (REQUIRED — M9.5 contract)
-#   OPERATOR           operator identity (UUID / agent handle / human handle)
-#   WATCHKEEPER_DATA_DIR  deployment data root (sibling of $DATA_DIR/tools/)
+# Required env (per-subcommand; see `make wk CMD=help` for the full
+# matrix):
 #
-# Optional:
+#   WATCHKEEPER_KEEP_BASE_URL   Keep base URL (Keep-backed subcommands)
+#   WATCHKEEPER_OPERATOR_TOKEN  bearer token (Keep-backed subcommands)
+#   WATCHKEEPER_DATA_DIR        deployment data root (`wk tool *`)
+#   WATCHKEEPER_DATA            notebook data root (`wk notebook *`)
 #
-#   SOURCE             defaults to `local` (the canonical local-source name)
+# Audit hygiene: secrets (operator token, GitHub PAT) reach the binary
+# via ENV only; never argv (which `ps -ef` would leak).
 # ---------------------------------------------------------------------------
 
 WK_TOOL_SOURCE ?= local
 
-.PHONY: wk-tool-build
-wk-tool-build: ## Build the wk-tool CLI binary into ./bin/wk-tool
+.PHONY: wk-build
+wk-build: ## Build the unified wk operator CLI into ./bin/wk (M10.2)
 	@mkdir -p bin
-	@$(GO) build -trimpath -o bin/wk-tool ./core/cmd/wk-tool
+	@$(GO) build -trimpath -o bin/wk ./core/cmd/wk
 
+.PHONY: wk
+wk: wk-build ## Forward CMD to ./bin/wk (e.g. make wk CMD="spawn --manifest <id> --lead <id>")
+	@./bin/wk $(CMD)
+
+# Tool-source local-install — preserved make-target name for runbook
+# compatibility; routes through `wk tool local-install` under the hood
+# now that wk-tool has been subsumed.
 .PHONY: tools-local-install
-tools-local-install: wk-tool-build ## Install an operator-supplied tool folder into a kind=local source (M9.5; --reason REQUIRED)
+tools-local-install: wk-build ## Install an operator-supplied tool folder into a kind=local source (M9.5; --reason REQUIRED)
 	@: "$${FOLDER:?ERROR: FOLDER required (path to the new tool folder containing manifest.json)}"
 	@: "$${REASON:?ERROR: REASON required (operator-supplied audit text — M9.5 contract)}"
 	@: "$${OPERATOR:?ERROR: OPERATOR required (operator identity)}"
 	@: "$${WATCHKEEPER_DATA_DIR:?ERROR: WATCHKEEPER_DATA_DIR required (deployment data root)}"
-	@./bin/wk-tool local-install \
+	@./bin/wk tool local-install \
 	  --folder "$(FOLDER)" \
 	  --source "$(WK_TOOL_SOURCE)" \
 	  --reason "$(REASON)" \
