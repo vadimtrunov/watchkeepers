@@ -176,8 +176,8 @@ func TestRenderApprovalCard_NilTranslator_FallbackPlaceholder(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	joined := jsonBlocksString(t, blocks)
-	if !strings.Contains(joined, "translation pending — M9.3") {
-		t.Errorf("nil translator must fall back to M9.3-pending placeholder; rendered: %s", joined)
+	if !strings.Contains(joined, FallbackTranslationDictionaryNotLoaded) {
+		t.Errorf("nil translator must fall back to dictionary-not-loaded placeholder %q; rendered: %s", FallbackTranslationDictionaryNotLoaded, joined)
 	}
 }
 
@@ -189,8 +189,8 @@ func TestRenderApprovalCard_TranslatorReturnsEmpty_Fallback(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	joined := jsonBlocksString(t, blocks)
-	if !strings.Contains(joined, "no translation registered") {
-		t.Errorf("empty translation must surface placeholder; got: %s", joined)
+	if !strings.Contains(joined, FallbackTranslationNotRegistered) {
+		t.Errorf("empty translation must surface placeholder %q; got: %s", FallbackTranslationNotRegistered, joined)
 	}
 }
 

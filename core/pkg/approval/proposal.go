@@ -116,10 +116,18 @@ type ProposalInput struct {
 	// Capabilities is the list of capability ids the tool will
 	// request at runtime. Required (non-empty); max
 	// [MaxCapabilityCount] entries; each non-blank and max
-	// [MaxCapabilityIDLength] bytes. Membership against M9.3's
-	// `dict/capabilities.yaml` is NOT enforced here — that
-	// dictionary lands in a later milestone; M9.4.a validates
-	// shape only.
+	// [MaxCapabilityIDLength] bytes. Membership against M9.3.a's
+	// `dict/capabilities.yaml` is NOT enforced here — by design,
+	// to keep the dependency arrow one-way (capdict consumes the
+	// dictionary; approval emits the proposal; neither imports the
+	// other). The card renderer surfaces unknown ids via the
+	// `(no translation registered)` placeholder, and the
+	// canonical-set bijection test in `core/pkg/capdict/canonical_test.go`
+	// pins the dictionary against the in-code authority. The
+	// approval-side validator stays SHAPE-ONLY (non-blank +
+	// length + duplicate-free); capdict's grammar is strictly
+	// tighter, so every capdict id is a legal proposer id but
+	// NOT vice-versa.
 	Capabilities []string
 
 	// TargetSource selects platform vs private (no `local` per the

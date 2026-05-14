@@ -1,0 +1,50 @@
+# Capability dictionary — maps every M9 capability id to a plain-language
+# description rendered on the slack-native approval card (M9.4.b) and
+# surfaced to non-engineer leads who never see raw code.
+#
+# Schema version 1. Each capability id maps to an object (NOT a bare
+# string) so future locale keys land without a v2 bump:
+#
+#   capabilities:
+#     "github:read":
+#       description: Read GitHub issues, pull requests, ...
+#       # locale-future: descriptions_i18n: {ru: "...", de: "..."}
+#
+# The Go canonical set lives at `core/pkg/capdict/canonical.go`. A
+# two-way bijection test pins both sources of truth — adding a
+# capability requires one yaml row AND one Go-slice entry; missing
+# either side fails CI.
+#
+# Capability ids use a `domain:verb` shape (lower_snake_case + colon
+# namespace). Match `core/pkg/approval/proposal.go` validation; the
+# `tool:share` form mirrors the M9.6 share-capability id.
+version: 1
+capabilities:
+  "filesystem:read":
+    description: Read files from the worker's allowlisted directories on the host filesystem.
+  "github:list":
+    description: List GitHub issues, pull requests, and repository contents in read-only form.
+  "github:read":
+    description: Read GitHub issues, pull requests, comments, and repository metadata.
+  "github:write":
+    description: Write to GitHub — open pull requests, push commits, add comments and labels.
+  "jira:read":
+    description: Read Jira tickets, comments, sprints, and project metadata.
+  "jira:write":
+    description: Write to Jira — create tickets, transition status, add comments and worklog entries.
+  "keep:read":
+    description: Read business knowledge stored in the team Keep (the shared long-term memory).
+  "keep:write":
+    description: Write business knowledge into the team Keep. Subject to human approval at promotion time.
+  "network:http":
+    description: Make outbound HTTP and HTTPS requests to hosts on the worker's network allowlist.
+  "notebook:read":
+    description: Read entries from the Watchkeeper's private notebook (its short-term memory).
+  "notebook:write":
+    description: Write entries into the Watchkeeper's private notebook.
+  "slack:read":
+    description: Read messages, channel metadata, and user profiles in Slack workspaces the Watchkeeper is in.
+  "slack:send":
+    description: Send messages and post interactive cards to Slack channels and direct messages.
+  "tool:share":
+    description: Propose sharing a private tool with an upstream tool source by opening a pull request in the target repository.
