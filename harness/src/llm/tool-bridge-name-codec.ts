@@ -56,9 +56,13 @@ export function buildCodec(tools: readonly ToolDefinition[]): ToolNameCodec {
 
   return {
     encode(runtimeName) {
-      // Defensive: re-derive rather than rely on prior `set` in case a
-      // caller asks for a name not in the original tool list.
-      return encodeMap.get(runtimeName) ?? encodeName(runtimeName);
+      const encoded = encodeMap.get(runtimeName);
+      if (encoded === undefined) {
+        throw LLMError.invalidPrompt(
+          `tool-bridge codec: encode() called with unregistered runtime name "${runtimeName}"; the bridge was built without this tool in req.tools`,
+        );
+      }
+      return encoded;
     },
     decode(mcpName) {
       const bare = mcpName.startsWith(MCP_PREFIX)

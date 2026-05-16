@@ -45,23 +45,40 @@ describe("buildCodec", () => {
   });
 
   it("throws invalid_prompt on sanitisation collision", () => {
-    expect(() => buildCodec([td("a.b"), td("a_b")])).toThrow(LLMError);
+    let thrown: unknown;
     try {
       buildCodec([td("a.b"), td("a_b")]);
     } catch (e) {
-      expect((e as LLMError).code).toBe("invalid_prompt");
-      expect((e as LLMError).message).toMatch(/collision/i);
+      thrown = e;
     }
+    expect(thrown).toBeInstanceOf(LLMError);
+    expect((thrown as LLMError).code).toBe("invalid_prompt");
+    expect((thrown as LLMError).message).toMatch(/collision/i);
   });
 
   it("throws provider_unavailable on unknown mcp name", () => {
     const codec = buildCodec([td("notebook.remember")]);
-    expect(() => codec.decode("unknown_tool")).toThrow(LLMError);
+    let thrown: unknown;
     try {
       codec.decode("unknown_tool");
     } catch (e) {
-      expect((e as LLMError).code).toBe("provider_unavailable");
+      thrown = e;
     }
+    expect(thrown).toBeInstanceOf(LLMError);
+    expect((thrown as LLMError).code).toBe("provider_unavailable");
+  });
+
+  it("throws invalid_prompt when encode() is called with an unregistered name", () => {
+    const codec = buildCodec([td("notebook.remember")]);
+    let thrown: unknown;
+    try {
+      codec.encode("notebook.recall");
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(LLMError);
+    expect((thrown as LLMError).code).toBe("invalid_prompt");
+    expect((thrown as LLMError).message).toMatch(/unregistered/);
   });
 
   it("rejects foreign mcp server prefixes", () => {
