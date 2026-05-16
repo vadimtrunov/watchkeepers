@@ -21,7 +21,7 @@ import type { query } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
 
 import { ClaudeAgentProvider } from "../src/llm/claude-agent-provider.js";
-import type { LLMError, StreamEvent } from "../src/llm/index.js";
+import type { LLMError, StreamEvent, ToolDefinition } from "../src/llm/index.js";
 import { model, type Usage } from "../src/llm/index.js";
 
 // The provider's queryImpl seam expects a `typeof query`; the fake
@@ -418,8 +418,15 @@ describe("ClaudeAgentProvider.complete — SDK error mapping", () => {
  * event into `collected`. Mirrors the receiver loop a real caller would
  * write — handler pushes events into the array, then we wait for the
  * `message_stop` event before returning.
+ *
+ * Pass `tools` when the SDK messages include `content_block_start` tool_use
+ * blocks — the bridge codec needs them to decode MCP-prefixed names back to
+ * runtime names.
  */
-async function drainStream(msgs: readonly unknown[]): Promise<readonly StreamEvent[]> {
+async function drainStream(
+  msgs: readonly unknown[],
+  tools?: readonly ToolDefinition[],
+): Promise<readonly StreamEvent[]> {
   const collected: StreamEvent[] = [];
   let stopped = false;
   const handler = (ev: StreamEvent): void => {
@@ -431,6 +438,7 @@ async function drainStream(msgs: readonly unknown[]): Promise<readonly StreamEve
     {
       model: model("claude-sonnet-4-6"),
       messages: [{ role: "user", content: "x" }],
+      ...(tools !== undefined ? { tools } : {}),
     },
     handler,
   );
@@ -482,40 +490,50 @@ describe("ClaudeAgentProvider.stream — happy paths", () => {
   });
 
   it("translates content_block_start tool_use into tool_call_start", async () => {
-    const events = await drainStream([
-      {
-        type: "stream_event",
-        event: {
-          type: "content_block_start",
-          content_block: { type: "tool_use", id: "tu_42", name: "notebook.recall" },
+    // The bridge codec decodes the MCP-prefixed name back to the runtime name.
+    // SDK events carry `mcp__watchkeeper__notebook_recall`; the test passes the
+    // matching tool so the codec can resolve it to `notebook.recall`.
+    const events = await drainStream(
+      [
+        {
+          type: "stream_event",
+          event: {
+            type: "content_block_start",
+            content_block: {
+              type: "tool_use",
+              id: "tu_42",
+              name: "mcp__watchkeeper__notebook_recall",
+            },
+          },
         },
-      },
-      {
-        type: "stream_event",
-        event: {
-          type: "content_block_delta",
-          delta: { type: "input_json_delta", partial_json: '{"q":"a' },
+        {
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            delta: { type: "input_json_delta", partial_json: '{"q":"a' },
+          },
         },
-      },
-      {
-        type: "stream_event",
-        event: {
-          type: "content_block_delta",
-          delta: { type: "input_json_delta", partial_json: 'uth"}' },
+        {
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            delta: { type: "input_json_delta", partial_json: 'uth"}' },
+          },
         },
-      },
-      {
-        type: "stream_event",
-        event: { type: "content_block_stop" },
-      },
-      {
-        type: "result",
-        subtype: "success",
-        stop_reason: "tool_use",
-        usage: { input_tokens: 1, output_tokens: 1 },
-        total_cost_usd: 0,
-      },
-    ]);
+        {
+          type: "stream_event",
+          event: { type: "content_block_stop" },
+        },
+        {
+          type: "result",
+          subtype: "success",
+          stop_reason: "tool_use",
+          usage: { input_tokens: 1, output_tokens: 1 },
+          total_cost_usd: 0,
+        },
+      ],
+      [{ name: "notebook.recall", description: "recall", inputSchema: { type: "object" } }],
+    );
     const start = events.find((e) => e.kind === "tool_call_start");
     expect(start?.toolCall?.id).toBe("tu_42");
     expect(start?.toolCall?.name).toBe("notebook.recall");
@@ -715,5 +733,89 @@ describe("ClaudeAgentProvider.complete with tools (M5.7.c slice 4)", () => {
     });
     const opts = observedOptions as { mcpServers?: Record<string, unknown> } | undefined;
     expect(opts?.mcpServers).toBeUndefined();
+  });
+});
+
+/* -----------------------------------------------------------------------
+ * (8) ClaudeAgentProvider.stream with tools (M5.7.c slice 4)
+ * --------------------------------------------------------------------- */
+
+describe("ClaudeAgentProvider.stream with tools (M5.7.c slice 4)", () => {
+  it("emits tool_call_start, tool_call_delta and message_stop with finishReason=tool_use", async () => {
+    const fake = (() =>
+      // eslint-disable-next-line @typescript-eslint/require-await -- generator yields a fixed sequence; no awaitable I/O inside.
+      (async function* () {
+        yield {
+          type: "stream_event",
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+              type: "tool_use",
+              id: "tu_1",
+              name: "mcp__watchkeeper__notebook_remember",
+            },
+          },
+        };
+        yield {
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: '{"k":1}' },
+          },
+        };
+        yield {
+          type: "stream_event",
+          event: { type: "content_block_stop", index: 0 },
+        };
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "tu_1",
+                name: "mcp__watchkeeper__notebook_remember",
+                input: { k: 1 },
+              },
+            ],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          },
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          usage: { input_tokens: 1, output_tokens: 1 },
+          total_cost_usd: 0,
+          stop_reason: "tool_use",
+        };
+      })()) as unknown as QueryImpl;
+    const provider = new ClaudeAgentProvider({ queryImpl: fake });
+    const events: StreamEvent[] = [];
+    const sub = await provider.stream(
+      {
+        model: model("claude-3-5-sonnet-latest"),
+        messages: [{ role: "user", content: "save k=1" }],
+        tools: [
+          { name: "notebook.remember", description: "save", inputSchema: { type: "object" } },
+        ],
+      },
+      (e) => {
+        events.push(e);
+      },
+    );
+    // Drain by polling the subscription until it reports stopped.
+    // Cast through unknown to access the concrete isStopped property that
+    // ClaudeAgentStreamSubscription exposes but the StreamSubscription
+    // interface does not declare (the interface only needs stop()).
+    while (!(sub as unknown as { isStopped: boolean }).isStopped) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toContain("tool_call_start");
+    expect(kinds).toContain("tool_call_delta");
+    const stop = events.find((e) => e.kind === "message_stop");
+    expect(stop?.finishReason).toBe("tool_use");
   });
 });

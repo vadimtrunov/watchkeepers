@@ -19,29 +19,28 @@
  *
  * # Phase scope
  *
- * - `complete()` fully implemented.
+ * - `complete()` fully implemented (M5.7.c slices 1–4).
+ * - `stream()` fully implemented (M5.7.c slice 4); delegates the dispatch
+ *   loop to {@link interceptStream} in tool-bridge-interceptor.ts.
  * - `reportCost()` shares the in-memory ledger pattern with
  *   {@link ClaudeCodeProvider}.
- * - `stream()` / `countTokens()` raise
- *   {@link LLMError.providerUnavailable} pending the next slices on this
- *   feature branch (M5.7.c.b, M5.7.c.c).
+ * - `countTokens()` raises {@link LLMError.providerUnavailable} pending
+ *   M5.7.c.c.
  */
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 import { LLMError } from "./errors.js";
 import type { LLMProvider } from "./provider.js";
-import { interceptComplete } from "./tool-bridge-interceptor.js";
+import { interceptComplete, interceptStream, type AbortBag } from "./tool-bridge-interceptor.js";
 import { buildStubMcpServer } from "./tool-bridge-mcp-stub-server.js";
 import { MCP_SERVER_NAME, buildCodec, type ToolNameCodec } from "./tool-bridge-name-codec.js";
 import type {
   CompleteRequest,
   CompleteResponse,
   CountTokensRequest,
-  FinishReason,
   Message,
   Model,
-  StreamEvent,
   StreamHandler,
   StreamRequest,
   StreamSubscription,
@@ -165,13 +164,17 @@ export class ClaudeAgentProvider implements LLMProvider {
     validateTools(req.tools);
 
     const prompt = buildPromptFromMessages(req.messages);
+    const codec: ToolNameCodec = buildCodec(req.tools ?? []);
     // includePartialMessages: true asks the Agent SDK to emit raw
     // streaming-event sub-messages (text_delta, input_json_delta, ...)
     // as the assistant turn unfolds, which we translate into the
     // portable StreamEvent kinds. Without this flag the SDK only emits
     // a single complete SDKAssistantMessage per turn and we lose
     // incremental text.
-    const options = this.buildOptions(req, { partial: true });
+    const options =
+      req.tools !== undefined && req.tools.length > 0
+        ? this.buildOptions(req, { partial: true, codec, tools: req.tools })
+        : this.buildOptions(req, { partial: true });
 
     let iter: ReturnType<typeof query>;
     try {
@@ -182,7 +185,7 @@ export class ClaudeAgentProvider implements LLMProvider {
     }
 
     const sub = new ClaudeAgentStreamSubscription(iter);
-    void sub.startDispatch(handler, req.model);
+    void sub.startDispatch(handler, codec, req.model);
     return sub;
   }
 
@@ -321,48 +324,6 @@ function buildPromptFromMessages(messages: readonly Message[]): string {
   return parts.join("\n\n");
 }
 
-/**
- * Result of consuming a single SDK result message — used by the stream
- * path (`translateStreamMessage`). The complete() path now uses
- * `interceptComplete` from tool-bridge-interceptor.ts instead.
- */
-interface ConsumedMessage {
-  readonly usage?: Usage;
-  readonly finishReason?: FinishReason;
-  readonly errorMessage?: string;
-}
-
-function consumeResultMessage(m: Record<string, unknown>, requestedModel: Model): ConsumedMessage {
-  if (m.subtype === "success") {
-    const usageRaw = m.usage as Record<string, unknown> | undefined;
-    const input = typeof usageRaw?.input_tokens === "number" ? usageRaw.input_tokens : 0;
-    const output = typeof usageRaw?.output_tokens === "number" ? usageRaw.output_tokens : 0;
-    const costUsd = typeof m.total_cost_usd === "number" ? m.total_cost_usd : 0;
-    return {
-      finishReason: mapStopReason(m.stop_reason),
-      usage: {
-        model: requestedModel,
-        inputTokens: input,
-        outputTokens: output,
-        // 1 cent = 10000 internal units (matches Go llm.Usage.CostCents).
-        costCents: Math.round(costUsd * 10000),
-      },
-    };
-  }
-  // result + non-success: treat as turn error.
-  const errStr = typeof m.error === "string" ? m.error : "unknown agent SDK error";
-  return {
-    finishReason: "error",
-    errorMessage: errStr,
-    usage: {
-      model: requestedModel,
-      inputTokens: 0,
-      outputTokens: 0,
-      costCents: 0,
-    },
-  };
-}
-
 function safeJsonStringify(v: unknown): string {
   try {
     const s = JSON.stringify(v);
@@ -371,24 +332,6 @@ function safeJsonStringify(v: unknown): string {
     return typeof s === "string" ? s : "[unserialisable error value]";
   } catch {
     return "[unserialisable error value]";
-  }
-}
-
-function mapStopReason(sdk: unknown): FinishReason {
-  switch (sdk) {
-    case "end_turn":
-    case "stop_sequence":
-    case "pause_turn":
-    case "refusal":
-    case null:
-    case undefined:
-      return "stop";
-    case "max_tokens":
-      return "max_tokens";
-    case "tool_use":
-      return "tool_use";
-    default:
-      return "stop";
   }
 }
 
@@ -427,129 +370,40 @@ function mapAgentError(e: unknown): LLMError {
   return LLMError.providerUnavailable(message, e);
 }
 
-/* -----------------------------------------------------------------------
- * Streaming translation.
- *
- * The Agent SDK emits a richer event stream than the portable
- * StreamEvent kinds — most events (system, status, api_retry, ...) have
- * no portable counterpart and are dropped at the adapter boundary.
- * Only the three message types the harness needs land on the wire:
- *
- *   - SDKPartialAssistantMessage  → text_delta / tool_call_start /
- *                                   tool_call_delta (per inner block)
- *   - SDKAssistantMessage         → falls through to message_stop's
- *                                   final-assistant snapshot (drop)
- *   - SDKResultMessage            → message_stop carrying finishReason
- *                                   + usage from the success summary
- *
- * The translator is a free function so the test seam can exercise the
- * event mapping without instantiating a subscription.
- * --------------------------------------------------------------------- */
-
-interface ClaudeAgentStreamCorrelation {
-  readonly getActiveToolID: () => string | undefined;
-  readonly setActiveToolID: (id: string | undefined) => void;
-}
-
-export function translateStreamMessage(
-  msg: unknown,
-  model: Model,
-  corr: ClaudeAgentStreamCorrelation,
-): StreamEvent | undefined {
-  if (msg === null || typeof msg !== "object") return undefined;
-  const m = msg as Record<string, unknown>;
-  const type = m.type;
-  if (type === "stream_event") return translatePartialAssistantEvent(m, corr);
-  if (type === "result") {
-    const consumed = consumeResultMessage(m, model);
-    const evt: StreamEvent = { kind: "message_stop" };
-    if (consumed.finishReason !== undefined) {
-      (evt as { finishReason?: FinishReason }).finishReason = consumed.finishReason;
-    }
-    if (consumed.usage !== undefined) {
-      (evt as { usage?: Usage }).usage = consumed.usage;
-    }
-    if (consumed.errorMessage !== undefined) {
-      (evt as { errorMessage?: string }).errorMessage = consumed.errorMessage;
-    }
-    return evt;
-  }
-  return undefined;
-}
-
-function translatePartialAssistantEvent(
-  msg: Record<string, unknown>,
-  corr: ClaudeAgentStreamCorrelation,
-): StreamEvent | undefined {
-  const event = msg.event as Record<string, unknown> | undefined;
-  if (event === undefined) return undefined;
-  const innerType = event.type;
-  switch (innerType) {
-    case "content_block_start": {
-      const block = event.content_block as Record<string, unknown> | undefined;
-      if (block?.type === "tool_use") {
-        const id = typeof block.id === "string" ? block.id : "";
-        corr.setActiveToolID(id);
-        return {
-          kind: "tool_call_start",
-          toolCall: {
-            id,
-            name: typeof block.name === "string" ? block.name : "",
-            arguments: {},
-          },
-        };
-      }
-      return undefined;
-    }
-    case "content_block_delta": {
-      const delta = event.delta as Record<string, unknown> | undefined;
-      if (delta?.type === "text_delta") {
-        return {
-          kind: "text_delta",
-          textDelta: typeof delta.text === "string" ? delta.text : "",
-        };
-      }
-      if (delta?.type === "input_json_delta") {
-        const id = corr.getActiveToolID() ?? "";
-        return {
-          kind: "tool_call_delta",
-          textDelta: typeof delta.partial_json === "string" ? delta.partial_json : "",
-          toolCall: { id, name: "", arguments: {} },
-        };
-      }
-      return undefined;
-    }
-    case "content_block_stop":
-      corr.setActiveToolID(undefined);
-      return undefined;
-    default:
-      return undefined;
-  }
-}
-
 /**
  * Internal {@link StreamSubscription} backing
  * {@link ClaudeAgentProvider.stream}. Mirrors the
  * `ClaudeStreamSubscription` semantics in claude-code-provider.ts:
  * one-shot stop / cause-latching / first stop() interrupts the Agent
- * SDK Query iterator.
+ * SDK Query iterator. All event parsing and dispatch are delegated to
+ * `interceptStream` from tool-bridge-interceptor.ts.
  */
 class ClaudeAgentStreamSubscription implements StreamSubscription {
-  private readonly iter: AsyncIterator<unknown>;
+  // iter is stored as the original iterable/iterator so that interceptStream
+  // can call iter[Symbol.asyncIterator]() and also reach iter.interrupt().
+  public readonly iter: AsyncIterable<unknown> & { interrupt?: () => Promise<void> };
   private readonly maybeQuery: { interrupt: () => Promise<void> } | undefined;
-  private _stopped = false;
+  public _stopped = false;
   private _cause: unknown = undefined;
   private _stopRan = false;
   private _stopResult: LLMError | undefined;
-  private activeToolID: string | undefined;
 
   public constructor(iter: AsyncIterable<unknown> | AsyncIterator<unknown>) {
     // Agent SDK's Query is an AsyncGenerator (has both [Symbol.asyncIterator]
-    // and the iterator protocol). We accept either shape.
-    this.iter =
-      typeof (iter as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
-        ? (iter as AsyncIterable<unknown>)[Symbol.asyncIterator]()
-        : (iter as AsyncIterator<unknown>);
+    // and the iterator protocol). We accept either shape and normalise to the
+    // AsyncIterable side so interceptStream can call [Symbol.asyncIterator]()
+    // itself (and reach .interrupt() on the original object).
+    if (typeof (iter as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
+      this.iter = iter as AsyncIterable<unknown> & { interrupt?: () => Promise<void> };
+    } else {
+      // Wrap bare AsyncIterator in a one-shot AsyncIterable.
+      const it = iter as AsyncIterator<unknown>;
+      this.iter = {
+        [Symbol.asyncIterator](): AsyncIterator<unknown> {
+          return it;
+        },
+      };
+    }
     this.maybeQuery =
       typeof (iter as { interrupt?: unknown }).interrupt === "function"
         ? (iter as unknown as { interrupt: () => Promise<void> })
@@ -566,42 +420,22 @@ class ClaudeAgentStreamSubscription implements StreamSubscription {
     this._cause = cause;
   }
 
-  public async startDispatch(handler: StreamHandler, model: Model): Promise<void> {
-    const corr: ClaudeAgentStreamCorrelation = {
-      getActiveToolID: () => this.activeToolID,
-      setActiveToolID: (id) => {
-        this.activeToolID = id;
-      },
-    };
-    try {
-      while (!this._stopped) {
-        const next = await this.iter.next();
-        if (next.done === true) break;
-        const ev = translateStreamMessage(next.value, model, corr);
-        if (ev === undefined) continue;
-        try {
-          await handler(ev);
-        } catch (handlerErr: unknown) {
-          this.markStopped(handlerErr);
-          break;
-        }
-        if (ev.kind === "message_stop") break;
-      }
-    } catch (sdkErr: unknown) {
-      // SDK iteration blew up mid-flight: synthesise an error event for
-      // the handler, then latch the cause for stop().
-      const errEvent: StreamEvent = {
-        kind: "error",
-        errorMessage: errorMessageOf(sdkErr),
-      };
-      try {
-        await handler(errEvent);
-      } catch {
-        // Handler errors during the synthesised error event are swallowed
-        // — the SDK error is the authoritative cause.
-      }
-      this.markStopped(sdkErr);
-    }
+  public async startDispatch(
+    handler: StreamHandler,
+    codec: ToolNameCodec,
+    streamModel: Model,
+  ): Promise<void> {
+    // AbortBag adapter: interceptStream reads isStopped in its while-loop
+    // guard and calls markStopped when the handler throws or the SDK errors.
+    // Built via a standalone factory to avoid a `this`-alias lint violation —
+    // the factory receives the subscription as a plain parameter.
+    const abortBag = makeAbortBagFor(this);
+    await interceptStream(this.iter, handler, codec, streamModel, abortBag);
+    // Mark stopped so callers polling sub.isStopped know the dispatch loop
+    // has fully completed (including the message_stop event delivery).
+    // markStopped is idempotent — calling it here is safe even if the
+    // interceptor already called it via abortBag.markStopped().
+    this.markStopped(undefined);
   }
 
   public async stop(): Promise<void> {
@@ -628,9 +462,26 @@ class ClaudeAgentStreamSubscription implements StreamSubscription {
   }
 }
 
-function errorMessageOf(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  if (typeof e === "string") return e;
-  if (typeof e === "object" && e !== null) return safeJsonStringify(e);
-  return String(e);
+/* -----------------------------------------------------------------------
+ * AbortBag factory — avoids a `this`-alias lint violation inside
+ * `startDispatch` by receiving the subscription as a plain parameter.
+ * The getter/setter pair satisfies AbortBag's `isStopped: boolean`
+ * structural shape: TypeScript's checker accepts accessor pairs wherever
+ * a plain boolean property is expected, since both are readable/writable.
+ * --------------------------------------------------------------------- */
+
+function makeAbortBagFor(sub: ClaudeAgentStreamSubscription): AbortBag {
+  return {
+    get isStopped(): boolean {
+      return sub._stopped;
+    },
+    set isStopped(v: boolean) {
+      // Forward stop signals from the interceptor; ignore writes of false
+      // because once stopped the subscription stays stopped.
+      if (v) sub.markStopped(undefined);
+    },
+    markStopped: (cause: unknown) => {
+      sub.markStopped(cause);
+    },
+  };
 }
