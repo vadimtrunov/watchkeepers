@@ -27,7 +27,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 | M2b | Notebook library                  | ✅     | 3–5d      | recall-latency bench shipped (p99 < 100 ms gated); sub-ms goal → Phase 2 M7.5 |
 | M3  | Go core services                  | ✅     | 5–8d      |                                                                  |
 | M4  | Messenger adapter + Slack         | ✅     | 5–7d      | `make spawn-dev-bot` live-workspace bootstrap outstanding (rate-limiter load test shipped) |
-| M5  | Runtime adapter + Claude Code     | ✅     | 7–10d     | echo-tool launch + Notebook auto-injection/auto-reflection scenarios outstanding (sandbox bullets shipped via B4) |
+| M5  | Runtime adapter + Claude Code     | ✅     | 7–10d     | echo-tool launch outstanding (sandbox bullets shipped via B4; Notebook auto-injection/auto-reflection bullets shipped via B5) |
 | M6  | Watchmaster                       | ✅     | 4–6d      | Slack DM verification scenarios outstanding                      |
 | M7  | Spawn Flow end-to-end             | ✅     | 4–6d      |                                                                  |
 | M8  | Coordinator + Jira adapter        | ✅     | 5–7d      |                                                                  |
@@ -368,8 +368,8 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [x] A runaway test tool is killed by the wall-clock limit. (B4 — `harness/test/m5-sandbox-scenarios.test.ts`.)
 - [x] A tool that tries undeclared network access is rejected by the capability broker. (B4 — `harness/test/m5-sandbox-scenarios.test.ts`.)
 - [x] Replacing `LLMProvider` with `FakeProvider` runs the full harness suite without code changes outside the provider package. (B4 — `harness/test/m5-sandbox-scenarios.test.ts`.)
-- [ ] Auto-injection: seed Notebook with a lesson, start a new turn, observe lesson content in the prompt window.
-- [ ] Auto-reflection: force a tool error, check that a `lesson` entry appears with `active_after` 24h in the future and `lesson_learned` is in Keeper's Log.
+- [x] Auto-injection: seed Notebook with a lesson, start a new turn, observe lesson content in the prompt window. (B5 — `core/pkg/runtime/notebook_scenarios_e2e_test.go`.)
+- [x] Auto-reflection: force a tool error, check that a `lesson` entry appears with `active_after` 24h in the future and `lesson_learned` is in Keeper's Log. (B5 — `core/pkg/runtime/notebook_scenarios_e2e_test.go`.)
 
 **Dependencies**: M3, M2b.
 **External prerequisite**: Claude Code installed on the host with valid credentials.
@@ -674,7 +674,7 @@ CI-runnable tests against mocks. Independent of Phase A; can start immediately.
 - [x] **B2** M3 integration test — spawn mock Watchkeeper, fire cron event, assert correlated `cron_fired` + `handler_ran` in Keeper's Log with matching correlation IDs. Landed in `core/internal/m3chain/chain_integration_test.go` (3 scenarios).
 - [x] **B3** M4 rate-limiter load test — tier-2 burst + sustained limits honored under simulated load. Landed in `core/pkg/messenger/slack/ratelimiter_load_test.go` (3 assertions: burst-honored under 128g × 100 hammer, sustained-honored across 5 simulated Windows, real-clock Wait throughput within ±15% of projected leaky-bucket budget) plus 2 trend benchmarks; gated `//go:build loadtest` and runnable via `make ratelimiter-load`.
 - [x] **B4** M5 sandbox scenarios — runaway tool killed by wall-clock limit; undeclared network access rejected by capability broker; `FakeProvider` runs full harness suite without touching provider package. Landed in `harness/test/m5-sandbox-scenarios.test.ts` (3 cross-cutting scenario assertions driving `runHarness` end-to-end + 1 structural import-discipline guard).
-- [ ] **B5** M5 Notebook scenarios — auto-injection (seeded lesson visible in prompt window) and auto-reflection (forced tool error → `lesson` with 24h `active_after` + `lesson_learned` in Keeper's Log).
+- [x] **B5** M5 Notebook scenarios — auto-injection (seeded lesson visible in prompt window) and auto-reflection (forced tool error → `lesson` with 24h `active_after` + `lesson_learned` in Keeper's Log). Landed in `core/pkg/runtime/notebook_scenarios_e2e_test.go` (2 cross-cutting scenario tests driving `BuildTurnRequest` end-to-end + `NewWiredRuntime` with both `WithToolErrorReflector` and `WithKeepersLogWriter` end-to-end).
 - [ ] **B6** M9 isolated tests — overlay precedence, update-safety (platform `main` bump preserves private tool), signature refusal with signing enabled, local-patch audit (missing `--reason` blocks; reason + operator identity reach Keeper's Log).
 
 ### Phase C — Live end-to-end demos (§7 #1–#6)
