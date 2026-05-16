@@ -11,12 +11,16 @@ import (
 	"github.com/vadimtrunov/watchkeepers/core/pkg/notebook"
 )
 
-// defaultCoolingOff is the active_after window the reflector adds to
+// DefaultCoolingOff is the active_after window the reflector adds to
 // `clock()` when [WithCoolingOff] is not supplied. Pinned at 24h per
 // the M5.6.b acceptance criteria — long enough that a single tool
 // failure cannot dominate auto-recall in a tight retry loop, short
 // enough that genuinely durable failures resurface within a day.
-const defaultCoolingOff = 24 * time.Hour
+//
+// Exported so verification tests (B5 §M5 Notebook scenarios) can
+// reference the production default as a binding-time tie rather than
+// re-declaring a coupled literal in test code.
+const DefaultCoolingOff = 24 * time.Hour
 
 // reflectionEmbedQuerySeparator is the byte the reflector uses to join
 // Subject and Content into a single embedding source. Picked as a
@@ -237,7 +241,7 @@ func WithReflectorLogger(l *slog.Logger) ToolErrorReflectorOption {
 // Defaults applied by the constructor:
 //   - clock      = [time.Now]
 //   - logRefFunc = func() string { return "" }
-//   - coolingOff = [defaultCoolingOff] (= 24h)
+//   - coolingOff = [DefaultCoolingOff] (= 24h)
 //
 // Supplied options override them.
 func NewToolErrorReflector(rememberer Rememberer, opts ...ToolErrorReflectorOption) (*ToolErrorReflector, error) {
@@ -248,7 +252,7 @@ func NewToolErrorReflector(rememberer Rememberer, opts ...ToolErrorReflectorOpti
 		rememberer: rememberer,
 		clock:      time.Now,
 		logRefFunc: func() string { return "" },
-		coolingOff: defaultCoolingOff,
+		coolingOff: DefaultCoolingOff,
 		logger:     slog.Default(),
 	}
 	for _, opt := range opts {
