@@ -34,7 +34,7 @@ export interface InterceptedTurn {
   readonly toolCalls: readonly ToolCall[];
   readonly text: string;
   readonly finishReason: FinishReason;
-  readonly usage: Usage | undefined;
+  readonly usage: Usage;
   readonly errorMessage: string | undefined;
 }
 
@@ -133,7 +133,10 @@ export async function interceptStream(
         }
       }
 
-      // Full assistant snapshot: capture tool_use blocks for the final stop event.
+      // Full assistant snapshot. The SDK emits this before invoking tool
+      // handlers, so this is our cue that the assistant turn is finished;
+      // downstream SDK builds may or may not also emit a result message.
+      // Capture the tool_use blocks for the eventual message_stop event.
       const parsedAssistant = parseAssistantSnapshot(msg, codec);
       if (parsedAssistant !== undefined && parsedAssistant.length > 0) {
         toolUseSnapshot = parsedAssistant;
@@ -159,10 +162,12 @@ export async function interceptStream(
         return;
       }
 
-      // If we already captured a snapshot but the SDK has not produced a
-      // result message yet, the assistant turn is complete (next thing
-      // would be a tool dispatch). Interrupt and synthesise message_stop.
-      if (toolUseSnapshot.length > 0 && isAssistantMessage(msg)) {
+      // If the SDK does not also emit a result message for this turn (some
+      // builds skip it once the assistant message contains tool_use), the
+      // assistant snapshot we just captured IS the end of the turn. Emit
+      // the synthesised message_stop and interrupt now — the result branch
+      // above would have already returned if the SDK had sent one.
+      if (parsedAssistant !== undefined && parsedAssistant.length > 0) {
         const stopEvent: StreamEvent = { kind: "message_stop", finishReason: "tool_use" };
         try {
           await handler(stopEvent);
@@ -254,6 +259,22 @@ function parseMessage(msg: unknown, codec: ToolNameCodec, requestedModel: Model)
   return {};
 }
 
+function extractToolCalls(blocks: readonly unknown[], codec: ToolNameCodec): ToolCall[] {
+  const calls: ToolCall[] = [];
+  for (const block of blocks) {
+    if (block === null || typeof block !== "object") continue;
+    const b = block as Record<string, unknown>;
+    if (b.type !== "tool_use") continue;
+    const rawName = typeof b.name === "string" ? b.name : "";
+    calls.push({
+      id: typeof b.id === "string" ? b.id : "",
+      name: codec.decode(rawName),
+      arguments: (b.input as Readonly<Record<string, unknown>> | undefined) ?? {},
+    });
+  }
+  return calls;
+}
+
 function parseAssistant(
   m: Record<string, unknown>,
   codec: ToolNameCodec,
@@ -264,26 +285,18 @@ function parseAssistant(
   const blocks = wrapped.content;
   const out: ParsedMessage = {};
   let textBuf = "";
-  const calls: ToolCall[] = [];
   if (Array.isArray(blocks)) {
     for (const block of blocks) {
       if (block === null || typeof block !== "object") continue;
       const b = block as Record<string, unknown>;
       if (b.type === "text" && typeof b.text === "string") {
         textBuf += b.text;
-      } else if (b.type === "tool_use") {
-        const rawName = typeof b.name === "string" ? b.name : "";
-        const decoded = codec.decode(rawName);
-        calls.push({
-          id: typeof b.id === "string" ? b.id : "",
-          name: decoded,
-          arguments: (b.input as Readonly<Record<string, unknown>> | undefined) ?? {},
-        });
       }
     }
+    const calls = extractToolCalls(blocks, codec);
+    if (calls.length > 0) out.toolCalls = calls;
   }
   if (textBuf.length > 0) out.text = textBuf;
-  if (calls.length > 0) out.toolCalls = calls;
   const usageRaw = wrapped.usage as Record<string, unknown> | undefined;
   if (usageRaw !== undefined) {
     out.assistantUsage = {
@@ -307,25 +320,7 @@ function parseAssistantSnapshot(msg: unknown, codec: ToolNameCodec): ToolCall[] 
   const wrapped = m.message as Record<string, unknown> | undefined;
   const blocks = wrapped?.content;
   if (!Array.isArray(blocks)) return undefined;
-  const calls: ToolCall[] = [];
-  for (const block of blocks) {
-    if (block === null || typeof block !== "object") continue;
-    const b = block as Record<string, unknown>;
-    if (b.type !== "tool_use") continue;
-    const rawName = typeof b.name === "string" ? b.name : "";
-    calls.push({
-      id: typeof b.id === "string" ? b.id : "",
-      name: codec.decode(rawName),
-      arguments: (b.input as Readonly<Record<string, unknown>> | undefined) ?? {},
-    });
-  }
-  return calls;
-}
-
-function isAssistantMessage(msg: unknown): boolean {
-  return (
-    typeof msg === "object" && msg !== null && (msg as { type?: unknown }).type === "assistant"
-  );
+  return extractToolCalls(blocks, codec);
 }
 
 interface ParsedResult {

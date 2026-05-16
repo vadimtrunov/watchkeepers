@@ -101,9 +101,9 @@ describe("interceptComplete", () => {
     expect(turn.text).toBe("hi");
     expect(turn.toolCalls).toEqual([]);
     expect(turn.finishReason).toBe("stop");
-    expect(turn.usage?.inputTokens).toBe(1);
-    expect(turn.usage?.outputTokens).toBe(2);
-    expect(turn.usage?.costCents).toBe(1);
+    expect(turn.usage.inputTokens).toBe(1);
+    expect(turn.usage.outputTokens).toBe(2);
+    expect(turn.usage.costCents).toBe(1);
     expect(interrupted.value).toBe(false);
   });
 
@@ -167,7 +167,7 @@ describe("interceptComplete", () => {
     const turn = await interceptComplete(iter, codec, REQUESTED_MODEL);
     // Either the assistant.usage was lifted or the zero fallback applied.
     expect(turn.usage).toBeDefined();
-    expect(turn.usage?.model).toBe(REQUESTED_MODEL);
+    expect(turn.usage.model).toBe(REQUESTED_MODEL);
   });
 
   it("escalates the escape race when stub-handler sentinel surfaces", async () => {
@@ -291,6 +291,54 @@ describe("interceptStream", () => {
     const stop = events[events.length - 1];
     expect(stop?.kind).toBe("message_stop");
     expect(stop?.finishReason).toBe("tool_use");
+    expect(interrupted.value).toBe(true);
+  });
+
+  it("synthesises message_stop and interrupts when SDK omits the result message", async () => {
+    const codec = buildCodec([td("notebook.remember")]);
+    const events: StreamEvent[] = [];
+    const handler = (e: StreamEvent): void => {
+      events.push(e);
+    };
+    const { iter, interrupted } = fakeIter([
+      // SDK sends partial events then the full assistant snapshot with
+      // tool_use, then nothing — no result message follows.
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "tu_1",
+            name: `mcp__${MCP_SERVER_NAME}__notebook_remember`,
+          },
+        },
+      },
+      {
+        type: "stream_event",
+        event: { type: "content_block_stop", index: 0 },
+      },
+      assistantToolUse([
+        {
+          id: "tu_1",
+          name: `mcp__${MCP_SERVER_NAME}__notebook_remember`,
+          input: { k: 1 },
+        },
+      ]),
+      // Deliberately no result message after the assistant snapshot.
+    ]);
+    const abortBag = {
+      isStopped: false,
+      markStopped: vi.fn((cause: unknown) => {
+        abortBag.isStopped = true;
+        void cause;
+      }),
+    };
+    await interceptStream(iter, handler, codec, REQUESTED_MODEL, abortBag);
+    const lastEvent = events[events.length - 1];
+    expect(lastEvent?.kind).toBe("message_stop");
+    expect(lastEvent?.finishReason).toBe("tool_use");
     expect(interrupted.value).toBe(true);
   });
 });
