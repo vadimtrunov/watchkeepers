@@ -1,6 +1,6 @@
 # Watchkeeper Phase 1 — First Party Implementation Roadmap
 
-**Status**: Planning
+**Status**: Implementation complete (M1–M10 shipped); Definition of Done verification outstanding
 **Created**: 2026-04-21
 **Scope reference**: [watchkeeper-business-concept.md](./watchkeeper-business-concept.md) (Phase 1), [watchkeeper-spawn-flow.md](./watchkeeper-spawn-flow.md)
 **Next phase**: [ROADMAP-phase2.md](./ROADMAP-phase2.md)
@@ -20,19 +20,19 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 ## 1.1 Status Dashboard
 
-| #   | Milestone                         | Status | Magnitude | Notes                        |
-| --- | --------------------------------- | ------ | --------- | ---------------------------- |
-| M1  | Foundation                        | ✅     | 3–5d      |                              |
-| M2  | Keep service                      | ⬜     | 4–6d      |                              |
-| M2b | Notebook library                  | ⬜     | 3–5d      |                              |
-| M3  | Go core services                  | ⬜     | 5–8d      |                              |
-| M4  | Messenger adapter + Slack         | ⬜     | 5–7d      | requires dev Slack workspace |
-| M5  | Runtime adapter + Claude Code     | ⬜     | 7–10d     | requires Claude Code on host |
-| M6  | Watchmaster                       | ⬜     | 4–6d      |                              |
-| M7  | Spawn Flow end-to-end             | ⬜     | 4–6d      |                              |
-| M8  | Coordinator + Jira adapter        | ⬜     | 5–7d      | requires Jira test project   |
-| M9  | Tool Registry + self-modification | ⬜     | 14–20d    | requires platform tool repo  |
-| M10 | Observability, CLI, runbook       | 🟨     | 4–6d      |                              |
+| #   | Milestone                         | Status | Magnitude | Notes                                                            |
+| --- | --------------------------------- | ------ | --------- | ---------------------------------------------------------------- |
+| M1  | Foundation                        | ✅     | 3–5d      |                                                                  |
+| M2  | Keep service                      | ✅     | 4–6d      |                                                                  |
+| M2b | Notebook library                  | ✅     | 3–5d      | M2b.6 latency benchmark gated, deferred                          |
+| M3  | Go core services                  | ✅     | 5–8d      | M3 integration test (cron→handler correlated events) outstanding |
+| M4  | Messenger adapter + Slack         | ✅     | 5–7d      | `make spawn-dev-bot` + rate-limiter load test outstanding        |
+| M5  | Runtime adapter + Claude Code     | ✅     | 7–10d     | end-to-end harness verification scenarios outstanding            |
+| M6  | Watchmaster                       | ✅     | 4–6d      | Slack DM verification scenarios outstanding                      |
+| M7  | Spawn Flow end-to-end             | ✅     | 4–6d      |                                                                  |
+| M8  | Coordinator + Jira adapter        | ✅     | 5–7d      |                                                                  |
+| M9  | Tool Registry + self-modification | ✅     | 14–20d    | M9.3.b (signing) decomposed → Phase 2; demo scenarios outstanding |
+| M10 | Observability, CLI, runbook       | ✅     | 4–6d      | M10.2.b (exit-3 stubs) decomposed → Phase 2; smoke-in-CI + runbook dry-run outstanding |
 
 ---
 
