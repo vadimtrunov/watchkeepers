@@ -94,7 +94,7 @@ Parking lot for ideas raised during planning and development. Every idea capture
 - **Component**: **Notebook** — per-agent personal memory. **Embedded** (SQLite + `sqlite-vec`), co-located with the harness process. No network service, no API credential management per agent — file lives at `$WATCHKEEPER_DATA/notebook/<agent_id>.sqlite`. See IDEA-002 for the architectural split.
 - **Library surface** (linked into the harness process):
   - `notebook.remember(category, subject, content)` — write an entry.
-  - `notebook.recall(query, category?, k=5)` — semantic retrieval, local, sub-millisecond.
+  - `notebook.recall(query, category?, k=5)` — semantic retrieval, local, low-latency (original "sub-millisecond" aspiration revised to p99 < 100 ms on sqlite-vec brute-force `vec0` per ROADMAP-phase1 M2b bullet 216; sub-ms goal tracked under Phase 2 M7.5).
   - `notebook.forget(entry_id, reason)` — soft-delete; emits event to Keeper's Log via Keep client.
   - Access is physically scoped: another agent runs in a different process with a different file — cross-agent reads are filesystem-blocked.
 - **Schema**: entry keyed by `(agent_id, category, subject)` with content, embedding, `created_at`, `last_used_at`, `relevance_score`, `superseded_by`, `evidence_log_ref` (pointer into Keeper's Log), `tool_version` (see IDEA-001c). Categories: `lesson`, `preference`, `observation`, `pending_task`, `relationship_note`.
