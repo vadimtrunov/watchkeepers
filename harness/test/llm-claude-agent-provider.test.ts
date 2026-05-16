@@ -97,6 +97,10 @@ describe("ClaudeAgentProvider.complete — happy paths", () => {
   });
 
   it("extracts tool_use blocks into toolCalls with tool_use finish reason", async () => {
+    // The bridge decodes the SDK's mcp__watchkeeper__<encoded> name back to
+    // the runtime name using the codec built from req.tools. The fake SDK
+    // response uses the plain runtime name (as if it were encoded without an
+    // MCP prefix) — the codec maps notebook_recall → notebook.recall.
     const provider = new ClaudeAgentProvider({
       queryImpl: fakeQuery([
         {
@@ -107,7 +111,8 @@ describe("ClaudeAgentProvider.complete — happy paths", () => {
               {
                 type: "tool_use",
                 id: "tu_01",
-                name: "notebook.recall",
+                // Bridge codec maps mcp__watchkeeper__notebook_recall → notebook.recall
+                name: "mcp__watchkeeper__notebook_recall",
                 input: { query: "auth" },
               },
             ],
@@ -126,6 +131,7 @@ describe("ClaudeAgentProvider.complete — happy paths", () => {
     const resp = await provider.complete({
       model: model("claude-sonnet-4-6"),
       messages: [{ role: "user", content: "remember the auth incident" }],
+      tools: [{ name: "notebook.recall", description: "recall", inputSchema: { type: "object" } }],
     });
 
     expect(resp.content).toBe("let me check");
@@ -261,23 +267,31 @@ describe("ClaudeAgentProvider.complete — result-shape edges", () => {
     expect(resp.usage.costCents).toBe(0);
   });
 
-  it("raises provider_unavailable when the SDK emits no result message", async () => {
+  it("returns a zero-usage response when the SDK emits no result message", async () => {
+    // The interceptor (tool-bridge-interceptor.ts) synthesises a zero-usage
+    // turn from the assistant message instead of throwing; this is a
+    // deliberate behaviour change from the pre-bridge inline loop which
+    // raised provider_unavailable. The bridge is more resilient: a truncated
+    // SDK response still yields valid content rather than crashing the caller.
     const provider = new ClaudeAgentProvider({
       queryImpl: fakeQuery([
         {
           type: "assistant",
-          message: { content: [{ type: "text", text: "partial" }] },
+          message: {
+            content: [{ type: "text", text: "partial" }],
+            usage: { input_tokens: 0, output_tokens: 0 },
+          },
         },
       ]),
     });
-    await expect(
-      provider.complete({
-        model: model("claude-sonnet-4-6"),
-        messages: [{ role: "user", content: "x" }],
-      }),
-    ).rejects.toMatchObject({
-      code: "provider_unavailable",
+    const resp = await provider.complete({
+      model: model("claude-sonnet-4-6"),
+      messages: [{ role: "user", content: "x" }],
     });
+    expect(resp.content).toBe("partial");
+    expect(resp.usage.inputTokens).toBe(0);
+    expect(resp.usage.outputTokens).toBe(0);
+    expect(resp.finishReason).toBe("stop");
   });
 
   it("maps stop_reason=max_tokens to finishReason=max_tokens", async () => {
@@ -612,5 +626,96 @@ describe("ClaudeAgentProvider — pending slices", () => {
         messages: [{ role: "user", content: "x" }],
       }),
     ).rejects.toMatchObject({ code: "provider_unavailable" });
+  });
+});
+
+/* -----------------------------------------------------------------------
+ * (7) ClaudeAgentProvider.complete with tools (M5.7.c slice 4)
+ * --------------------------------------------------------------------- */
+
+describe("ClaudeAgentProvider.complete with tools (M5.7.c slice 4)", () => {
+  it("registers a watchkeeper MCP server in options.mcpServers", async () => {
+    let observedOptions: unknown;
+    const fake = ((opts: { prompt: string; options?: Record<string, unknown> }) => {
+      observedOptions = opts.options;
+      // eslint-disable-next-line @typescript-eslint/require-await -- generator yields a fixed sequence; no awaitable I/O inside.
+      return (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          usage: { input_tokens: 0, output_tokens: 0 },
+          total_cost_usd: 0,
+          stop_reason: "end_turn",
+        };
+      })();
+    }) as unknown as QueryImpl;
+    const provider = new ClaudeAgentProvider({ queryImpl: fake });
+    await provider.complete({
+      model: model("claude-3-5-sonnet-latest"),
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "notebook.remember", description: "save", inputSchema: { type: "object" } }],
+    });
+    const opts = observedOptions as { mcpServers?: Record<string, unknown> } | undefined;
+    const mcpServers = opts?.mcpServers;
+    expect(mcpServers).toBeDefined();
+    if (mcpServers !== undefined) {
+      expect(Object.keys(mcpServers)).toContain("watchkeeper");
+    }
+  });
+
+  it("returns toolCalls with runtime names (decoded from mcp prefix)", async () => {
+    const fake = (() =>
+      // eslint-disable-next-line @typescript-eslint/require-await -- generator yields a fixed sequence; no awaitable I/O inside.
+      (async function* () {
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              { type: "text", text: "I'll save that." },
+              {
+                type: "tool_use",
+                id: "tu_1",
+                name: "mcp__watchkeeper__notebook_remember",
+                input: { key: "k", value: "v" },
+              },
+            ],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          },
+        };
+      })()) as unknown as QueryImpl;
+    const provider = new ClaudeAgentProvider({ queryImpl: fake });
+    const resp = await provider.complete({
+      model: model("claude-3-5-sonnet-latest"),
+      messages: [{ role: "user", content: "save k=v" }],
+      tools: [{ name: "notebook.remember", description: "save", inputSchema: { type: "object" } }],
+    });
+    expect(resp.finishReason).toBe("tool_use");
+    expect(resp.toolCalls).toEqual([
+      { id: "tu_1", name: "notebook.remember", arguments: { key: "k", value: "v" } },
+    ]);
+  });
+
+  it("omits mcpServers entirely when tools is undefined", async () => {
+    let observedOptions: unknown;
+    const fake = ((opts: { prompt: string; options?: Record<string, unknown> }) => {
+      observedOptions = opts.options;
+      // eslint-disable-next-line @typescript-eslint/require-await -- generator yields a fixed sequence; no awaitable I/O inside.
+      return (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          usage: { input_tokens: 0, output_tokens: 0 },
+          total_cost_usd: 0,
+          stop_reason: "end_turn",
+        };
+      })();
+    }) as unknown as QueryImpl;
+    const provider = new ClaudeAgentProvider({ queryImpl: fake });
+    await provider.complete({
+      model: model("claude-3-5-sonnet-latest"),
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const opts = observedOptions as { mcpServers?: Record<string, unknown> } | undefined;
+    expect(opts?.mcpServers).toBeUndefined();
   });
 });

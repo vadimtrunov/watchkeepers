@@ -31,6 +31,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 
 import { LLMError } from "./errors.js";
 import type { LLMProvider } from "./provider.js";
+import { interceptComplete } from "./tool-bridge-interceptor.js";
+import { buildStubMcpServer } from "./tool-bridge-mcp-stub-server.js";
+import { MCP_SERVER_NAME, buildCodec, type ToolNameCodec } from "./tool-bridge-name-codec.js";
 import type {
   CompleteRequest,
   CompleteResponse,
@@ -42,7 +45,6 @@ import type {
   StreamHandler,
   StreamRequest,
   StreamSubscription,
-  ToolCall,
   ToolDefinition,
   Usage,
 } from "./types.js";
@@ -111,46 +113,42 @@ export class ClaudeAgentProvider implements LLMProvider {
     validateTools(req.tools);
 
     const prompt = buildPromptFromMessages(req.messages);
-    const options = this.buildOptions(req);
+    const codec: ToolNameCodec = buildCodec(req.tools ?? []);
+    const options = this.buildOptions(
+      req,
+      req.tools !== undefined ? { codec, tools: req.tools } : { codec },
+    );
 
-    let textBuf = "";
-    const toolCalls: ToolCall[] = [];
-    let usage: Usage | undefined;
-    let finishReason: FinishReason = "stop";
-    let errorMessage: string | undefined;
-
+    let iter: ReturnType<typeof query>;
     try {
-      // Pass options only when defined so exactOptionalPropertyTypes
-      // does not reject `options: undefined`.
-      const iter =
+      iter =
         options === undefined ? this.queryImpl({ prompt }) : this.queryImpl({ prompt, options });
-      for await (const msg of iter) {
-        const consumed = consumeMessage(msg, req.model);
-        if (consumed.textDelta !== undefined) textBuf += consumed.textDelta;
-        if (consumed.toolCall !== undefined) toolCalls.push(consumed.toolCall);
-        if (consumed.usage !== undefined) usage = consumed.usage;
-        if (consumed.finishReason !== undefined) finishReason = consumed.finishReason;
-        if (consumed.errorMessage !== undefined) errorMessage = consumed.errorMessage;
-      }
     } catch (e) {
       throw mapAgentError(e);
     }
 
-    if (usage === undefined) {
-      // SDK never emitted a SDKResultMessage — treat as transport failure.
-      throw LLMError.providerUnavailable("agent SDK returned no result message");
+    let turn;
+    try {
+      turn = await interceptComplete(iter, codec, req.model);
+    } catch (e) {
+      throw mapAgentError(e);
     }
 
-    const response: CompleteResponse = {
-      content: textBuf,
-      toolCalls,
-      finishReason,
-      usage,
-    };
-    if (errorMessage !== undefined) {
-      return { ...response, errorMessage };
+    if (turn.errorMessage !== undefined) {
+      return {
+        content: turn.text,
+        toolCalls: turn.toolCalls,
+        finishReason: turn.finishReason,
+        usage: turn.usage,
+        errorMessage: turn.errorMessage,
+      };
     }
-    return response;
+    return {
+      content: turn.text,
+      toolCalls: turn.toolCalls,
+      finishReason: turn.finishReason,
+      usage: turn.usage,
+    };
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await -- Promise return is the interface contract; body validates synchronously and starts the dispatch loop as a fire-and-forget promise.
@@ -228,12 +226,15 @@ export class ClaudeAgentProvider implements LLMProvider {
 
   private buildOptions(
     req: CompleteRequest | StreamRequest,
-    extras?: { readonly partial?: boolean },
+    extras?: {
+      readonly partial?: boolean;
+      readonly codec?: ToolNameCodec;
+      readonly tools?: readonly ToolDefinition[];
+    },
   ): Parameters<typeof query>[0]["options"] {
     // The Agent SDK Options type carries dozens of fields; we set only
     // the handful that matter for a single-turn complete() / stream()
-    // and let the SDK default the rest. Tools/permission integration
-    // lands in M5.7.c slice 4 (canUseTool bridge).
+    // and let the SDK default the rest.
     const opts: Record<string, unknown> = { model: req.model };
     if (req.system !== undefined && req.system !== "") {
       opts.systemPrompt = req.system;
@@ -254,6 +255,10 @@ export class ClaudeAgentProvider implements LLMProvider {
       // passes it here; we forward it via the SDK's env override so the
       // SDK's own auth path picks it up.
       opts.env = { ...process.env, ...this.apiKeyEnvOverride() };
+    }
+    if (extras?.codec !== undefined && extras.tools !== undefined && extras.tools.length > 0) {
+      const stub = buildStubMcpServer(extras.tools, extras.codec);
+      opts.mcpServers = { [MCP_SERVER_NAME]: stub.sdkConfig };
     }
     return opts;
   }
@@ -317,51 +322,14 @@ function buildPromptFromMessages(messages: readonly Message[]): string {
 }
 
 /**
- * Result of consuming a single SDK message — what the iteration loop
- * should accumulate. Keeps the loop body in `complete()` flat.
+ * Result of consuming a single SDK result message — used by the stream
+ * path (`translateStreamMessage`). The complete() path now uses
+ * `interceptComplete` from tool-bridge-interceptor.ts instead.
  */
 interface ConsumedMessage {
-  readonly textDelta?: string;
-  readonly toolCall?: ToolCall;
   readonly usage?: Usage;
   readonly finishReason?: FinishReason;
   readonly errorMessage?: string;
-}
-
-function consumeMessage(msg: unknown, requestedModel: Model): ConsumedMessage {
-  if (msg === null || typeof msg !== "object") return {};
-  const m = msg as Record<string, unknown>;
-  const type = m.type;
-  if (type === "assistant") return consumeAssistantMessage(m);
-  if (type === "result") return consumeResultMessage(m, requestedModel);
-  return {};
-}
-
-function consumeAssistantMessage(m: Record<string, unknown>): ConsumedMessage {
-  const wrapped = m.message as Record<string, unknown> | undefined;
-  if (wrapped === undefined) return {};
-  const content = wrapped.content;
-  if (!Array.isArray(content)) return {};
-  const out: { textDelta?: string; toolCall?: ToolCall; errorMessage?: string } = {};
-  for (const block of content as unknown[]) {
-    if (block === null || typeof block !== "object") continue;
-    const b = block as Record<string, unknown>;
-    const t = b.type;
-    if (t === "text" && typeof b.text === "string") {
-      out.textDelta = (out.textDelta ?? "") + b.text;
-    } else if (t === "tool_use") {
-      out.toolCall = {
-        id: typeof b.id === "string" ? b.id : "",
-        name: typeof b.name === "string" ? b.name : "",
-        arguments: (b.input as Readonly<Record<string, unknown>> | undefined) ?? {},
-      };
-    }
-  }
-  const errField = m.error;
-  if (typeof errField === "string" && errField !== "") {
-    out.errorMessage = errField;
-  }
-  return out;
 }
 
 function consumeResultMessage(m: Record<string, unknown>, requestedModel: Model): ConsumedMessage {
