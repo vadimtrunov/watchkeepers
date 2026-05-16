@@ -155,6 +155,15 @@ func messengerManifestPreview(m messenger.AppManifest) map[string]any {
 		out["oauth_config"] = map[string]any{
 			"scopes": map[string]any{"bot": m.Scopes},
 		}
+		// Mirror the features.bot_user the adapter emits alongside bot
+		// scopes — Slack rejects bot scopes without it, so a dry-run
+		// preview that hides it lies about the real request.
+		out["features"] = map[string]any{
+			"bot_user": map[string]any{
+				"display_name":  m.Name,
+				"always_online": false,
+			},
+		}
 	}
 	if len(m.Metadata) > 0 {
 		preview := make(map[string]string, len(m.Metadata))
