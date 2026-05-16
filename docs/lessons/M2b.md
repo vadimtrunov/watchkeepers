@@ -12,6 +12,35 @@ See `docs/LESSONS.md` for the index across all milestones.
 
 ---
 
+## 2026-05-16 — M2b verification bullet 216: gated 10k recall-latency benchmark with revised budget
+
+**PR**: pending — to be opened in Phase 8 of `ship-roadmap-item`
+**Merged**: pending — to be merged in Phase 8 of `ship-roadmap-item`
+
+### Context
+
+Closed the unverified M2b verification line "Recall latency stays sub-millisecond at 10k entries (benchmark gated)" — bullet 216 in `docs/ROADMAP-phase1.md` §M2b — and DoD-closure-plan item B1 from §10. The benchmark scaffolding (`core/pkg/notebook/recall_bench_test.go`) had already been committed in `9c872ef` behind a `//go:build benchmark` tag with a hard 1 ms p99 assertion test, but the make target it referenced (`make notebook-bench`) did not exist and the bench had never been run. First execution showed p50 ≈ 30 ms, p99 ≈ 37 ms on dev hardware — ~37× over the bullet's original ceiling. Investigation confirmed sqlite-vec currently ships only brute-force KNN via the `vec0` virtual table (HNSW on their roadmap, not released), so 1536-dim float32 dense vectors × 10k rows is architecturally bounded around 25–40 ms p50 on commodity CPUs. Operator decision: revise the bullet's budget to p99 < 100 ms (measured dev p99 ≈ 37 ms plus generous CI-runner headroom — the bench flaked near a tighter 50 ms ceiling) and file Phase 2 M7.5 to drive it back toward sub-millisecond via quantization / tiered retrieval / ANN backend swap.
+
+### Pattern
+
+**Benchmark scaffolding without execution is not "shipped"**: The original commit `9c872ef` added a complete bench + a p99-budget assertion test, but the file referenced a `make notebook-bench` target that did not exist and the bench was never run. Result: a budget assertion frozen at an aspirational value with no signal that it was unreachable. Pattern: a gated benchmark is only "done" when (a) the make target exists, (b) the bench has been executed end-to-end, and (c) the measured numbers appear in the commit message or lesson entry. Without those three, the benchmark is scaffolding, not verification.
+
+**Aspirational latency budgets need backend-grounding before they ship to ROADMAP**: The "sub-millisecond at 10k entries" target was set without empirical measurement and without checking sqlite-vec's index capability (brute-force-only at `vec0`, no HNSW). The backend determines the achievable budget more than the code does. Pattern: a latency criterion in a ROADMAP must name the backend assumption — "p99 < 100 ms on sqlite-vec brute-force KNN at 1536-dim corpus" — so a future reader can tell whether tightening requires code work or a backend swap.
+
+**Test name should encode intent, not the current threshold**: Renamed `TestRecallLatencyP99Under1ms` → `TestRecallLatencyP99WithinBudget`. The function asserts against a `recallP99Budget` constant; if the budget tightens (Phase 2 M7.5), the test name does not need to follow. Pattern: when the assertion uses a named constant, the test name should reference the constant's purpose, not its current value — generic survives change, specific decays.
+
+**Gated bench files document the run path in their header doc-block**: The file's `//go:build benchmark` build tag means accidental `go test ./...` runs do not seed 10k rows or burn 40 s. A future engineer who opens the file must be able to run it without grepping for the build tag. The header doc-block includes both `make notebook-bench` and the raw `go test -tags=benchmark -bench=... -run=... ./...` command, so the file is self-documenting. Pattern: any test gated behind a build tag must include its run command in the top-of-file doc-block.
+
+**Benchmark query vectors should be drawn independently from the shared seeded RNG, not copied from the corpus**: The bench seeds 10k entries from a PCG-seeded RNG stream, then draws the query embedding from the same stream as a separate fresh sample — sharing the stream gives reproducibility across runs and machines, and the independence (rather than reusing an entry vector verbatim) prevents the brute-force `vec0` scan from short-circuiting on a distance-0 top hit. Pattern: when designing a synthetic latency benchmark for a KNN backend, the query must come from the same distribution as the corpus (so the inner loop does real ranking work) but must NOT be one of the corpus rows (else the index short-circuits and you measure the wrong workload).
+
+### References
+
+- Files: `core/pkg/notebook/recall_bench_test.go` (budget + test rename + doc-block update), `Makefile` (new `notebook-bench` target).
+- Docs: `docs/ROADMAP-phase1.md` §M2b verification bullet 216 → `[x]` with revised budget; §1.1 Status Dashboard M2b Notes column updated; §10 DoD Closure Plan B1 → `[x]`. `docs/ROADMAP-phase2.md` §M7 — added M7.5 (recall-latency optimization toward sub-ms) and matching verification bullet.
+- Measured numbers (Apple M-series, VirtualApple @ 2.50 GHz, amd64, 1000 samples, TopK=10, EmbeddingDim=1536, corpus=10 000 entries): p50 = 30.45 ms, p99 = 36.52 ms, max = 100.10 ms; BenchmarkRecallAt10k ≈ 30.47 ms/op, 21 160 B/op, 227 allocs/op.
+
+---
+
 ## 2026-05-03 — M2b.1: Notebook SQLite + sqlite-vec storage substrate
 
 **PR**: [#19](https://github.com/vadimtrunov/watchkeepers/pull/19)
@@ -279,7 +308,7 @@ Implemented `keep.PromoteToKeep(ctx, db, proposal)` as a read-only helper that e
 
 ### Pattern
 
-**Partial coverage is normal in milestone audits — toggle what has evidence, leave gaps `[ ]` with rationale, recommend a dedicated PR for each gap**: when auditing milestone-level acceptance bullets, not every bullet will have matching test evidence. The right move is to toggle the covered ones and leave the rest `[ ]` with a documented rationale and a recommended-next-step. Do not bundle gap-filling work into the audit PR — it inflates scope and dilutes the audit's evidentiary purpose. Bullet 216 (sub-ms recall latency at 10k entries, benchmark gated) required a dedicated benchmark PR (~150 lines: seed + p99 latency assertion + build-tag gating + Makefile target) and was correctly left `[ ]`. Reviewers verify both: that toggled bullets have evidence AND that untoggled bullets have a recommended-next-step. Audit PRs are about discipline, not maximum-toggle-count.
+**Partial coverage is normal in milestone audits — toggle what has evidence, leave gaps `[ ]` with rationale, recommend a dedicated PR for each gap**: when auditing milestone-level acceptance bullets, not every bullet will have matching test evidence. The right move is to toggle the covered ones and leave the rest `[ ]` with a documented rationale and a recommended-next-step. Do not bundle gap-filling work into the audit PR — it inflates scope and dilutes the audit's evidentiary purpose. Bullet 216 (sub-ms recall latency at 10k entries, benchmark gated) required a dedicated benchmark PR (~150 lines: seed + p99 latency assertion + build-tag gating + Makefile target) and was correctly left `[ ]`. _Update 2026-05-16_: the dedicated bench PR landed; bullet now reads "p99 < 100 ms" — the sub-ms aspiration was empirically unreachable on sqlite-vec brute-force `vec0` at 1536-dim, and the sub-ms goal moved to Phase 2 M7.5. See the top-of-file 2026-05-16 entry for full context. Reviewers verify both: that toggled bullets have evidence AND that untoggled bullets have a recommended-next-step. Audit PRs are about discipline, not maximum-toggle-count.
 
 ### References
 

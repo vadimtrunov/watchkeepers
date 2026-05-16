@@ -313,8 +313,9 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
   - `humor_level ∈ {none, dry, playful}`
   - `response_length_target ∈ {concise, moderate, thorough}`
     Renderer composes these with the free-text `personality` into the effective system prompt via a templater. Presets ship as part of M6 template catalog.
+- [ ] **M7.5** **Recall latency optimization toward sub-ms p99 at 10k entries**: the Phase 1 M2b verification-bullet-216 benchmark currently asserts p99 < 100 ms because sqlite-vec ships only brute-force KNN through `vec0` at the 1536-dim corpus. Explore one or more paths to drive p99 toward the original sub-millisecond target: (a) int8 / binary quantization via `vec_quantize_*` with a reranking pass, (b) tiered retrieval — keep an "active recent" hot subset in memory and fall back to full corpus only when the hot set misses, (c) swap to a backend with true ANN (HNSW in sqlite-vec when released, or external Qdrant/Milvus behind the existing `Recall` API). Whichever path is chosen, tighten the bench budget in `core/pkg/notebook/recall_bench_test.go` and update the bullet text in ROADMAP-phase1.md §M2b verification line that points at this item.
 
-**Artifacts**: Notebook library extensions, consolidation cron job, templater update, preset catalog.
+**Artifacts**: Notebook library extensions, consolidation cron job, templater update, preset catalog, recall-latency optimization path (one of: quantization, tiered retrieval, ANN backend swap).
 
 **Verification**
 
@@ -323,6 +324,7 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 - [ ] Sampling: simulate 100 successful tool calls with rate 1-in-50; ~2 reflections written; classified as `observation` with lower auto-injection weight.
 - [ ] Consolidation: seed 20 semantically-similar lessons; run consolidation; 1 summary entry remains active, 20 marked superseded.
 - [ ] Presets: spawn with `tone_preset=terse_pragmatic`; agent's replies measurably shorter than the same scenario with `tone_preset=warm_collaborative`.
+- [ ] Recall latency: `make notebook-bench` reports p99 below the tightened budget on a 10k-entry 1536-dim corpus; the chosen approach (quantization, tiering, ANN backend) is documented in `docs/lessons/M2b.md` with measured numbers.
 
 **Dependencies**: Phase 1 M2b, Phase 1 M5.
 **Magnitude**: 5–7 days.

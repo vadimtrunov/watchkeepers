@@ -114,6 +114,19 @@ go-test: ## Run Go tests with race detector and coverage
 	printf ">> Go coverage: %s%% (minimum %s%%)\n" "$$coverage" "$(GO_COVERAGE_MIN)"; \
 	awk -v c="$$coverage" -v m="$(GO_COVERAGE_MIN)" 'BEGIN { if (c+0 < m+0) { print "coverage below threshold"; exit 1 } }'
 
+# Gated behind the `benchmark` build tag (see core/pkg/notebook/recall_bench_test.go)
+# so the default test path NEVER seeds 10k rows. Runs both the latency-budget
+# assertion (TestRecallLatencyP99WithinBudget) and the raw ns/op bench
+# (BenchmarkRecallAt10k). Implements ROADMAP-phase1.md §M2b bullet 216.
+#
+# `-race` is intentionally omitted from this target: the race detector adds
+# ~5× wall-clock overhead and would invalidate the latency measurement that
+# is the entire point of the benchmark. Race coverage for the same Recall
+# code path lives in the default `go-test` target (unit tests, `-race`).
+.PHONY: notebook-bench
+notebook-bench: ## Run the gated 10k-entry Notebook recall latency benchmark (M2b bullet 216)
+	@$(GO) test -tags=benchmark -bench=BenchmarkRecallAt10k -run=TestRecallLatencyP99WithinBudget -benchmem ./core/pkg/notebook/...
+
 .PHONY: go-build
 go-build: ## Build all Go binaries into ./bin
 	@mkdir -p bin
