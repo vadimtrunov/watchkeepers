@@ -25,7 +25,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 | M1  | Foundation                        | ✅     | 3–5d      |                                                                  |
 | M2  | Keep service                      | ✅     | 4–6d      |                                                                  |
 | M2b | Notebook library                  | ✅     | 3–5d      | recall-latency bench shipped (p99 < 100 ms gated); sub-ms goal → Phase 2 M7.5 |
-| M3  | Go core services                  | ✅     | 5–8d      | M3 integration test (cron→handler correlated events) outstanding |
+| M3  | Go core services                  | ✅     | 5–8d      |                                                                  |
 | M4  | Messenger adapter + Slack         | ✅     | 5–7d      | `make spawn-dev-bot` + rate-limiter load test outstanding        |
 | M5  | Runtime adapter + Claude Code     | ✅     | 7–10d     | end-to-end harness verification scenarios outstanding            |
 | M6  | Watchmaster                       | ✅     | 4–6d      | Slack DM verification scenarios outstanding                      |
@@ -253,7 +253,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 
 **Verification**
 
-- [ ] Integration test: spawn a mock Watchkeeper, fire a cron event, Watchkeeper receives it, Keeper's Log contains both the cron-fired and the handler-ran events with matching correlation IDs.
+- [x] Integration test: spawn a mock Watchkeeper, fire a cron event, Watchkeeper receives it, Keeper's Log contains both the cron-fired and the handler-ran events with matching correlation IDs. See `core/internal/m3chain/chain_integration_test.go` — three scenarios cover the happy path, distinct-correlation-id-per-fire, and post-Spawn lifecycle state.
 - [x] Capability token expires exactly at TTL; use after expiry rejected.
 - [x] Outbox consumer is at-least-once and idempotent under forced redeliveries.
 
@@ -671,7 +671,7 @@ Parallelizable. Without these, no live verification of §7 #1–#6 is possible.
 CI-runnable tests against mocks. Independent of Phase A; can start immediately.
 
 - [x] **B1** M2b verification bullet 216 — recall p99 < 100 ms at 10k entries via `make notebook-bench` (gated by `//go:build benchmark`). Sub-millisecond target empirically unreachable on sqlite-vec brute-force `vec0` at 1536-dim; 100 ms budget is the dev-measured p99 (~37 ms) plus CI-runner headroom. Sub-ms goal moved to Phase 2 M7.5.
-- [ ] **B2** M3 integration test — spawn mock Watchkeeper, fire cron event, assert correlated `cron_fired` + `handler_ran` in Keeper's Log with matching correlation IDs.
+- [x] **B2** M3 integration test — spawn mock Watchkeeper, fire cron event, assert correlated `cron_fired` + `handler_ran` in Keeper's Log with matching correlation IDs. Landed in `core/internal/m3chain/chain_integration_test.go` (3 scenarios).
 - [ ] **B3** M4 rate-limiter load test — tier-2 burst + sustained limits honored under simulated load.
 - [ ] **B4** M5 sandbox scenarios — runaway tool killed by wall-clock limit; undeclared network access rejected by capability broker; `FakeProvider` runs full harness suite without touching provider package.
 - [ ] **B5** M5 Notebook scenarios — auto-injection (seeded lesson visible in prompt window) and auto-reflection (forced tool error → `lesson` with 24h `active_after` + `lesson_learned` in Keeper's Log).
