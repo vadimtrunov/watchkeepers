@@ -21,7 +21,7 @@ import type { query } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
 
 import { ClaudeAgentProvider } from "../src/llm/claude-agent-provider.js";
-import type { LLMError } from "../src/llm/index.js";
+import type { LLMError, StreamEvent } from "../src/llm/index.js";
 import { model, type Usage } from "../src/llm/index.js";
 
 // The provider's queryImpl seam expects a `typeof query`; the fake
@@ -396,23 +396,214 @@ describe("ClaudeAgentProvider.complete — SDK error mapping", () => {
 });
 
 /* -----------------------------------------------------------------------
- * (5) Unimplemented surfaces — pinned until M5.7.c.b/c land
+ * (5) Stream — happy paths + validation + cancellation
  * --------------------------------------------------------------------- */
 
-describe("ClaudeAgentProvider — pending slices", () => {
-  it("stream() throws provider_unavailable (M5.7.c.b slot)", async () => {
-    const provider = new ClaudeAgentProvider();
+/**
+ * Drain a subscription to completion by collecting every dispatched
+ * event into `collected`. Mirrors the receiver loop a real caller would
+ * write — handler pushes events into the array, then we wait for the
+ * `message_stop` event before returning.
+ */
+async function drainStream(msgs: readonly unknown[]): Promise<readonly StreamEvent[]> {
+  const collected: StreamEvent[] = [];
+  let stopped = false;
+  const handler = (ev: StreamEvent): void => {
+    collected.push(ev);
+    if (ev.kind === "message_stop") stopped = true;
+  };
+  const provider = new ClaudeAgentProvider({ queryImpl: fakeQuery(msgs) });
+  await provider.stream(
+    {
+      model: model("claude-sonnet-4-6"),
+      messages: [{ role: "user", content: "x" }],
+    },
+    handler,
+  );
+  // Yield to the dispatch loop until it emits message_stop. The
+  // `stopped` flag is closure-mutated by the handler above; ESLint's
+  // type narrowing does not track the mutation so we silence its
+  // "always truthy" complaint with an explicit disable.
+  for (let i = 0; i < 50; i++) {
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- handler closure mutates `stopped` after each setImmediate yield.
+    if (stopped) break;
+    await new Promise((r) => setImmediate(r));
+  }
+  return collected;
+}
+
+describe("ClaudeAgentProvider.stream — happy paths", () => {
+  it("translates SDKPartialAssistantMessage text_delta events into text_delta StreamEvents", async () => {
+    const events = await drainStream([
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: { type: "text_delta", text: "hel" },
+        },
+      },
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: { type: "text_delta", text: "lo" },
+        },
+      },
+      {
+        type: "result",
+        subtype: "success",
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 2 },
+        total_cost_usd: 0,
+      },
+    ]);
+    const text = events
+      .filter((e) => e.kind === "text_delta")
+      .map((e) => e.textDelta ?? "")
+      .join("");
+    expect(text).toBe("hello");
+    const stop = events.find((e) => e.kind === "message_stop");
+    expect(stop?.finishReason).toBe("stop");
+    expect(stop?.usage?.outputTokens).toBe(2);
+  });
+
+  it("translates content_block_start tool_use into tool_call_start", async () => {
+    const events = await drainStream([
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_start",
+          content_block: { type: "tool_use", id: "tu_42", name: "notebook.recall" },
+        },
+      },
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: { type: "input_json_delta", partial_json: '{"q":"a' },
+        },
+      },
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: { type: "input_json_delta", partial_json: 'uth"}' },
+        },
+      },
+      {
+        type: "stream_event",
+        event: { type: "content_block_stop" },
+      },
+      {
+        type: "result",
+        subtype: "success",
+        stop_reason: "tool_use",
+        usage: { input_tokens: 1, output_tokens: 1 },
+        total_cost_usd: 0,
+      },
+    ]);
+    const start = events.find((e) => e.kind === "tool_call_start");
+    expect(start?.toolCall?.id).toBe("tu_42");
+    expect(start?.toolCall?.name).toBe("notebook.recall");
+    const deltas = events.filter((e) => e.kind === "tool_call_delta");
+    expect(deltas.length).toBe(2);
+    expect(deltas[0]?.textDelta).toBe('{"q":"a');
+    expect(deltas[0]?.toolCall?.id).toBe("tu_42");
+    expect(deltas[1]?.textDelta).toBe('uth"}');
+    const stop = events.find((e) => e.kind === "message_stop");
+    expect(stop?.finishReason).toBe("tool_use");
+  });
+
+  it("drops unrelated SDK message types (system / status / api_retry) without surfacing events", async () => {
+    const events = await drainStream([
+      { type: "system", subtype: "ready" },
+      { type: "status", message: "warming up" },
+      { type: "api_retry", retry_attempt: 1 },
+      {
+        type: "stream_event",
+        event: { type: "content_block_delta", delta: { type: "text_delta", text: "hi" } },
+      },
+      {
+        type: "result",
+        subtype: "success",
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+        total_cost_usd: 0,
+      },
+    ]);
+    const kinds = events.map((e) => e.kind);
+    // Only the text_delta + message_stop should surface.
+    expect(kinds).toEqual(["text_delta", "message_stop"]);
+  });
+});
+
+describe("ClaudeAgentProvider.stream — validation", () => {
+  it("rejects null handler with invalid_handler", async () => {
+    const provider = new ClaudeAgentProvider({ queryImpl: fakeQuery([]) });
     await expect(
       provider.stream(
         {
           model: model("claude-sonnet-4-6"),
           messages: [{ role: "user", content: "x" }],
         },
-        () => undefined,
+        null as unknown as (ev: StreamEvent) => void,
       ),
-    ).rejects.toMatchObject({ code: "provider_unavailable" });
+    ).rejects.toMatchObject({ code: "invalid_handler" });
   });
 
+  it("rejects empty model with model_not_supported", async () => {
+    const provider = new ClaudeAgentProvider({ queryImpl: fakeQuery([]) });
+    await expect(
+      provider.stream(
+        { model: model(""), messages: [{ role: "user", content: "x" }] },
+        () => undefined,
+      ),
+    ).rejects.toMatchObject({ code: "model_not_supported" });
+  });
+
+  it("rejects empty messages with invalid_prompt", async () => {
+    const provider = new ClaudeAgentProvider({ queryImpl: fakeQuery([]) });
+    await expect(
+      provider.stream({ model: model("claude-sonnet-4-6"), messages: [] }, () => undefined),
+    ).rejects.toMatchObject({ code: "invalid_prompt" });
+  });
+});
+
+describe("ClaudeAgentProvider.stream — cancellation", () => {
+  it("stop() interrupts the underlying Query and is idempotent", async () => {
+    let interruptCalls = 0;
+    // eslint-disable-next-line @typescript-eslint/require-await -- generator yields a fixed sequence; no awaitable I/O.
+    const gen = (async function* () {
+      yield {
+        type: "stream_event",
+        event: { type: "content_block_delta", delta: { type: "text_delta", text: "partial" } },
+      };
+      // never yields a result — caller must stop() to unblock
+    })();
+    const queryLike = Object.assign(gen, {
+      // eslint-disable-next-line @typescript-eslint/require-await -- mirror the SDK Query.interrupt signature (Promise return) while keeping the body synchronous for the counter assertion.
+      interrupt: async (): Promise<void> => {
+        interruptCalls++;
+      },
+    });
+    const provider = new ClaudeAgentProvider({
+      queryImpl: (() => queryLike) as unknown as QueryImpl,
+    });
+    const sub = await provider.stream(
+      { model: model("claude-sonnet-4-6"), messages: [{ role: "user", content: "x" }] },
+      () => undefined,
+    );
+    await sub.stop();
+    await sub.stop(); // idempotent
+    expect(interruptCalls).toBe(1);
+  });
+});
+
+/* -----------------------------------------------------------------------
+ * (6) Unimplemented surfaces — pinned until M5.7.c.c lands
+ * --------------------------------------------------------------------- */
+
+describe("ClaudeAgentProvider — pending slices", () => {
   it("countTokens() throws provider_unavailable (M5.7.c.c slot)", async () => {
     const provider = new ClaudeAgentProvider();
     await expect(

@@ -38,6 +38,7 @@ import type {
   FinishReason,
   Message,
   Model,
+  StreamEvent,
   StreamHandler,
   StreamRequest,
   StreamSubscription,
@@ -152,11 +153,39 @@ export class ClaudeAgentProvider implements LLMProvider {
     return response;
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await, @typescript-eslint/no-unused-vars -- M5.7.c.b slice; stub matches the LLMProvider contract.
-  public async stream(_req: StreamRequest, _handler: StreamHandler): Promise<StreamSubscription> {
-    throw LLMError.providerUnavailable(
-      "ClaudeAgentProvider.stream is not yet implemented (M5.7.c.b)",
-    );
+  // eslint-disable-next-line @typescript-eslint/require-await -- Promise return is the interface contract; body validates synchronously and starts the dispatch loop as a fire-and-forget promise.
+  public async stream(req: StreamRequest, handler: StreamHandler): Promise<StreamSubscription> {
+    validateModel(req.model);
+    validateMessages(req.messages);
+    // Handler check precedes tool check to mirror the FakeProvider /
+    // ClaudeCodeProvider ordering: a nil handler is the most fundamental
+    // shape error.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- TS forbids null at the type level, but runtime callers crossing JSON-RPC / FFI boundaries can still pass null.
+    if (handler === null || handler === undefined) {
+      throw LLMError.invalidHandler();
+    }
+    validateTools(req.tools);
+
+    const prompt = buildPromptFromMessages(req.messages);
+    // includePartialMessages: true asks the Agent SDK to emit raw
+    // streaming-event sub-messages (text_delta, input_json_delta, ...)
+    // as the assistant turn unfolds, which we translate into the
+    // portable StreamEvent kinds. Without this flag the SDK only emits
+    // a single complete SDKAssistantMessage per turn and we lose
+    // incremental text.
+    const options = this.buildOptions(req, { partial: true });
+
+    let iter: ReturnType<typeof query>;
+    try {
+      iter =
+        options === undefined ? this.queryImpl({ prompt }) : this.queryImpl({ prompt, options });
+    } catch (e) {
+      throw mapAgentError(e);
+    }
+
+    const sub = new ClaudeAgentStreamSubscription(iter);
+    void sub.startDispatch(handler, req.model);
+    return sub;
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await, @typescript-eslint/no-unused-vars -- M5.7.c.c slice; stub matches the LLMProvider contract.
@@ -199,16 +228,25 @@ export class ClaudeAgentProvider implements LLMProvider {
 
   private buildOptions(
     req: CompleteRequest | StreamRequest,
+    extras?: { readonly partial?: boolean },
   ): Parameters<typeof query>[0]["options"] {
     // The Agent SDK Options type carries dozens of fields; we set only
-    // the four that matter for a single-turn complete() and let the SDK
-    // default the rest. Tools/permission integration lands in M5.7.c.b.
+    // the handful that matter for a single-turn complete() / stream()
+    // and let the SDK default the rest. Tools/permission integration
+    // lands in M5.7.c slice 4 (canUseTool bridge).
     const opts: Record<string, unknown> = { model: req.model };
     if (req.system !== undefined && req.system !== "") {
       opts.systemPrompt = req.system;
     }
     if (this.pathToExecutable !== undefined) {
       opts.pathToClaudeCodeExecutable = this.pathToExecutable;
+    }
+    if (extras?.partial === true) {
+      // Asks the Agent SDK to emit SDKPartialAssistantMessage events
+      // (text_delta / input_json_delta / content_block_*) so stream()
+      // can dispatch incremental events to the handler. Off by default
+      // because complete() does not need them.
+      opts.includePartialMessages = true;
     }
     if (this.apiKey !== undefined && this.apiKey !== "") {
       // The credential literal lives only in harness/src/secrets/env.ts
@@ -419,4 +457,212 @@ function mapAgentError(e: unknown): LLMError {
     return LLMError.tokenLimitExceeded(`agent SDK token limit: ${message}`, e);
   }
   return LLMError.providerUnavailable(message, e);
+}
+
+/* -----------------------------------------------------------------------
+ * Streaming translation.
+ *
+ * The Agent SDK emits a richer event stream than the portable
+ * StreamEvent kinds — most events (system, status, api_retry, ...) have
+ * no portable counterpart and are dropped at the adapter boundary.
+ * Only the three message types the harness needs land on the wire:
+ *
+ *   - SDKPartialAssistantMessage  → text_delta / tool_call_start /
+ *                                   tool_call_delta (per inner block)
+ *   - SDKAssistantMessage         → falls through to message_stop's
+ *                                   final-assistant snapshot (drop)
+ *   - SDKResultMessage            → message_stop carrying finishReason
+ *                                   + usage from the success summary
+ *
+ * The translator is a free function so the test seam can exercise the
+ * event mapping without instantiating a subscription.
+ * --------------------------------------------------------------------- */
+
+interface ClaudeAgentStreamCorrelation {
+  readonly getActiveToolID: () => string | undefined;
+  readonly setActiveToolID: (id: string | undefined) => void;
+}
+
+export function translateStreamMessage(
+  msg: unknown,
+  model: Model,
+  corr: ClaudeAgentStreamCorrelation,
+): StreamEvent | undefined {
+  if (msg === null || typeof msg !== "object") return undefined;
+  const m = msg as Record<string, unknown>;
+  const type = m.type;
+  if (type === "stream_event") return translatePartialAssistantEvent(m, corr);
+  if (type === "result") {
+    const consumed = consumeResultMessage(m, model);
+    const evt: StreamEvent = { kind: "message_stop" };
+    if (consumed.finishReason !== undefined) {
+      (evt as { finishReason?: FinishReason }).finishReason = consumed.finishReason;
+    }
+    if (consumed.usage !== undefined) {
+      (evt as { usage?: Usage }).usage = consumed.usage;
+    }
+    if (consumed.errorMessage !== undefined) {
+      (evt as { errorMessage?: string }).errorMessage = consumed.errorMessage;
+    }
+    return evt;
+  }
+  return undefined;
+}
+
+function translatePartialAssistantEvent(
+  msg: Record<string, unknown>,
+  corr: ClaudeAgentStreamCorrelation,
+): StreamEvent | undefined {
+  const event = msg.event as Record<string, unknown> | undefined;
+  if (event === undefined) return undefined;
+  const innerType = event.type;
+  switch (innerType) {
+    case "content_block_start": {
+      const block = event.content_block as Record<string, unknown> | undefined;
+      if (block?.type === "tool_use") {
+        const id = typeof block.id === "string" ? block.id : "";
+        corr.setActiveToolID(id);
+        return {
+          kind: "tool_call_start",
+          toolCall: {
+            id,
+            name: typeof block.name === "string" ? block.name : "",
+            arguments: {},
+          },
+        };
+      }
+      return undefined;
+    }
+    case "content_block_delta": {
+      const delta = event.delta as Record<string, unknown> | undefined;
+      if (delta?.type === "text_delta") {
+        return {
+          kind: "text_delta",
+          textDelta: typeof delta.text === "string" ? delta.text : "",
+        };
+      }
+      if (delta?.type === "input_json_delta") {
+        const id = corr.getActiveToolID() ?? "";
+        return {
+          kind: "tool_call_delta",
+          textDelta: typeof delta.partial_json === "string" ? delta.partial_json : "",
+          toolCall: { id, name: "", arguments: {} },
+        };
+      }
+      return undefined;
+    }
+    case "content_block_stop":
+      corr.setActiveToolID(undefined);
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Internal {@link StreamSubscription} backing
+ * {@link ClaudeAgentProvider.stream}. Mirrors the
+ * `ClaudeStreamSubscription` semantics in claude-code-provider.ts:
+ * one-shot stop / cause-latching / first stop() interrupts the Agent
+ * SDK Query iterator.
+ */
+class ClaudeAgentStreamSubscription implements StreamSubscription {
+  private readonly iter: AsyncIterator<unknown>;
+  private readonly maybeQuery: { interrupt: () => Promise<void> } | undefined;
+  private _stopped = false;
+  private _cause: unknown = undefined;
+  private _stopRan = false;
+  private _stopResult: LLMError | undefined;
+  private activeToolID: string | undefined;
+
+  public constructor(iter: AsyncIterable<unknown> | AsyncIterator<unknown>) {
+    // Agent SDK's Query is an AsyncGenerator (has both [Symbol.asyncIterator]
+    // and the iterator protocol). We accept either shape.
+    this.iter =
+      typeof (iter as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
+        ? (iter as AsyncIterable<unknown>)[Symbol.asyncIterator]()
+        : (iter as AsyncIterator<unknown>);
+    this.maybeQuery =
+      typeof (iter as { interrupt?: unknown }).interrupt === "function"
+        ? (iter as unknown as { interrupt: () => Promise<void> })
+        : undefined;
+  }
+
+  public get isStopped(): boolean {
+    return this._stopped;
+  }
+
+  public markStopped(cause: unknown): void {
+    if (this._stopped) return;
+    this._stopped = true;
+    this._cause = cause;
+  }
+
+  public async startDispatch(handler: StreamHandler, model: Model): Promise<void> {
+    const corr: ClaudeAgentStreamCorrelation = {
+      getActiveToolID: () => this.activeToolID,
+      setActiveToolID: (id) => {
+        this.activeToolID = id;
+      },
+    };
+    try {
+      while (!this._stopped) {
+        const next = await this.iter.next();
+        if (next.done === true) break;
+        const ev = translateStreamMessage(next.value, model, corr);
+        if (ev === undefined) continue;
+        try {
+          await handler(ev);
+        } catch (handlerErr: unknown) {
+          this.markStopped(handlerErr);
+          break;
+        }
+        if (ev.kind === "message_stop") break;
+      }
+    } catch (sdkErr: unknown) {
+      // SDK iteration blew up mid-flight: synthesise an error event for
+      // the handler, then latch the cause for stop().
+      const errEvent: StreamEvent = {
+        kind: "error",
+        errorMessage: errorMessageOf(sdkErr),
+      };
+      try {
+        await handler(errEvent);
+      } catch {
+        // Handler errors during the synthesised error event are swallowed
+        // — the SDK error is the authoritative cause.
+      }
+      this.markStopped(sdkErr);
+    }
+  }
+
+  public async stop(): Promise<void> {
+    if (this._stopRan) {
+      if (this._stopResult !== undefined) {
+        throw this._stopResult;
+      }
+      return;
+    }
+    this._stopRan = true;
+    this._stopped = true;
+    if (this.maybeQuery !== undefined) {
+      try {
+        await this.maybeQuery.interrupt();
+      } catch {
+        // Best-effort interrupt: re-interrupting an already-finished
+        // query is a no-op in spec but tolerate exceptions defensively.
+      }
+    }
+    if (this._cause !== undefined) {
+      this._stopResult = LLMError.streamClosed(undefined, this._cause);
+      throw this._stopResult;
+    }
+  }
+}
+
+function errorMessageOf(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  if (typeof e === "object" && e !== null) return safeJsonStringify(e);
+  return String(e);
 }
