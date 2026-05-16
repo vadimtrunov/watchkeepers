@@ -664,25 +664,23 @@ describe("ClaudeAgentProvider.complete with tools (M5.7.c slice 4)", () => {
   });
 
   it("returns toolCalls with runtime names (decoded from mcp prefix)", async () => {
-    const fake = (() =>
-      // eslint-disable-next-line @typescript-eslint/require-await -- generator yields a fixed sequence; no awaitable I/O inside.
-      (async function* () {
-        yield {
-          type: "assistant",
-          message: {
-            content: [
-              { type: "text", text: "I'll save that." },
-              {
-                type: "tool_use",
-                id: "tu_1",
-                name: "mcp__watchkeeper__notebook_remember",
-                input: { key: "k", value: "v" },
-              },
-            ],
-            usage: { input_tokens: 1, output_tokens: 1 },
-          },
-        };
-      })()) as unknown as QueryImpl;
+    const fake = fakeQuery([
+      {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "text", text: "I'll save that." },
+            {
+              type: "tool_use",
+              id: "tu_1",
+              name: "mcp__watchkeeper__notebook_remember",
+              input: { key: "k", value: "v" },
+            },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+    ]);
     const provider = new ClaudeAgentProvider({ queryImpl: fake });
     const resp = await provider.complete({
       model: model("claude-3-5-sonnet-latest"),

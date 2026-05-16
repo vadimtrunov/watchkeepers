@@ -114,10 +114,10 @@ export class ClaudeAgentProvider implements LLMProvider {
 
     const prompt = buildPromptFromMessages(req.messages);
     const codec: ToolNameCodec = buildCodec(req.tools ?? []);
-    const options = this.buildOptions(
-      req,
-      req.tools !== undefined ? { codec, tools: req.tools } : { codec },
-    );
+    const options =
+      req.tools !== undefined && req.tools.length > 0
+        ? this.buildOptions(req, { codec, tools: req.tools })
+        : this.buildOptions(req);
 
     let iter: ReturnType<typeof query>;
     try {
