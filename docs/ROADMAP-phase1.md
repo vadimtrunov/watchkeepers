@@ -648,3 +648,68 @@ Both private modes are read by the same overlay resolver — the runtime sees no
 | Notebook auto-inheritance policy (same-role successor auto-seed)                                                     | Phase 2      | Phase 1 supports manual `wk notebook import` only.         |
 | Reflection sampling on tool success; lesson consolidation                                                            | Phase 2      | Phase 1: reflect on errors only, no compaction.            |
 | Personality preset catalog, emoji/humor axes, full tone DSL                                                          | Phase 2      | Phase 1: free-text `personality` + ISO `language` fields.  |
+
+---
+
+## 10. DoD Closure Plan
+
+Implementation milestones M1–M10 are shipped, but the eight Definition-of-Done checks in §7 and several milestone acceptance criteria remain unverified. This section sequences the remaining work into five phases by dependency, not by milestone. Mark items `[x]` as they complete; each maps to a §7 DoD entry or a milestone acceptance criterion.
+
+### Phase A — External prerequisites (unblocks live scenarios)
+
+Parallelizable. Without these, no live verification of §7 #1–#6 is possible.
+
+- [ ] **A1** Dev Slack workspace provisioned, admin access, parent app with `app_configuration` scope. Unblocks M4 / M6 / M7 / §7 #2 #3.
+- [ ] **A2** Claude Code installed on every harness host, credentials wired through the secrets interface (no raw `ANTHROPIC_API_KEY`). Unblocks M5 / §7 #3.
+- [ ] **A3** Jira test project with API credentials and ≥2 seeded tickets. Unblocks M8 / §7 #4.
+- [ ] **A4** `watchkeeper-tools` repo created + shared CI workflow template published + reachable by core. Unblocks M9 / §7 #5.
+
+### Phase B — Automatable acceptance criteria (no external deps)
+
+CI-runnable tests against mocks. Independent of Phase A; can start immediately.
+
+- [ ] **B1** M2b.6 recall-latency benchmark — sub-millisecond at 10k entries (`go test -bench` gated job).
+- [ ] **B2** M3 integration test — spawn mock Watchkeeper, fire cron event, assert correlated `cron_fired` + `handler_ran` in Keeper's Log with matching correlation IDs.
+- [ ] **B3** M4 rate-limiter load test — tier-2 burst + sustained limits honored under simulated load.
+- [ ] **B4** M5 sandbox scenarios — runaway tool killed by wall-clock limit; undeclared network access rejected by capability broker; `FakeProvider` runs full harness suite without touching provider package.
+- [ ] **B5** M5 Notebook scenarios — auto-injection (seeded lesson visible in prompt window) and auto-reflection (forced tool error → `lesson` with 24h `active_after` + `lesson_learned` in Keeper's Log).
+- [ ] **B6** M9 isolated tests — overlay precedence, update-safety (platform `main` bump preserves private tool), signature refusal with signing enabled, local-patch audit (missing `--reason` blocks; reason + operator identity reach Keeper's Log).
+
+### Phase C — Live end-to-end demos (§7 #1–#6)
+
+Sequential; each step depends on the previous. Requires Phase A.
+
+- [ ] **C1** **§7 #1** — `docker-compose up` brings Phase 1 online with no manual steps beyond secret provisioning.
+- [ ] **C2** **§7 #2** + M6 acceptance — admin DMs Watchmaster → live Watchkeeper list returned.
+- [ ] **C3** **§7 #3** + M7 acceptance — `make spawn-dev-bot` end-to-end: admin requests Coordinator → Manifest draft → approval → Coordinator live in Slack within 90s posting intro message; fault-injection rollback also verified.
+- [ ] **C4** **§7 #4** + M8 acceptance — Coordinator reads Watch Order from Slack DM, nudges overdue Jira ticket, posts daily briefing on cron (incl. pending-lesson digest section).
+- [ ] **C5** **§7 #5** + M9 engineer-demo — Watchkeeper drafts new tool via `propose_tool` → PR opens in private repo → shared CI passes → human merges → webhook hot-loads → Coordinator uses it in-session.
+- [ ] **C6** **§7 #5** + M9 non-engineer demo — `slack-native` approval card with plain-language description + dry-run output; lead approves without seeing raw code.
+- [ ] **C7** **§7 #6** — verify all C1–C6 events appear as correlated entries in Keeper's Log (no separate work; assertion on existing flow).
+
+### Phase D — `make smoke` in CI (§7 #7)
+
+`make smoke` script shipped in M10.4; remaining work is the CI plumbing.
+
+- [ ] **D1** GitHub Actions workflow runs `make smoke` against stubbed Slack adapter + real Postgres service container.
+- [ ] **D2** `smoke` added to required status checks on `main`.
+- [ ] **D3** M10 backup/restore drill — wipe `$DATA_DIR`, restore from `ArchiveStore`, assert Notebook state byte-identical post-restore.
+- [ ] **D4** M10 CLI parity audit — every `wk` subcommand has a matching `make wk CMD="..."` shortcut that exits 0 on dry-run input.
+
+### Phase E — Runbook dry-run (§7 #8)
+
+Requires a second engineer who was not involved in Phase 1.
+
+- [ ] **E1** Identify the second engineer; schedule a 2-hour walkthrough slot.
+- [ ] **E2** Walk through `docs/RUNBOOK.md` end-to-end without verbal assistance; log every point of confusion or undocumented step.
+- [ ] **E3** Close gaps in runbook from E2 findings; re-run E2 spot-checks on the changed sections.
+
+### Critical path
+
+A1 (Slack) → C2 → C3 → C5/C6 → C7. Without a dev Slack workspace, 5 of the 8 §7 DoD entries cannot be closed.
+
+### Parallel work-streams while Phase A is in flight
+
+- B1, B2, B4, B5, B6 — pure code/test work, no external deps.
+- D1 — workflow file authoring; runs against stubs, so no Slack/Jira needed.
+- E1 — booking a second engineer can happen in parallel with everything else.
