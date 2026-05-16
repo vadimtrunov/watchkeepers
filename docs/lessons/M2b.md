@@ -14,8 +14,8 @@ See `docs/LESSONS.md` for the index across all milestones.
 
 ## 2026-05-16 — M2b verification bullet 216: gated 10k recall-latency benchmark with revised budget
 
-**PR**: pending — to be opened in Phase 8 of `ship-roadmap-item`
-**Merged**: pending — to be merged in Phase 8 of `ship-roadmap-item`
+**PR**: [#148](https://github.com/vadimtrunov/watchkeepers/pull/148)
+**Merged**: 2026-05-16 (squash commit `a7dac18`)
 
 ### Context
 
