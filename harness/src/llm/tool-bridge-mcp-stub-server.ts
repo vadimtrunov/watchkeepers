@@ -120,7 +120,19 @@ function jsonSchemaToZodShape(schema: Record<string, unknown> | undefined): ZodR
   return shape;
 }
 
-let warnedSchemas = new WeakSet<object>();
+const warnedSchemas = new WeakSet<object>();
+
+/**
+ * Emit a one-shot warn for an unsupported JSON-Schema shape.
+ *
+ * Dedup is keyed on object identity, not on schema content. In the
+ * production path `buildStubMcpServer` passes the same `t.inputSchema`
+ * reference per tool per request, so this fires at most once per build
+ * — which is the contract the spec promises. Ad-hoc callers of
+ * `jsonSchemaToZod` with freshly-built object literals will warn each
+ * call; that's intentionally permissive because the warn is a
+ * diagnostic, not a control-flow signal.
+ */
 function warnUnsupportedSchema(schema: Record<string, unknown>): void {
   if (warnedSchemas.has(schema)) return;
   warnedSchemas.add(schema);
@@ -129,9 +141,4 @@ function warnUnsupportedSchema(schema: Record<string, unknown>): void {
       schema,
     )}`,
   );
-}
-
-/* Test-only reset for the dedup set so the suite can re-trigger the warn path. */
-export function __resetUnsupportedSchemaWarnings(): void {
-  warnedSchemas = new WeakSet();
 }
