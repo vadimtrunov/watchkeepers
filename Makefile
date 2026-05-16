@@ -127,6 +127,23 @@ go-test: ## Run Go tests with race detector and coverage
 notebook-bench: ## Run the gated 10k-entry Notebook recall latency benchmark (M2b bullet 216)
 	@$(GO) test -tags=benchmark -bench=BenchmarkRecallAt10k -run=TestRecallLatencyP99WithinBudget -benchmem ./core/pkg/notebook/...
 
+# Gated behind the `loadtest` build tag (see
+# core/pkg/messenger/slack/ratelimiter_load_test.go) so the default test
+# path NEVER spins up the 128-goroutine fleet or pays the ~3 s wall-clock
+# budget the real-clock Wait assertion needs. Runs the three
+# TestRateLimiterLoad_* budget assertions plus the two
+# BenchmarkRateLimiter_Tier2_* trend benchmarks. Implements
+# ROADMAP-phase1.md §10 DoD Closure Plan item B3.
+#
+# `-race` is omitted for the same reason as notebook-bench: the race
+# detector adds ~5× wall-clock overhead and would invalidate the
+# throughput projection the real-clock Wait test asserts against. Race
+# coverage for the same RateLimiter code path lives in the default
+# `go-test` target via ratelimiter_test.go's TestRateLimiter_ConcurrentAllow.
+.PHONY: ratelimiter-load
+ratelimiter-load: ## Run the gated Slack rate-limiter tier-2 load test (B3)
+	@$(GO) test -tags=loadtest -run=TestRateLimiterLoad -bench=BenchmarkRateLimiter_Tier2 -benchmem ./core/pkg/messenger/slack/...
+
 .PHONY: go-build
 go-build: ## Build all Go binaries into ./bin
 	@mkdir -p bin
