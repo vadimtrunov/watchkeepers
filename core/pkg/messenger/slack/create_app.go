@@ -285,6 +285,18 @@ func buildManifestBody(m messenger.AppManifest) map[string]any {
 				"bot": append([]string(nil), m.Scopes...),
 			},
 		}
+		// Slack rejects oauth_config.scopes.bot with `requires_bot_user`
+		// unless features.bot_user is declared alongside it. The default
+		// shape mirrors what Slack's "Create from manifest" UI emits for
+		// a bot-only app: display_name reuses the app name, always_online
+		// is false so the workspace presence pill follows real socket
+		// activity rather than pinning "online" indefinitely.
+		manifest["features"] = map[string]any{
+			"bot_user": map[string]any{
+				"display_name":  m.Name,
+				"always_online": false,
+			},
+		}
 	}
 
 	if settings := buildManifestSettings(m.Metadata); len(settings) > 0 {

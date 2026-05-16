@@ -456,7 +456,8 @@ func TestCreateApp_SocketModeEnabled_JSONBool(t *testing.T) {
 // Scopes slice still produces a valid manifest envelope (Slack accepts
 // scope-less manifests for apps that operate purely via webhooks /
 // slash commands). The oauth_config.scopes.bot field is omitted when
-// the slice is nil/empty.
+// the slice is nil/empty, and features.bot_user is omitted in lockstep
+// (Slack only requires bot_user when bot scopes are declared).
 func TestCreateApp_NoScopes_StillRequestsManifest(t *testing.T) {
 	t.Parallel()
 
@@ -493,5 +494,78 @@ func TestCreateApp_NoScopes_StillRequestsManifest(t *testing.T) {
 				t.Errorf("oauth_config.scopes.bot = %v, want empty/absent for nil scopes", bot)
 			}
 		}
+	}
+	if features, ok := got.Manifest["features"].(map[string]any); ok {
+		if _, hasBotUser := features["bot_user"]; hasBotUser {
+			t.Errorf("features.bot_user must be absent when no bot scopes declared; raw body: %s", string(captured))
+		}
+	}
+}
+
+// TestCreateApp_BotScopes_EmitFeaturesBotUser asserts that whenever
+// the manifest declares non-empty bot scopes, the wire payload carries
+// `features.bot_user.display_name` (string, defaults to manifest name)
+// and `features.bot_user.always_online` (JSON BOOL false).
+//
+// Slack's apps.manifest.create rejects `oauth_config.scopes.bot` with
+// `requires_bot_user` when the manifest omits the features.bot_user
+// section. The contract is documented at
+// https://api.slack.com/reference/manifests#bot_user — discovered
+// empirically while running `make spawn-dev-bot` during Phase 1
+// finalization (ROADMAP §10 DoD §7 #1).
+//
+// `always_online` is asserted as a JSON BOOL via raw-byte substring
+// search, mirroring TestCreateApp_SocketModeEnabled_JSONBool — Slack
+// rejects `"always_online":"false"` (quoted) with
+// `manifest_validation_error`.
+func TestCreateApp_BotScopes_EmitFeaturesBotUser(t *testing.T) {
+	t.Parallel()
+
+	var captured []byte
+	srv := captureServer(
+		t, "/apps.manifest.create", http.StatusOK,
+		`{"ok":true,"app_id":"A1","credentials":{"client_id":"x","client_secret":"y"}}`,
+		&captured,
+	)
+
+	c := NewClient(
+		WithBaseURL(srv.URL),
+		WithTokenSource(StaticToken("xoxe.xoxp-1-test")),
+	)
+	_, err := c.CreateApp(context.Background(), messenger.AppManifest{
+		Name:        "Watchkeeper Dev",
+		Description: "x",
+		Scopes:      []string{"chat:write", "users:read"},
+	})
+	if err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+
+	var got manifestRequest
+	if err := json.Unmarshal(captured, &got); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	features, _ := got.Manifest["features"].(map[string]any)
+	if features == nil {
+		t.Fatalf("features section missing; raw body: %s", string(captured))
+	}
+	botUser, _ := features["bot_user"].(map[string]any)
+	if botUser == nil {
+		t.Fatalf("features.bot_user missing; raw body: %s", string(captured))
+	}
+	if botUser["display_name"] != "Watchkeeper Dev" {
+		t.Errorf("features.bot_user.display_name = %v, want %q", botUser["display_name"], "Watchkeeper Dev")
+	}
+	if v, ok := botUser["always_online"].(bool); !ok || v {
+		t.Errorf("features.bot_user.always_online = %v (%T), want bool false", botUser["always_online"], botUser["always_online"])
+	}
+
+	// Raw-wire assertion: always_online must serialise as JSON bool,
+	// not the quoted string `"false"` Slack rejects.
+	if !strings.Contains(string(captured), `"always_online":false`) {
+		t.Fatalf("always_online must serialise as JSON bool; raw body: %s", string(captured))
+	}
+	if strings.Contains(string(captured), `"always_online":"false"`) {
+		t.Fatalf("always_online serialised as JSON string; raw body: %s", string(captured))
 	}
 }
