@@ -95,3 +95,56 @@ var ErrInvalidConversationID = errors.New("peer: invalid conversation id")
 // a malicious cross-conversation poke; either way the call surfaces
 // the typed sentinel rather than the underlying state.
 var ErrPeerClosePermission = errors.New("peer: close permission denied")
+
+// ErrInvalidEventID is returned by [EventBus.Publish] when the supplied
+// [Event.ID] is the zero UUID. The id is minted by the publisher (not
+// the bus) so a zero value is a caller bug; the validator runs BEFORE
+// any persistence side effect.
+var ErrInvalidEventID = errors.New("peer: invalid event id")
+
+// ErrInvalidOrganizationID is returned by [EventBus.Publish] /
+// [EventBus.Subscribe] when the supplied organization id is the zero
+// UUID. Distinct from [k2k.ErrEmptyOrganization] because the peer-event
+// layer's own seam owns its vocabulary — a future reader branching on
+// the bus-level sentinel does not need to import the K2K storage seam.
+// Mirrors the M1.3.a / M1.3.b "translate storage sentinels at the
+// peer-tool boundary" discipline.
+var ErrInvalidOrganizationID = errors.New("peer: invalid organization id")
+
+// ErrEmptyWatchkeeperID is returned by [EventBus.Publish] when the
+// supplied [Event.WatchkeeperID] is empty / whitespace-only. The
+// watchkeeper id is the subscriber-side filter key; an empty value at
+// the publish boundary is a caller bug.
+var ErrEmptyWatchkeeperID = errors.New("peer: empty watchkeeper id")
+
+// ErrEmptyEventType is returned by [EventBus.Publish] when the supplied
+// [Event.EventType] is empty / whitespace-only. M1.3.c does not pin a
+// finite enum here — downstream consumers (M1.4 audit, M5.* tool
+// emitters) own their own type strings — but an empty type is a caller
+// bug because the subscriber-side [SubscribeFilter.EventTypes] match
+// would never succeed on an empty key.
+var ErrEmptyEventType = errors.New("peer: empty event type")
+
+// ErrPeerSubscriptionPermission is returned by [Tool.Subscribe] when
+// the acting watchkeeper attempts to subscribe to events about a peer
+// it is not authorised to observe. The current closed-set rule
+// (M1.3.c): an empty `target` (subscribe to every event in the tenant)
+// is allowed; a non-empty `target` MUST match the
+// `ActingWatchkeeperID` (self-subscription only). Cross-peer
+// subscription is a follow-up that requires a richer per-conversation
+// participant gate (M1.4 will land it). A cross-peer attempt surfaces
+// this sentinel WITHOUT leaking whether the foreign peer exists.
+var ErrPeerSubscriptionPermission = errors.New("peer: subscribe permission denied")
+
+// ErrInvalidEventTypes is returned by [Tool.Subscribe] when any entry
+// in the supplied `eventTypes` slice is empty / whitespace-only. The
+// caller is expected to pass canonical event-type strings (M1.4 audit
+// taxonomy or M5.* tool emitter namespacing); an empty entry is a
+// caller bug.
+var ErrInvalidEventTypes = errors.New("peer: invalid event types")
+
+// ErrPeerEventBusUnavailable is returned by [Tool.Subscribe] when the
+// tool was constructed without an [EventBus] dep. The constructor's
+// nil-guard catches this at wiring time; the runtime guard exists for
+// defensive belt-and-braces during partial migrations.
+var ErrPeerEventBusUnavailable = errors.New("peer: event bus unavailable")

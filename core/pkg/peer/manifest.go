@@ -77,6 +77,24 @@ var peerCloseSchema = json.RawMessage(`{
   "required": ["conversation_id"]
 }`)
 
+// peerSubscribeSchema is the zod-compatible JSON-schema fragment
+// describing [Tool.Subscribe]'s argument shape. Same minimum-viable-
+// surface posture as [peerAskSchema] / [peerReplySchema] /
+// [peerCloseSchema]. Both `target` and `event_types` are optional —
+// empty / omitted values broaden the subscription to "every event in
+// the tenant" / "every event type" respectively.
+var peerSubscribeSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "target": { "type": "string", "description": "watchkeeper id filter; empty subscribes to every watchkeeper in the tenant" },
+    "event_types": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "closed-set event-type filter; empty subscribes to every event type"
+    }
+  }
+}`)
+
 // BuiltinAskManifest returns the [toolregistry.Manifest] entry for
 // `peer.ask`. Stamped with [BuiltinSourceName], capability
 // [CapabilityAsk], and the [toolregistry.DryRunModeScoped] mode (a
@@ -124,6 +142,25 @@ func BuiltinCloseManifest() toolregistry.Manifest {
 		Version:      "1.0.0",
 		Capabilities: []string{CapabilityClose},
 		Schema:       cloneBytes(peerCloseSchema),
+		Source:       BuiltinSourceName,
+		DryRunMode:   toolregistry.DryRunModeScoped,
+	}
+}
+
+// BuiltinSubscribeManifest returns the [toolregistry.Manifest] entry for
+// `peer.subscribe`. Same shape as [BuiltinAskManifest] /
+// [BuiltinReplyManifest] / [BuiltinCloseManifest] but with the
+// [CapabilitySubscribe] capability id and the `peer.subscribe` name.
+// Dry-run mode is [toolregistry.DryRunModeScoped] — a dry-run subscribe
+// reroutes the delivered events to a dev-loop sink under M9.4.c. The
+// returned value is a fresh struct per call; defensive deep-copy of the
+// schema RawMessage protects callers that mutate the returned value.
+func BuiltinSubscribeManifest() toolregistry.Manifest {
+	return toolregistry.Manifest{
+		Name:         "peer.subscribe",
+		Version:      "1.0.0",
+		Capabilities: []string{CapabilitySubscribe},
+		Schema:       cloneBytes(peerSubscribeSchema),
 		Source:       BuiltinSourceName,
 		DryRunMode:   toolregistry.DryRunModeScoped,
 	}
