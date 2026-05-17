@@ -218,6 +218,147 @@ describe("interceptComplete", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// parseResult / modelUsage extraction (slice 5)
+// ---------------------------------------------------------------------------
+
+function resultWithModelUsage(opts: {
+  modelUsage?: Record<
+    string,
+    {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadInputTokens?: number;
+      cacheCreationInputTokens?: number;
+      costUSD?: number;
+    }
+  >;
+  flatUsage?: { input_tokens: number; output_tokens: number };
+  totalCostUsd?: number;
+  stopReason?: string;
+}): unknown {
+  const m: Record<string, unknown> = {
+    type: "result",
+    subtype: "success",
+    total_cost_usd: opts.totalCostUsd ?? 0,
+    stop_reason: opts.stopReason ?? "end_turn",
+  };
+  if (opts.flatUsage !== undefined) {
+    m.usage = {
+      input_tokens: opts.flatUsage.input_tokens,
+      output_tokens: opts.flatUsage.output_tokens,
+    };
+  }
+  if (opts.modelUsage !== undefined) {
+    m.modelUsage = opts.modelUsage;
+  }
+  return m;
+}
+
+describe("interceptComplete – modelUsage parsing", () => {
+  it("uses modelUsage token counts and exposes per-model metadata for a single model", async () => {
+    const codec = buildCodec([]);
+    const { iter } = fakeIter([
+      assistantText("hi"),
+      resultWithModelUsage({
+        modelUsage: {
+          "claude-3-5-sonnet-20241022": {
+            inputTokens: 42,
+            outputTokens: 17,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            costUSD: 0.000123,
+          },
+        },
+        flatUsage: { input_tokens: 99, output_tokens: 99 },
+        totalCostUsd: 0.0001,
+      }),
+    ]);
+    const turn = await interceptComplete(iter, codec, REQUESTED_MODEL);
+    // Token counts come from modelUsage, not flatUsage
+    expect(turn.usage.inputTokens).toBe(42);
+    expect(turn.usage.outputTokens).toBe(17);
+    // Cost from total_cost_usd × 10000
+    expect(turn.usage.costCents).toBe(1);
+    // Per-model breakdown in metadata
+    expect(turn.usage.metadata).toBeDefined();
+    expect(turn.usage.metadata?.["model:claude-3-5-sonnet-20241022"]).toBe("42/17/0.000123");
+    // No cache keys when both are 0
+    expect(turn.usage.metadata?.cacheReadInputTokens).toBeUndefined();
+    expect(turn.usage.metadata?.cacheCreationInputTokens).toBeUndefined();
+  });
+
+  it("sums token counts across multiple model entries and exposes two model keys", async () => {
+    const codec = buildCodec([]);
+    const { iter } = fakeIter([
+      assistantText("hello"),
+      resultWithModelUsage({
+        modelUsage: {
+          "claude-3-5-sonnet-20241022": {
+            inputTokens: 30,
+            outputTokens: 10,
+            costUSD: 0.0001,
+          },
+          "claude-3-opus-20240229": {
+            inputTokens: 20,
+            outputTokens: 5,
+            costUSD: 0.0002,
+          },
+        },
+        totalCostUsd: 0.0003,
+      }),
+    ]);
+    const turn = await interceptComplete(iter, codec, REQUESTED_MODEL);
+    // Summed across both entries
+    expect(turn.usage.inputTokens).toBe(50);
+    expect(turn.usage.outputTokens).toBe(15);
+    expect(turn.usage.costCents).toBe(3);
+    // Both model keys present in metadata
+    expect(turn.usage.metadata?.["model:claude-3-5-sonnet-20241022"]).toBe("30/10/0.0001");
+    expect(turn.usage.metadata?.["model:claude-3-opus-20240229"]).toBe("20/5/0.0002");
+  });
+
+  it("populates cacheReadInputTokens and cacheCreationInputTokens when non-zero", async () => {
+    const codec = buildCodec([]);
+    const { iter } = fakeIter([
+      assistantText("cached"),
+      resultWithModelUsage({
+        modelUsage: {
+          "claude-3-5-sonnet-20241022": {
+            inputTokens: 100,
+            outputTokens: 20,
+            cacheReadInputTokens: 80,
+            cacheCreationInputTokens: 15,
+            costUSD: 0.0005,
+          },
+        },
+        totalCostUsd: 0.0005,
+      }),
+    ]);
+    const turn = await interceptComplete(iter, codec, REQUESTED_MODEL);
+    expect(turn.usage.metadata?.cacheReadInputTokens).toBe("80");
+    expect(turn.usage.metadata?.cacheCreationInputTokens).toBe("15");
+    expect(turn.usage.metadata?.["model:claude-3-5-sonnet-20241022"]).toBe("100/20/0.0005");
+  });
+
+  it("falls back to flat usage tokens and no metadata when modelUsage is absent", async () => {
+    const codec = buildCodec([]);
+    const { iter } = fakeIter([
+      assistantText("plain"),
+      resultWithModelUsage({
+        flatUsage: { input_tokens: 7, output_tokens: 3 },
+        totalCostUsd: 0.0002,
+      }),
+    ]);
+    const turn = await interceptComplete(iter, codec, REQUESTED_MODEL);
+    expect(turn.usage.inputTokens).toBe(7);
+    expect(turn.usage.outputTokens).toBe(3);
+    expect(turn.usage.costCents).toBe(2);
+    // No modelUsage → no metadata
+    expect(turn.usage.metadata).toBeUndefined();
+  });
+});
+
 describe("interceptStream", () => {
   it("emits text_delta then message_stop with finishReason=tool_use on tool_use turn", async () => {
     const codec = buildCodec([td("notebook.remember")]);

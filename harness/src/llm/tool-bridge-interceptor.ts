@@ -334,18 +334,69 @@ function parseResult(msg: unknown, requestedModel: Model): ParsedResult | undefi
   const m = msg as Record<string, unknown>;
   if (m.type !== "result") return undefined;
   if (m.subtype === "success") {
-    const usageRaw = m.usage as Record<string, unknown> | undefined;
-    const input = typeof usageRaw?.input_tokens === "number" ? usageRaw.input_tokens : 0;
-    const output = typeof usageRaw?.output_tokens === "number" ? usageRaw.output_tokens : 0;
+    const modelUsageRaw = m.modelUsage as Record<string, unknown> | undefined;
+    const flatUsageRaw = m.usage as Record<string, unknown> | undefined;
     const costUsd = typeof m.total_cost_usd === "number" ? m.total_cost_usd : 0;
+
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadSum = 0;
+    let cacheCreationSum = 0;
+    const perModelEntries: [string, string][] = [];
+    let usedModelUsage = false;
+
+    if (modelUsageRaw !== undefined) {
+      for (const [name, raw] of Object.entries(modelUsageRaw)) {
+        if (raw === null || typeof raw !== "object") continue;
+        usedModelUsage = true;
+        const r = raw as Record<string, unknown>;
+        const inT = typeof r.inputTokens === "number" ? r.inputTokens : 0;
+        const outT = typeof r.outputTokens === "number" ? r.outputTokens : 0;
+        const cacheRead = typeof r.cacheReadInputTokens === "number" ? r.cacheReadInputTokens : 0;
+        const cacheCreate =
+          typeof r.cacheCreationInputTokens === "number" ? r.cacheCreationInputTokens : 0;
+        const perCost = typeof r.costUSD === "number" ? r.costUSD : 0;
+        inputTokens += inT;
+        outputTokens += outT;
+        cacheReadSum += cacheRead;
+        cacheCreationSum += cacheCreate;
+        perModelEntries.push([
+          `model:${name}`,
+          `${String(inT)}/${String(outT)}/${String(perCost)}`,
+        ]);
+      }
+    }
+
+    if (!usedModelUsage) {
+      inputTokens = typeof flatUsageRaw?.input_tokens === "number" ? flatUsageRaw.input_tokens : 0;
+      outputTokens =
+        typeof flatUsageRaw?.output_tokens === "number" ? flatUsageRaw.output_tokens : 0;
+    }
+
+    const meta: Record<string, string> = {};
+    if (cacheReadSum > 0) meta.cacheReadInputTokens = String(cacheReadSum);
+    if (cacheCreationSum > 0) meta.cacheCreationInputTokens = String(cacheCreationSum);
+    for (const [k, v] of perModelEntries) meta[k] = v;
+
+    const usage: Usage =
+      Object.keys(meta).length > 0
+        ? {
+            model: requestedModel,
+            inputTokens,
+            outputTokens,
+            costCents: Math.round(costUsd * 10000),
+            metadata: meta,
+          }
+        : {
+            model: requestedModel,
+            inputTokens,
+            outputTokens,
+            costCents: Math.round(costUsd * 10000),
+          };
+
     return {
       finishReason: mapStopReason(m.stop_reason),
-      usage: {
-        model: requestedModel,
-        inputTokens: input,
-        outputTokens: output,
-        costCents: Math.round(costUsd * 10000),
-      },
+      usage,
       errorMessage: undefined,
     };
   }
