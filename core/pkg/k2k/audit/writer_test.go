@@ -595,6 +595,223 @@ func TestEmitMessageReceived_EmptyRecipientRejected(t *testing.T) {
 	}
 }
 
+// TestWriter_RejectsWhitespaceOnlyStrings pins the
+// `strings.TrimSpace == ""` discipline for every string field the
+// validator covers — mirrors the upstream M1.1.a Repository.Open
+// participant-trim behavior so an empty-looking value with stray
+// whitespace never slips into the audit payload.
+func TestWriter_RejectsWhitespaceOnlyStrings(t *testing.T) {
+	t.Parallel()
+
+	conv := mustUUID(t, fixedConversationID)
+	org := mustUUID(t, fixedOrganizationID)
+	msg := mustUUID(t, fixedMessageID)
+
+	t.Run("opened slack channel id whitespace", func(t *testing.T) {
+		t.Parallel()
+		w, rec := newWriter(t)
+		_, err := w.EmitConversationOpened(context.Background(), audit.ConversationOpenedEvent{
+			ConversationID: conv,
+			OrganizationID: org,
+			SlackChannelID: "   ",
+			OpenedAt:       fixedTime,
+		})
+		if !errors.Is(err, audit.ErrInvalidEvent) {
+			t.Errorf("err = %v, want ErrInvalidEvent", err)
+		}
+		if rec.count() != 0 {
+			t.Errorf("appender called on whitespace-only slack_channel_id")
+		}
+	})
+
+	t.Run("sent sender whitespace", func(t *testing.T) {
+		t.Parallel()
+		w, rec := newWriter(t)
+		_, err := w.EmitMessageSent(context.Background(), audit.MessageSentEvent{
+			MessageID:           msg,
+			ConversationID:      conv,
+			OrganizationID:      org,
+			SenderWatchkeeperID: "   ",
+			Direction:           "request",
+			CreatedAt:           fixedTime,
+		})
+		if !errors.Is(err, audit.ErrInvalidEvent) {
+			t.Errorf("err = %v, want ErrInvalidEvent", err)
+		}
+		if rec.count() != 0 {
+			t.Errorf("appender called on whitespace-only sender")
+		}
+	})
+
+	t.Run("sent direction whitespace", func(t *testing.T) {
+		t.Parallel()
+		w, rec := newWriter(t)
+		_, err := w.EmitMessageSent(context.Background(), audit.MessageSentEvent{
+			MessageID:           msg,
+			ConversationID:      conv,
+			OrganizationID:      org,
+			SenderWatchkeeperID: "wk",
+			Direction:           "   ",
+			CreatedAt:           fixedTime,
+		})
+		if !errors.Is(err, audit.ErrInvalidEvent) {
+			t.Errorf("err = %v, want ErrInvalidEvent", err)
+		}
+		if rec.count() != 0 {
+			t.Errorf("appender called on whitespace-only direction")
+		}
+	})
+
+	t.Run("received recipient whitespace", func(t *testing.T) {
+		t.Parallel()
+		w, rec := newWriter(t)
+		_, err := w.EmitMessageReceived(context.Background(), audit.MessageReceivedEvent{
+			MessageID:              msg,
+			ConversationID:         conv,
+			OrganizationID:         org,
+			SenderWatchkeeperID:    "wk-a",
+			RecipientWatchkeeperID: "   ",
+			Direction:              "reply",
+			CreatedAt:              fixedTime,
+		})
+		if !errors.Is(err, audit.ErrInvalidEvent) {
+			t.Errorf("err = %v, want ErrInvalidEvent", err)
+		}
+		if rec.count() != 0 {
+			t.Errorf("appender called on whitespace-only recipient")
+		}
+	})
+}
+
+func TestEmitOverBudget_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	w, rec := newWriter(t)
+	convID := mustUUID(t, fixedConversationID)
+	orgID := mustUUID(t, fixedOrganizationID)
+
+	_, err := w.EmitOverBudget(context.Background(), audit.OverBudgetEvent{
+		ConversationID: convID,
+		OrganizationID: orgID,
+		TokenBudget:    1000,
+		TokensUsed:     1200,
+		ObservedAt:     fixedTime,
+	})
+	if err != nil {
+		t.Fatalf("EmitOverBudget: %v", err)
+	}
+	evt := rec.snapshot()[0]
+	if evt.EventType != audit.EventOverBudget {
+		t.Errorf("EventType = %q, want %q", evt.EventType, audit.EventOverBudget)
+	}
+	payload := evt.Payload.(map[string]any)
+	if payload["conversation_id"] != convID.String() {
+		t.Errorf("conversation_id = %v", payload["conversation_id"])
+	}
+	if payload["token_budget"] != int64(1000) {
+		t.Errorf("token_budget = %v, want 1000", payload["token_budget"])
+	}
+	if payload["tokens_used"] != int64(1200) {
+		t.Errorf("tokens_used = %v, want 1200", payload["tokens_used"])
+	}
+	if payload["observed_at"] != fixedTime.Format(time.RFC3339Nano) {
+		t.Errorf("observed_at = %v", payload["observed_at"])
+	}
+}
+
+func TestEmitOverBudget_ValidationFailures(t *testing.T) {
+	t.Parallel()
+
+	conv := mustUUID(t, fixedConversationID)
+	org := mustUUID(t, fixedOrganizationID)
+	cases := []struct {
+		name string
+		evt  audit.OverBudgetEvent
+	}{
+		{"zero conv", audit.OverBudgetEvent{OrganizationID: org, ObservedAt: fixedTime}},
+		{"zero org", audit.OverBudgetEvent{ConversationID: conv, ObservedAt: fixedTime}},
+		{"zero observed_at", audit.OverBudgetEvent{ConversationID: conv, OrganizationID: org}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w, rec := newWriter(t)
+			_, err := w.EmitOverBudget(context.Background(), tc.evt)
+			if !errors.Is(err, audit.ErrInvalidEvent) {
+				t.Errorf("err = %v, want ErrInvalidEvent", err)
+			}
+			if rec.count() != 0 {
+				t.Errorf("appender called on invalid event")
+			}
+		})
+	}
+}
+
+func TestEmitEscalated_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	w, rec := newWriter(t)
+	convID := mustUUID(t, fixedConversationID)
+	orgID := mustUUID(t, fixedOrganizationID)
+
+	_, err := w.EmitEscalated(context.Background(), audit.EscalatedEvent{
+		ConversationID:   convID,
+		OrganizationID:   orgID,
+		EscalatedTo:      "wk-lead",
+		EscalationReason: "peer_timeout",
+		ObservedAt:       fixedTime,
+	})
+	if err != nil {
+		t.Fatalf("EmitEscalated: %v", err)
+	}
+	evt := rec.snapshot()[0]
+	if evt.EventType != audit.EventEscalated {
+		t.Errorf("EventType = %q, want %q", evt.EventType, audit.EventEscalated)
+	}
+	payload := evt.Payload.(map[string]any)
+	if payload["escalated_to"] != "wk-lead" {
+		t.Errorf("escalated_to = %v", payload["escalated_to"])
+	}
+	if payload["escalation_reason"] != "peer_timeout" {
+		t.Errorf("escalation_reason = %v", payload["escalation_reason"])
+	}
+	if payload["observed_at"] != fixedTime.Format(time.RFC3339Nano) {
+		t.Errorf("observed_at = %v", payload["observed_at"])
+	}
+}
+
+func TestEmitEscalated_ValidationFailures(t *testing.T) {
+	t.Parallel()
+
+	conv := mustUUID(t, fixedConversationID)
+	org := mustUUID(t, fixedOrganizationID)
+	cases := []struct {
+		name string
+		evt  audit.EscalatedEvent
+	}{
+		{"zero conv", audit.EscalatedEvent{OrganizationID: org, EscalatedTo: "wk", ObservedAt: fixedTime}},
+		{"zero org", audit.EscalatedEvent{ConversationID: conv, EscalatedTo: "wk", ObservedAt: fixedTime}},
+		{"empty escalated_to", audit.EscalatedEvent{ConversationID: conv, OrganizationID: org, ObservedAt: fixedTime}},
+		{"whitespace escalated_to", audit.EscalatedEvent{ConversationID: conv, OrganizationID: org, EscalatedTo: "   ", ObservedAt: fixedTime}},
+		{"zero observed_at", audit.EscalatedEvent{ConversationID: conv, OrganizationID: org, EscalatedTo: "wk"}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w, rec := newWriter(t)
+			_, err := w.EmitEscalated(context.Background(), tc.evt)
+			if !errors.Is(err, audit.ErrInvalidEvent) {
+				t.Errorf("err = %v, want ErrInvalidEvent", err)
+			}
+			if rec.count() != 0 {
+				t.Errorf("appender called on invalid event")
+			}
+		})
+	}
+}
+
 func TestWriter_ConcurrentEmits(t *testing.T) {
 	t.Parallel()
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -57,6 +58,14 @@ func (r *recordingAuditor) EmitMessageSent(_ context.Context, _ audit.MessageSen
 
 func (r *recordingAuditor) EmitMessageReceived(_ context.Context, _ audit.MessageReceivedEvent) (string, error) {
 	return "", errors.New("recordingAuditor: EmitMessageReceived not used in lifecycle tests")
+}
+
+func (r *recordingAuditor) EmitOverBudget(_ context.Context, _ audit.OverBudgetEvent) (string, error) {
+	return "", errors.New("recordingAuditor: EmitOverBudget not used in lifecycle tests")
+}
+
+func (r *recordingAuditor) EmitEscalated(_ context.Context, _ audit.EscalatedEvent) (string, error) {
+	return "", errors.New("recordingAuditor: EmitEscalated not used in lifecycle tests")
 }
 
 func (r *recordingAuditor) openedSnapshot() []audit.ConversationOpenedEvent {
@@ -258,6 +267,105 @@ func TestLifecycle_Close_AuditEmitFailureDoesNotPropagate(t *testing.T) {
 	if len(auditor.closedSnapshot()) != 1 {
 		t.Errorf("auditor not called")
 	}
+}
+
+// TestLifecycle_Open_EmitsAuditWhenCallerCtxCancelledAfterBind pins
+// the iter-1 codex Major fix: an audit emit must run under a
+// detached ctx so a caller-side cancellation arriving after the row
+// + Slack channel are bound (post-state-mutation) does NOT
+// systematically drop the audit row.
+func TestLifecycle_Open_EmitsAuditWhenCallerCtxCancelledAfterBind(t *testing.T) {
+	t.Parallel()
+
+	slack := &fakeSlackChannels{createReturns: "C-abc"}
+	auditor := &recordingAuditor{}
+	// Wrap repo.Get to cancel the caller's ctx AFTER the post-bind
+	// refresh succeeds, simulating a downstream caller that cancels
+	// the context as soon as the lifecycle returns.
+	repo := newRepo(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelOnGet := &cancelAfterGetRepo{repo: repo, cancel: cancel}
+	lc := k2k.NewLifecycle(k2k.LifecycleDeps{
+		Repo:    cancelOnGet,
+		Slack:   slack,
+		Auditor: auditor,
+	})
+
+	_, err := lc.Open(ctx, k2k.OpenParams{
+		OrganizationID: uuid.New(),
+		Participants:   []string{"wk-a"},
+		Subject:        "review",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// The caller's ctx was cancelled DURING Open (right after the
+	// post-bind Get). With detached audit ctx, the emit still
+	// succeeds.
+	if got := len(auditor.openedSnapshot()); got != 1 {
+		t.Errorf("audit emits = %d, want 1 (detached ctx must allow emit despite caller cancel)", got)
+	}
+}
+
+// cancelAfterGetRepo is a Repository decorator that cancels the
+// supplied cancel func right after a successful Get returns. Used to
+// simulate a caller-side cancellation arriving between Repo.Get and
+// the lifecycle's audit emit so the detached-ctx fix can be
+// pinned.
+type cancelAfterGetRepo struct {
+	repo   k2k.Repository
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	called bool
+}
+
+func (c *cancelAfterGetRepo) Get(ctx context.Context, id uuid.UUID) (k2k.Conversation, error) {
+	conv, err := c.repo.Get(ctx, id)
+	if err == nil {
+		c.mu.Lock()
+		firstCall := !c.called
+		c.called = true
+		c.mu.Unlock()
+		// Only cancel on the post-bind refresh (the second Get).
+		// The lifecycle's Open() calls Get exactly once (the refresh
+		// after bind); other Get callers in setup don't trigger.
+		if !firstCall {
+			c.cancel()
+		}
+	}
+	return conv, err
+}
+
+func (c *cancelAfterGetRepo) Open(ctx context.Context, p k2k.OpenParams) (k2k.Conversation, error) {
+	return c.repo.Open(ctx, p)
+}
+
+func (c *cancelAfterGetRepo) List(ctx context.Context, f k2k.ListFilter) ([]k2k.Conversation, error) {
+	return c.repo.List(ctx, f)
+}
+
+func (c *cancelAfterGetRepo) Close(ctx context.Context, id uuid.UUID, reason string) error {
+	return c.repo.Close(ctx, id, reason)
+}
+
+func (c *cancelAfterGetRepo) IncTokens(ctx context.Context, id uuid.UUID, n int64) (int64, error) {
+	return c.repo.IncTokens(ctx, id, n)
+}
+
+func (c *cancelAfterGetRepo) BindSlackChannel(ctx context.Context, id uuid.UUID, ch string) error {
+	return c.repo.BindSlackChannel(ctx, id, ch)
+}
+
+func (c *cancelAfterGetRepo) AppendMessage(ctx context.Context, p k2k.AppendMessageParams) (k2k.Message, error) {
+	return c.repo.AppendMessage(ctx, p)
+}
+
+func (c *cancelAfterGetRepo) SetCloseSummary(ctx context.Context, id uuid.UUID, s string) error {
+	return c.repo.SetCloseSummary(ctx, id, s)
+}
+
+func (c *cancelAfterGetRepo) WaitForReply(ctx context.Context, id uuid.UUID, since time.Time, timeout time.Duration) (k2k.Message, error) {
+	return c.repo.WaitForReply(ctx, id, since, timeout)
 }
 
 func TestLifecycle_Open_DefensiveCopyOfParticipantsToAuditPayload(t *testing.T) {

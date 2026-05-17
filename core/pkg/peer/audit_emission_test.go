@@ -46,6 +46,14 @@ func (r *recordingAuditor) EmitMessageSent(_ context.Context, evt audit.MessageS
 	return "row-sent", nil
 }
 
+func (r *recordingAuditor) EmitOverBudget(_ context.Context, _ audit.OverBudgetEvent) (string, error) {
+	return "", errors.New("recordingAuditor: EmitOverBudget not used in peer tests")
+}
+
+func (r *recordingAuditor) EmitEscalated(_ context.Context, _ audit.EscalatedEvent) (string, error) {
+	return "", errors.New("recordingAuditor: EmitEscalated not used in peer tests")
+}
+
 func (r *recordingAuditor) EmitMessageReceived(_ context.Context, evt audit.MessageReceivedEvent) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -371,6 +379,70 @@ func TestTool_Reply_AuditEmitFailureDoesNotPropagate(t *testing.T) {
 		Body:                []byte("done"),
 	}); err != nil {
 		t.Fatalf("Reply error-propagation when audit fails: %v (expected nil — audit is best-effort)", err)
+	}
+}
+
+// TestTool_Ask_SameTickRequestReplyDelivers pins the iter-1 codex
+// Major fix: the WaitForReply `since` cursor must be strictly LESS
+// THAN reqMsg.CreatedAt — otherwise a reply landing in the same
+// nanosecond tick under a coarse / fixed clock would not satisfy
+// the strict-greater predicate and the wait would time out.
+func TestTool_Ask_SameTickRequestReplyDelivers(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	target := samplePeer("Lead")
+	// Repository with a fixed clock so both the request and reply
+	// rows stamp identical CreatedAt values.
+	fixedNow := func() time.Time {
+		return time.Date(2026, time.May, 17, 12, 0, 0, 0, time.UTC)
+	}
+	repo := k2k.NewMemoryRepository(fixedNow, nil)
+	pl := &fakePeerLister{peers: []keepclient.Peer{target}}
+	lc := &fakeLifecycle{repo: repo}
+	broker := capability.New()
+	t.Cleanup(func() { _ = broker.Close() })
+	askTok, _ := broker.IssueForOrg(peer.CapabilityAsk, orgID.String(), time.Hour)
+	tool := peer.NewTool(peer.Deps{
+		PeerLister: pl,
+		Lifecycle:  lc,
+		Repository: repo,
+		Capability: broker,
+		Now:        fixedNow,
+	})
+
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			convs, _ := repo.List(context.Background(), k2k.ListFilter{OrganizationID: orgID})
+			if len(convs) >= 1 {
+				_, _ = repo.AppendMessage(context.Background(), k2k.AppendMessageParams{
+					ConversationID:      convs[0].ID,
+					OrganizationID:      orgID,
+					SenderWatchkeeperID: target.WatchkeeperID,
+					Body:                []byte("pong"),
+					Direction:           k2k.MessageDirectionReply,
+				})
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	res, err := tool.Ask(context.Background(), peer.AskParams{
+		ActingWatchkeeperID: "wk-asker",
+		OrganizationID:      orgID,
+		CapabilityToken:     askTok,
+		Target:              target.WatchkeeperID,
+		Subject:             "ping",
+		Body:                []byte("ping"),
+		Timeout:             3 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Ask under fixed clock: %v (expected reply to deliver despite identical CreatedAt)", err)
+	}
+	if string(res.ReplyBody) != "pong" {
+		t.Errorf("ReplyBody = %q, want pong", string(res.ReplyBody))
 	}
 }
 

@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,6 +30,11 @@ const (
 	payloadKeyRecipientWatchkeeperID = "recipient_watchkeeper_id"
 	payloadKeyDirection              = "direction"
 	payloadKeyCreatedAt              = "created_at"
+	payloadKeyTokenBudget            = "token_budget"
+	payloadKeyTokensUsed             = "tokens_used"
+	payloadKeyEscalatedTo            = "escalated_to"
+	payloadKeyEscalationReason       = "escalation_reason"
+	payloadKeyObservedAt             = "observed_at"
 )
 
 // Appender is the minimal subset of [*keeperslog.Writer] the audit
@@ -87,11 +93,26 @@ type Emitter interface {
 	EmitMessageSent(ctx context.Context, evt MessageSentEvent) (string, error)
 
 	// EmitMessageReceived records a [EventMessageReceived] audit row.
-	// Called by [peer.Tool.Reply] for the recipient side of a reply
-	// (the original requester observes the reply); pairs with
+	// Called by [peer.Tool.Ask] for the recipient side of an observed
+	// reply (the original requester observes the reply); pairs with
 	// [EmitMessageSent] so a subscriber can join the two halves of a
 	// round-trip on `conversation_id` + `message_id`.
 	EmitMessageReceived(ctx context.Context, evt MessageReceivedEvent) (string, error)
+
+	// EmitOverBudget records a [EventOverBudget] audit row. M1.4
+	// ships the seam method + payload struct; the production
+	// consumer lands in M1.5 alongside the
+	// [k2k.Repository.IncTokens]-driven budget enforcement. Defining
+	// the method now keeps the long-lived `Emitter` interface
+	// stable across M1.5 / M1.6 so a future leaf does not break
+	// every fake + every compile-time assertion.
+	EmitOverBudget(ctx context.Context, evt OverBudgetEvent) (string, error)
+
+	// EmitEscalated records a [EventEscalated] audit row. M1.4 ships
+	// the seam method + payload struct; the production consumer lands
+	// in M1.6 alongside the escalation saga. Same stability rationale
+	// as [EmitOverBudget].
+	EmitEscalated(ctx context.Context, evt EscalatedEvent) (string, error)
 }
 
 // ConversationOpenedEvent is the closed-set input shape
@@ -193,6 +214,67 @@ type MessageSentEvent struct {
 	CreatedAt time.Time
 }
 
+// OverBudgetEvent is the closed-set input shape
+// [Writer.EmitOverBudget] accepts. M1.4 ships the struct + the
+// emit method; M1.5 will be the production caller (the budget
+// enforcement layer detects an IncTokens crossing the configured
+// cap and emits this event). Hoisted here so the M1.5 leaf joins
+// the existing taxonomy rather than defining a parallel shape.
+type OverBudgetEvent struct {
+	// ConversationID is the persisted [k2k.Conversation.ID] whose
+	// running token counter crossed the configured budget. Required.
+	ConversationID uuid.UUID
+
+	// OrganizationID is the persisted
+	// [k2k.Conversation.OrganizationID]. Required.
+	OrganizationID uuid.UUID
+
+	// TokenBudget is the persisted [k2k.Conversation.TokenBudget]
+	// the conversation was configured with. Stored as int64 to
+	// match the storage column type.
+	TokenBudget int64
+
+	// TokensUsed is the post-increment running counter that
+	// triggered the over-budget detection. Stored as int64 to match
+	// [k2k.Conversation.TokensUsed].
+	TokensUsed int64
+
+	// ObservedAt is the wall-clock time the over-budget was
+	// detected. Required (non-zero).
+	ObservedAt time.Time
+}
+
+// EscalatedEvent is the closed-set input shape
+// [Writer.EmitEscalated] accepts. M1.4 ships the struct + the
+// emit method; M1.6 will be the production caller (the escalation
+// saga detects a peer timeout or a budget overage and routes to
+// the human lead or, on lead unresponsive, to the Watchmaster).
+// Hoisted here so the M1.6 leaf joins the existing taxonomy.
+type EscalatedEvent struct {
+	// ConversationID is the persisted [k2k.Conversation.ID] under
+	// escalation. Required.
+	ConversationID uuid.UUID
+
+	// OrganizationID is the persisted
+	// [k2k.Conversation.OrganizationID]. Required.
+	OrganizationID uuid.UUID
+
+	// EscalatedTo is the target identity the escalation routes to
+	// (the human lead's watchkeeper-equivalent id or, on lead
+	// unresponsive, the Watchmaster's). Required (non-empty after
+	// whitespace-trim).
+	EscalatedTo string
+
+	// EscalationReason is the stable closed-set rationale code
+	// (e.g. `peer_timeout`, `over_budget`, `lead_unresponsive`).
+	// M1.6 owns the closed-set value definition.
+	EscalationReason string
+
+	// ObservedAt is the wall-clock time the escalation was
+	// triggered. Required (non-zero).
+	ObservedAt time.Time
+}
+
 // MessageReceivedEvent is the closed-set input shape
 // [Writer.EmitMessageReceived] accepts. Adds
 // [RecipientWatchkeeperID] vs [MessageSentEvent] so the subscriber
@@ -266,7 +348,7 @@ func (w *Writer) EmitConversationOpened(ctx context.Context, evt ConversationOpe
 	if evt.OrganizationID == uuid.Nil {
 		return "", fmt.Errorf("%w: organization_id must not be zero", ErrInvalidEvent)
 	}
-	if evt.SlackChannelID == "" {
+	if strings.TrimSpace(evt.SlackChannelID) == "" {
 		return "", fmt.Errorf("%w: slack_channel_id must not be empty", ErrInvalidEvent)
 	}
 	if evt.OpenedAt.IsZero() {
@@ -343,7 +425,7 @@ func (w *Writer) EmitMessageReceived(ctx context.Context, evt MessageReceivedEve
 	if err := validateMessageCore(evt.MessageID, evt.ConversationID, evt.OrganizationID, evt.SenderWatchkeeperID, evt.Direction, evt.CreatedAt); err != nil {
 		return "", err
 	}
-	if evt.RecipientWatchkeeperID == "" {
+	if strings.TrimSpace(evt.RecipientWatchkeeperID) == "" {
 		return "", fmt.Errorf("%w: recipient_watchkeeper_id must not be empty", ErrInvalidEvent)
 	}
 
@@ -363,6 +445,65 @@ func (w *Writer) EmitMessageReceived(ctx context.Context, evt MessageReceivedEve
 	})
 }
 
+// EmitOverBudget records a [EventOverBudget] audit row. M1.4 ships
+// the emit method + the payload shape; the production caller lands
+// in M1.5 (budget enforcement). Validation runs BEFORE the appender
+// round-trip; a malformed event returns [ErrInvalidEvent] without
+// touching keeperslog.
+func (w *Writer) EmitOverBudget(ctx context.Context, evt OverBudgetEvent) (string, error) {
+	if evt.ConversationID == uuid.Nil {
+		return "", fmt.Errorf("%w: conversation_id must not be zero", ErrInvalidEvent)
+	}
+	if evt.OrganizationID == uuid.Nil {
+		return "", fmt.Errorf("%w: organization_id must not be zero", ErrInvalidEvent)
+	}
+	if evt.ObservedAt.IsZero() {
+		return "", fmt.Errorf("%w: observed_at must not be zero", ErrInvalidEvent)
+	}
+
+	payload := map[string]any{
+		payloadKeyConversationID: evt.ConversationID.String(),
+		payloadKeyOrganizationID: evt.OrganizationID.String(),
+		payloadKeyTokenBudget:    evt.TokenBudget,
+		payloadKeyTokensUsed:     evt.TokensUsed,
+		payloadKeyObservedAt:     evt.ObservedAt.UTC().Format(time.RFC3339Nano),
+	}
+	return w.appender.Append(ctx, keeperslog.Event{
+		EventType: EventOverBudget,
+		Payload:   payload,
+	})
+}
+
+// EmitEscalated records a [EventEscalated] audit row. M1.4 ships
+// the emit method + the payload shape; the production caller lands
+// in M1.6 (escalation saga).
+func (w *Writer) EmitEscalated(ctx context.Context, evt EscalatedEvent) (string, error) {
+	if evt.ConversationID == uuid.Nil {
+		return "", fmt.Errorf("%w: conversation_id must not be zero", ErrInvalidEvent)
+	}
+	if evt.OrganizationID == uuid.Nil {
+		return "", fmt.Errorf("%w: organization_id must not be zero", ErrInvalidEvent)
+	}
+	if strings.TrimSpace(evt.EscalatedTo) == "" {
+		return "", fmt.Errorf("%w: escalated_to must not be empty", ErrInvalidEvent)
+	}
+	if evt.ObservedAt.IsZero() {
+		return "", fmt.Errorf("%w: observed_at must not be zero", ErrInvalidEvent)
+	}
+
+	payload := map[string]any{
+		payloadKeyConversationID:   evt.ConversationID.String(),
+		payloadKeyOrganizationID:   evt.OrganizationID.String(),
+		payloadKeyEscalatedTo:      evt.EscalatedTo,
+		payloadKeyEscalationReason: evt.EscalationReason,
+		payloadKeyObservedAt:       evt.ObservedAt.UTC().Format(time.RFC3339Nano),
+	}
+	return w.appender.Append(ctx, keeperslog.Event{
+		EventType: EventEscalated,
+		Payload:   payload,
+	})
+}
+
 // validateMessageCore reports a wrapped [ErrInvalidEvent] for any
 // zero-valued required field on a message-shaped event. Hoisted so
 // the two message emitters share one validator + the test surface
@@ -377,10 +518,10 @@ func validateMessageCore(messageID, conversationID, organizationID uuid.UUID, se
 	if organizationID == uuid.Nil {
 		return fmt.Errorf("%w: organization_id must not be zero", ErrInvalidEvent)
 	}
-	if senderID == "" {
+	if strings.TrimSpace(senderID) == "" {
 		return fmt.Errorf("%w: sender_watchkeeper_id must not be empty", ErrInvalidEvent)
 	}
-	if direction == "" {
+	if strings.TrimSpace(direction) == "" {
 		return fmt.Errorf("%w: direction must not be empty", ErrInvalidEvent)
 	}
 	if createdAt.IsZero() {

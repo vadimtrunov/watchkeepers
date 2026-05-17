@@ -32,6 +32,15 @@ const (
 	CapabilityReply = "peer:reply"
 )
 
+// auditEmitTimeout caps the detached-ctx window the M1.4 audit emit
+// runs under from [Tool.Ask] / [Tool.Reply]. The emit is best-effort
+// observability; a 5-second cap is long enough that a healthy
+// keeperslog Append completes under any realistic backpressure but
+// short enough that a degenerate Keep outage cannot tie up the
+// caller's tool-call return indefinitely. Mirrors the matching
+// constant in `core/pkg/k2k/lifecycle.go` (iter-1 codex Major fix).
+const auditEmitTimeout = 5 * time.Second
+
 // Lister is the narrow seam [Tool.Ask] consumes from
 // [keepclient.Client]. The interface is the unit-test seam:
 // production wiring satisfies it with `*keepclient.Client`; tests
@@ -167,14 +176,19 @@ type Deps struct {
 	// Auditor is the M1.4 K2K audit-emission seam — typically a
 	// [*audit.Writer] in production wiring. OPTIONAL: nil is permitted
 	// so M1.3.a-era callers wiring the tool without an audit sink stay
-	// valid. When non-nil, [Tool.Ask] emits [audit.EventMessageSent]
-	// after persisting the request, [Tool.Reply] emits both
-	// [audit.EventMessageSent] (replier side) and
-	// [audit.EventMessageReceived] (original requester side) after
-	// persisting the reply, and [Tool.Close] performs no audit emit at
-	// the peer layer because the [k2k.Lifecycle] layer already emits
-	// [audit.EventConversationClosed] for it. Mirrors the M1.3.c
-	// [EventBus] optional-dep discipline.
+	// valid. Emit responsibilities split as follows:
+	//   - [Tool.Ask] emits [audit.EventMessageSent] (request append) +
+	//     [audit.EventMessageReceived] (observed reply) so a subscriber
+	//     can join the two halves of a round-trip on `conversation_id`
+	//     + `message_id`.
+	//   - [Tool.Reply] emits [audit.EventMessageSent] from the
+	//     replier's viewpoint (sender side). The recipient-side
+	//     `audit.EventMessageReceived` is emitted by the original
+	//     requester's [Tool.Ask] flow, NOT by this Reply call.
+	//   - [Tool.Close] performs no audit emit at the peer layer
+	//     because the [k2k.Lifecycle] layer already emits
+	//     [audit.EventConversationClosed] for it.
+	// Mirrors the M1.3.c [EventBus] optional-dep discipline.
 	Auditor audit.Emitter
 
 	// Now overrides the wall-clock used to compute the `since` cursor

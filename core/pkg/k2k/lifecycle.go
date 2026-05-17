@@ -68,6 +68,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -78,6 +79,15 @@ import (
 // channel name. Surfaced as a constant so a future M1.7 channel-name
 // audit can match the pattern via a single source of truth.
 const channelNamePrefix = "k2k-"
+
+// auditEmitTimeout caps the detached-ctx window the M1.4 audit emit
+// runs under. The emit is best-effort observability; a 5-second cap
+// is long enough that a healthy keeperslog Append completes under
+// any realistic backpressure but short enough that a degenerate Keep
+// outage cannot tie up the caller's lifecycle / peer-tool return
+// indefinitely. Tuned to the same order of magnitude as the M9.4.a
+// publisher timeout discipline.
+const auditEmitTimeout = 5 * time.Second
 
 // conversationIDPrefixLen is the number of leading UUID hex characters
 // the [DeriveChannelName] helper consumes. Eight chars is the minimum
@@ -324,9 +334,15 @@ func (l *Lifecycle) Open(ctx context.Context, params OpenParams) (Conversation, 
 	// the state any subsequent reader can observe. A nil Auditor is a
 	// no-op (M1.1.c-era wirings stayed valid by design); an emit
 	// failure is logged but does NOT propagate — the lifecycle's
-	// success is gated on persisted state, not observability.
+	// success is gated on persisted state, not observability. The
+	// emit runs under a detached ctx (`context.WithoutCancel` + a
+	// short timeout) so a caller-side cancellation arriving after the
+	// state mutation succeeded does NOT systematically drop the audit
+	// row (iter-1 codex Major fix).
 	if l.deps.Auditor != nil {
-		_, _ = l.deps.Auditor.EmitConversationOpened(ctx, audit.ConversationOpenedEvent{
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditEmitTimeout)
+		defer cancel()
+		_, _ = l.deps.Auditor.EmitConversationOpened(auditCtx, audit.ConversationOpenedEvent{
 			ConversationID: bound.ID,
 			OrganizationID: bound.OrganizationID,
 			Participants:   bound.Participants,
@@ -398,11 +414,16 @@ func (l *Lifecycle) Close(ctx context.Context, id uuid.UUID, reason string) erro
 	// propagate — the close's success is gated on persisted state, not
 	// observability. The post-close Get re-reads the row so the emitted
 	// `closed_at` matches the persisted column rather than a wall-clock
-	// approximation.
+	// approximation. The Get + emit both run under a detached ctx so a
+	// caller-side cancellation arriving after Repo.Close succeeded does
+	// NOT systematically drop the close audit row (iter-1 codex Major
+	// fix).
 	if l.deps.Auditor != nil {
-		closed, getErr := l.deps.Repo.Get(ctx, id)
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditEmitTimeout)
+		defer cancel()
+		closed, getErr := l.deps.Repo.Get(auditCtx, id)
 		if getErr == nil {
-			_, _ = l.deps.Auditor.EmitConversationClosed(ctx, audit.ConversationClosedEvent{
+			_, _ = l.deps.Auditor.EmitConversationClosed(auditCtx, audit.ConversationClosedEvent{
 				ConversationID: closed.ID,
 				OrganizationID: closed.OrganizationID,
 				CloseReason:    closed.CloseReason,

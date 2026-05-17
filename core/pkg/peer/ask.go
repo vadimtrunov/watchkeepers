@@ -213,15 +213,6 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 		return AskResult{}, fmt.Errorf("peer: ask: open conversation: %w", err)
 	}
 
-	// Capture the wall-clock BEFORE the AppendMessage so the
-	// WaitForReply `since` cursor is strictly earlier than the
-	// reply's `created_at`. The cursor is exclusive on the storage
-	// side; using a pre-append timestamp here guarantees a reply
-	// stamped at exactly the AppendMessage's `created_at` would NOT
-	// satisfy the wait (which is the correct semantic — the request
-	// is not its own reply).
-	since := t.now().UTC()
-
 	reqMsg, err := t.deps.Repository.AppendMessage(ctx, k2k.AppendMessageParams{
 		ConversationID:      conv.ID,
 		OrganizationID:      params.OrganizationID,
@@ -233,11 +224,32 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 		return AskResult{}, fmt.Errorf("peer: ask: append request: %w", err)
 	}
 
+	// Anchor the WaitForReply cursor strictly BELOW the persisted
+	// request's `CreatedAt` (iter-1 codex Major fix). The storage-layer
+	// `WaitForReply` cursor is exclusive (`created_at > since`); a
+	// pre-AppendMessage `t.now()` could equal `reqMsg.CreatedAt` under
+	// a fixed / coarse clock (test fixture, low-resolution platform
+	// monotonic source). With `since == reqMsg.CreatedAt` a reply
+	// stamped at the same tick would also have `created_at ==
+	// reqMsg.CreatedAt` and the strict-greater predicate drops it —
+	// the wait then times out even though a valid reply arrived.
+	// Anchoring at `reqMsg.CreatedAt - 1ns` keeps the cursor strictly
+	// less than the request row AND strictly less than any reply that
+	// shares the request's tick. The semantic invariant "the request
+	// is not its own reply" still holds because the request row is a
+	// `request`-direction message and `WaitForReply` filters by
+	// direction inside the storage layer.
+	since := reqMsg.CreatedAt.Add(-time.Nanosecond)
+
 	// M1.4 audit emission for the request append. Nil Auditor is a
 	// no-op; an emit failure is logged but does NOT propagate — the
 	// peer-tool surface is gated on persisted state, not observability.
+	// Runs under a detached ctx (iter-1 codex Major fix) so a
+	// caller-side cancellation arriving after AppendMessage succeeded
+	// does NOT systematically drop the audit row.
 	if t.deps.Auditor != nil {
-		_, _ = t.deps.Auditor.EmitMessageSent(ctx, audit.MessageSentEvent{
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditEmitTimeout)
+		_, _ = t.deps.Auditor.EmitMessageSent(auditCtx, audit.MessageSentEvent{
 			MessageID:           reqMsg.ID,
 			ConversationID:      conv.ID,
 			OrganizationID:      params.OrganizationID,
@@ -245,6 +257,7 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 			Direction:           string(k2k.MessageDirectionRequest),
 			CreatedAt:           reqMsg.CreatedAt,
 		})
+		cancel()
 	}
 
 	reply, err := t.deps.Repository.WaitForReply(ctx, conv.ID, since, params.Timeout)
@@ -258,9 +271,11 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 	// M1.4 audit emission for the observed reply (receiver side). The
 	// replier's `peer.Reply` emits the sender side; this emit captures
 	// the round-trip's recipient view so a subscriber can join the two
-	// halves on `conversation_id` + `message_id`.
+	// halves on `conversation_id` + `message_id`. Detached ctx (same
+	// rationale as the request emit above).
 	if t.deps.Auditor != nil {
-		_, _ = t.deps.Auditor.EmitMessageReceived(ctx, audit.MessageReceivedEvent{
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditEmitTimeout)
+		_, _ = t.deps.Auditor.EmitMessageReceived(auditCtx, audit.MessageReceivedEvent{
 			MessageID:              reply.ID,
 			ConversationID:         conv.ID,
 			OrganizationID:         params.OrganizationID,
@@ -269,6 +284,7 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 			Direction:              string(k2k.MessageDirectionReply),
 			CreatedAt:              reply.CreatedAt,
 		})
+		cancel()
 	}
 
 	// Defensive deep-copy on the way out so the caller cannot bleed

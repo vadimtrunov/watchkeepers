@@ -163,9 +163,12 @@ func (t *Tool) Reply(ctx context.Context, params ReplyParams) error {
 	// — a subscriber joins the two halves on `conversation_id` +
 	// `message_id`. Nil Auditor is a no-op; an emit failure is logged
 	// but does NOT propagate — the persisted state is the load-bearing
-	// surface.
+	// surface. Detached ctx (iter-1 codex Major fix) so a caller-side
+	// cancellation arriving after AppendMessage succeeded does NOT
+	// systematically drop the audit row.
 	if t.deps.Auditor != nil {
-		_, _ = t.deps.Auditor.EmitMessageSent(ctx, audit.MessageSentEvent{
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditEmitTimeout)
+		_, _ = t.deps.Auditor.EmitMessageSent(auditCtx, audit.MessageSentEvent{
 			MessageID:           replyMsg.ID,
 			ConversationID:      params.ConversationID,
 			OrganizationID:      params.OrganizationID,
@@ -173,6 +176,7 @@ func (t *Tool) Reply(ctx context.Context, params ReplyParams) error {
 			Direction:           string(k2k.MessageDirectionReply),
 			CreatedAt:           replyMsg.CreatedAt,
 		})
+		cancel()
 	}
 	return nil
 }
