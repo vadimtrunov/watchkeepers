@@ -16,11 +16,18 @@
 //	      OR (uuid.Nil, nil, ErrPeerCapabilityDenied) on capability deny.
 //
 // audit discipline: this file does NOT import `keeperslog` and does
-// NOT call `.Append(`. The K2K message-sent / conversation-opened
-// audit taxonomy is owned by the M1.4 audit subscriber; this file is
-// the call surface, not the audit sink. A source-grep AC test pins
-// this so a future contributor adding inline audit emission here
-// trips a fast-failing test.
+// NOT call `.Append(`. The K2K message-sent / conversation-opened /
+// message-received audit taxonomy is owned by the M1.4
+// `k2k/audit.Emitter` seam — typed interface composed via
+// `Deps.Auditor` (an OPTIONAL dep; nil-permissive so M1.3.a-era
+// wirings stay valid). On a successful Ask the file emits
+// `audit.EventMessageSent` for the request append and
+// `audit.EventMessageReceived` for the observed reply; the
+// `audit.EventConversationOpened` row is emitted by the M1.1.c
+// lifecycle layer (the row+channel ownership lives there). A
+// source-grep AC test pins the keeperslog/Append ban so a future
+// contributor adding inline keeperslog calls here trips a
+// fast-failing test.
 //
 // PII discipline: the `body` payload is treated as opaque bytes. The
 // implementation defensively deep-copies the input + the result so
@@ -39,6 +46,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/audit"
 )
 
 // AskParams is the closed-set input shape [Tool.Ask] accepts. Hoisted
@@ -214,14 +222,29 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 	// is not its own reply).
 	since := t.now().UTC()
 
-	if _, err := t.deps.Repository.AppendMessage(ctx, k2k.AppendMessageParams{
+	reqMsg, err := t.deps.Repository.AppendMessage(ctx, k2k.AppendMessageParams{
 		ConversationID:      conv.ID,
 		OrganizationID:      params.OrganizationID,
 		SenderWatchkeeperID: params.ActingWatchkeeperID,
 		Body:                reqBody,
 		Direction:           k2k.MessageDirectionRequest,
-	}); err != nil {
+	})
+	if err != nil {
 		return AskResult{}, fmt.Errorf("peer: ask: append request: %w", err)
+	}
+
+	// M1.4 audit emission for the request append. Nil Auditor is a
+	// no-op; an emit failure is logged but does NOT propagate — the
+	// peer-tool surface is gated on persisted state, not observability.
+	if t.deps.Auditor != nil {
+		_, _ = t.deps.Auditor.EmitMessageSent(ctx, audit.MessageSentEvent{
+			MessageID:           reqMsg.ID,
+			ConversationID:      conv.ID,
+			OrganizationID:      params.OrganizationID,
+			SenderWatchkeeperID: params.ActingWatchkeeperID,
+			Direction:           string(k2k.MessageDirectionRequest),
+			CreatedAt:           reqMsg.CreatedAt,
+		})
 	}
 
 	reply, err := t.deps.Repository.WaitForReply(ctx, conv.ID, since, params.Timeout)
@@ -230,6 +253,22 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 			return AskResult{}, fmt.Errorf("%w: %w", ErrPeerTimeout, err)
 		}
 		return AskResult{}, fmt.Errorf("peer: ask: wait for reply: %w", err)
+	}
+
+	// M1.4 audit emission for the observed reply (receiver side). The
+	// replier's `peer.Reply` emits the sender side; this emit captures
+	// the round-trip's recipient view so a subscriber can join the two
+	// halves on `conversation_id` + `message_id`.
+	if t.deps.Auditor != nil {
+		_, _ = t.deps.Auditor.EmitMessageReceived(ctx, audit.MessageReceivedEvent{
+			MessageID:              reply.ID,
+			ConversationID:         conv.ID,
+			OrganizationID:         params.OrganizationID,
+			SenderWatchkeeperID:    reply.SenderWatchkeeperID,
+			RecipientWatchkeeperID: params.ActingWatchkeeperID,
+			Direction:              string(k2k.MessageDirectionReply),
+			CreatedAt:              reply.CreatedAt,
+		})
 	}
 
 	// Defensive deep-copy on the way out so the caller cannot bleed

@@ -14,9 +14,17 @@
 //	     → return nil on success.
 //
 // audit discipline: this file does NOT import `keeperslog` and does
-// NOT call `.Append(`. The K2K message-sent audit taxonomy is owned
-// by the M1.4 audit subscriber; this file is the call surface, not
-// the audit sink. Source-grep AC test pins this.
+// NOT call `.Append(`. The K2K message-sent audit taxonomy is emitted
+// through the M1.4 `k2k/audit.Emitter` seam (typed interface) wired
+// via `Deps.Auditor` (OPTIONAL; nil-permissive so M1.3.a-era wirings
+// stay valid). On a successful Reply this file emits
+// `audit.EventMessageSent` (the replier-side row). The original
+// requester's recipient-side `audit.EventMessageReceived` is emitted
+// by the `peer.Tool.Ask` flow when its `WaitForReply` unblocks — a
+// subscriber joins the two on `conversation_id` + `message_id`. A
+// source-grep AC test pins the keeperslog/Append ban so a future
+// contributor adding inline keeperslog calls here trips a
+// fast-failing test.
 //
 // PII discipline: the `body` payload is treated as opaque bytes.
 // Defensively deep-copied before persistence so caller-side mutation
@@ -33,6 +41,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/audit"
 )
 
 // ReplyParams is the closed-set input shape [Tool.Reply] accepts.
@@ -134,17 +143,36 @@ func (t *Tool) Reply(ctx context.Context, params ReplyParams) error {
 	body := make([]byte, len(params.Body))
 	copy(body, params.Body)
 
-	if _, err := t.deps.Repository.AppendMessage(ctx, k2k.AppendMessageParams{
+	replyMsg, err := t.deps.Repository.AppendMessage(ctx, k2k.AppendMessageParams{
 		ConversationID:      params.ConversationID,
 		OrganizationID:      params.OrganizationID,
 		SenderWatchkeeperID: params.ActingWatchkeeperID,
 		Body:                body,
 		Direction:           k2k.MessageDirectionReply,
-	}); err != nil {
+	})
+	if err != nil {
 		if errors.Is(err, k2k.ErrAlreadyArchived) {
 			return fmt.Errorf("%w: %w", ErrPeerConversationClosed, err)
 		}
 		return fmt.Errorf("peer: reply: append reply: %w", err)
+	}
+
+	// M1.4 audit emission for the reply append (sender side). The
+	// recipient-side `audit.EventMessageReceived` is emitted by the
+	// original requester's `Tool.Ask` when its `WaitForReply` returns
+	// — a subscriber joins the two halves on `conversation_id` +
+	// `message_id`. Nil Auditor is a no-op; an emit failure is logged
+	// but does NOT propagate — the persisted state is the load-bearing
+	// surface.
+	if t.deps.Auditor != nil {
+		_, _ = t.deps.Auditor.EmitMessageSent(ctx, audit.MessageSentEvent{
+			MessageID:           replyMsg.ID,
+			ConversationID:      params.ConversationID,
+			OrganizationID:      params.OrganizationID,
+			SenderWatchkeeperID: params.ActingWatchkeeperID,
+			Direction:           string(k2k.MessageDirectionReply),
+			CreatedAt:           replyMsg.CreatedAt,
+		})
 	}
 	return nil
 }

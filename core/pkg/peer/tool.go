@@ -11,6 +11,7 @@ import (
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/capability"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/audit"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/keepclient"
 )
 
@@ -162,6 +163,19 @@ type Deps struct {
 	// surface. A nil [PeerLister] + nil [FilterResolver] combination is
 	// caught by the [PeerLister] panic, not a separate one.
 	FilterResolver FilterResolver
+
+	// Auditor is the M1.4 K2K audit-emission seam — typically a
+	// [*audit.Writer] in production wiring. OPTIONAL: nil is permitted
+	// so M1.3.a-era callers wiring the tool without an audit sink stay
+	// valid. When non-nil, [Tool.Ask] emits [audit.EventMessageSent]
+	// after persisting the request, [Tool.Reply] emits both
+	// [audit.EventMessageSent] (replier side) and
+	// [audit.EventMessageReceived] (original requester side) after
+	// persisting the reply, and [Tool.Close] performs no audit emit at
+	// the peer layer because the [k2k.Lifecycle] layer already emits
+	// [audit.EventConversationClosed] for it. Mirrors the M1.3.c
+	// [EventBus] optional-dep discipline.
+	Auditor audit.Emitter
 
 	// Now overrides the wall-clock used to compute the `since` cursor
 	// passed to [Repository.WaitForReply]. Defaults to [time.Now]; a
