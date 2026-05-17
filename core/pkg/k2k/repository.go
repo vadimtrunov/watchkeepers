@@ -226,6 +226,48 @@ type Repository interface {
 	// this notification.
 	AppendMessage(ctx context.Context, params AppendMessageParams) (Message, error)
 
+	// SetCloseSummary writes a one-line operator-facing summary onto an
+	// already-archived conversation row. Driven by the M1.3.b
+	// `peer.Close` flow AFTER `Lifecycle.Close` archives the row: the
+	// peer-tool layer composes the two so the persisted state reflects
+	// `(status='archived', close_reason=<lifecycle reason>,
+	// close_summary=<peer.Close summary>)` after a successful close.
+	//
+	// The summary is distinct from [Conversation.CloseReason]: the
+	// reason is the lifecycle-layer rationale (a closed-set code in the
+	// M1.6 escalation path); the summary is the human-readable one-liner
+	// the M1.7 archive-on-summary writer will later cross-link into the
+	// Keep knowledge chunk.
+	//
+	// Validation order (fail-fast precedes persistence):
+	//   1. ctx.Err — refuses a pre-cancelled ctx.
+	//   2. id != uuid.Nil — [ErrConversationNotFound] otherwise.
+	//
+	// An empty / whitespace-only summary is allowed at this surface so a
+	// caller that wants to record the lifecycle close without an
+	// operator summary (e.g. an M1.6 auto-archive) can call into the
+	// same seam — the column default is empty string, and an explicit
+	// empty write is a no-op equivalent in terms of stored state.
+	//
+	// Resolution order:
+	//   - Unknown id — [ErrConversationNotFound].
+	//   - Row in [StatusOpen] — [ErrConversationNotArchived]
+	//     (programmer bug: the caller forgot to drive [Repository.Close]
+	//     first).
+	//   - Row in [StatusArchived] — atomic UPDATE writes the supplied
+	//     summary onto the row. The storage contract is last-write-wins
+	//     by consequence (concurrent / replayed writes overwrite each
+	//     other) — NOT a feature inviting consumers to call repeatedly.
+	//     The peer-tool layer is the sole writer and is responsible for
+	//     short-circuiting on a non-empty existing summary so the first
+	//     close's summary persists across retries; see `peer.Close`
+	//     idempotency contract.
+	//
+	// The in-memory adapter mirrors the Postgres conditional-UPDATE
+	// shape under its single write-lock so concurrent calls compose
+	// correctly.
+	SetCloseSummary(ctx context.Context, id uuid.UUID, summary string) error
+
 	// WaitForReply blocks until a `reply`-direction [Message] is
 	// appended to `conversationID` whose `CreatedAt` strictly exceeds
 	// `since`, or until `timeout` elapses. The cursor anchor `since` is

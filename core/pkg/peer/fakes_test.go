@@ -49,11 +49,17 @@ func (f *fakePeerLister) ListPeers(_ context.Context, req keepclient.ListPeersRe
 // repository (via fakeRepo) for the real persistence work but routes
 // Open() through this fake to skip Slack channel I/O.
 type fakeLifecycle struct {
-	mu       sync.Mutex
-	repo     *k2k.MemoryRepository
-	openErr  error
-	lastOpen k2k.OpenParams
-	calls    int
+	mu        sync.Mutex
+	repo      *k2k.MemoryRepository
+	openErr   error
+	lastOpen  k2k.OpenParams
+	calls     int
+	closeErr  error
+	lastClose struct {
+		id     uuid.UUID
+		reason string
+	}
+	closeCalls int
 }
 
 func (f *fakeLifecycle) Open(ctx context.Context, params k2k.OpenParams) (k2k.Conversation, error) {
@@ -65,6 +71,24 @@ func (f *fakeLifecycle) Open(ctx context.Context, params k2k.OpenParams) (k2k.Co
 		return k2k.Conversation{}, f.openErr
 	}
 	return f.repo.Open(ctx, params)
+}
+
+// Close routes through to the in-memory repository's Repository.Close
+// so the persisted row reflects the archived state. Tests that want to
+// pin a lifecycle-level error path override `closeErr` to short-circuit
+// without driving the repo (so the repo's status remains StatusOpen and
+// the test can assert "no persisted side effect from the lifecycle
+// error").
+func (f *fakeLifecycle) Close(ctx context.Context, id uuid.UUID, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastClose.id = id
+	f.lastClose.reason = reason
+	f.closeCalls++
+	if f.closeErr != nil {
+		return f.closeErr
+	}
+	return f.repo.Close(ctx, id, reason)
 }
 
 // fakeCapability records every ValidateForOrg call and decides admit /

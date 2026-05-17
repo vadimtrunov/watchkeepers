@@ -240,6 +240,7 @@ func scanConversation(row pgx.Row) (Conversation, error) {
 		closedAt         *time.Time
 		correlationID    *uuid.UUID
 		closeReasonText  *string
+		closeSummaryText *string
 		fetchedTokenBdgt int64
 		fetchedTokensUsd int64
 	)
@@ -249,7 +250,7 @@ func scanConversation(row pgx.Row) (Conversation, error) {
 		&c.Participants, &c.Subject, &statusText,
 		&fetchedTokenBdgt, &fetchedTokensUsd,
 		&c.OpenedAt, &closedAt,
-		&correlationID, &closeReasonText,
+		&correlationID, &closeReasonText, &closeSummaryText,
 	); err != nil {
 		return Conversation{}, err
 	}
@@ -269,6 +270,9 @@ func scanConversation(row pgx.Row) (Conversation, error) {
 	if closeReasonText != nil {
 		c.CloseReason = *closeReasonText
 	}
+	if closeSummaryText != nil {
+		c.CloseSummary = *closeSummaryText
+	}
 	return c, nil
 }
 
@@ -277,7 +281,7 @@ func scanConversation(row pgx.Row) (Conversation, error) {
 // touches one place.
 const selectColumns = `id, organization_id, slack_channel_id,
        participants, subject, status, token_budget, tokens_used,
-       opened_at, closed_at, correlation_id, close_reason`
+       opened_at, closed_at, correlation_id, close_reason, close_summary`
 
 // Get implements [Repository.Get]. A miss surfaces
 // [ErrConversationNotFound] wrapped with the requested id; an RLS
@@ -448,6 +452,59 @@ WHERE id = $2 AND status = 'open' AND slack_channel_id IS NULL`
 	// operation; surface as a wrapped error so a future state-machine
 	// addition surfaces loudly.
 	return fmt.Errorf("k2k: bind slack channel: unexpected zero rows for id %s (status=%q)", id, status)
+}
+
+// SetCloseSummary implements [Repository.SetCloseSummary]. The
+// conditional UPDATE matches only rows whose `status` is currently
+// 'archived', so the summary write is atomic at the row level: a
+// concurrent call against an open row matches zero rows and the
+// follow-up probe distinguishes "unknown id" from "still open" via the
+// standard two-statement shape used by [Close] and [BindSlackChannel].
+//
+// The validator chain (ctx → id non-nil) runs BEFORE the SQL
+// round-trip so a malformed input fails fast without burning a
+// Postgres call. The summary is bound verbatim — no defensive copy is
+// required for an immutable Go string.
+func (r *PostgresRepository) SetCloseSummary(ctx context.Context, id uuid.UUID, summary string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if id == uuid.Nil {
+		return fmt.Errorf("%w: %s", ErrConversationNotFound, id)
+	}
+
+	const updateSQL = `
+UPDATE watchkeeper.k2k_conversations
+SET close_summary = $1
+WHERE id = $2 AND status = 'archived'`
+
+	tag, err := r.q.Exec(ctx, updateSQL, summary, id)
+	if err != nil {
+		return fmt.Errorf("k2k: set close summary: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	// Zero rows affected — disambiguate via a follow-up SELECT so the
+	// caller observes the precise sentinel. Mirrors [Close]'s
+	// discipline so the caller can distinguish "unknown id" from "still
+	// open" without parsing the error chain.
+	const probeSQL = `SELECT status FROM watchkeeper.k2k_conversations WHERE id = $1`
+	var status string
+	if probeErr := r.q.QueryRow(ctx, probeSQL, id).Scan(&status); probeErr != nil {
+		if errors.Is(probeErr, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: %s", ErrConversationNotFound, id)
+		}
+		return fmt.Errorf("k2k: set close summary probe: %w", probeErr)
+	}
+	if status == string(StatusOpen) {
+		return fmt.Errorf("%w: %s", ErrConversationNotArchived, id)
+	}
+	// Row exists in 'archived' state but the UPDATE matched zero rows.
+	// Should not happen under normal operation; surface as a wrapped
+	// error so a future state-machine addition surfaces loudly.
+	return fmt.Errorf("k2k: set close summary: unexpected zero rows for id %s (status=%q)", id, status)
 }
 
 // IncTokens implements [Repository.IncTokens]. The atomic increment

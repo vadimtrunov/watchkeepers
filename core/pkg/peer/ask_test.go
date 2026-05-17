@@ -40,9 +40,14 @@ func newTool(t *testing.T, orgID uuid.UUID, peers []keepclient.Peer) (*peer.Tool
 	if err != nil {
 		t.Fatalf("IssueForOrg reply: %v", err)
 	}
+	closeTok, err := broker.IssueForOrg(peer.CapabilityClose, orgID.String(), time.Hour)
+	if err != nil {
+		t.Fatalf("IssueForOrg close: %v", err)
+	}
 	tokens := map[string]string{
 		peer.CapabilityAsk:   askTok,
 		peer.CapabilityReply: replyTok,
+		peer.CapabilityClose: closeTok,
 	}
 	tool := peer.NewTool(peer.Deps{
 		PeerLister: pl,

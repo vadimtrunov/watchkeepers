@@ -267,6 +267,37 @@ func (r *MemoryRepository) BindSlackChannel(ctx context.Context, id uuid.UUID, s
 	return nil
 }
 
+// SetCloseSummary implements [Repository.SetCloseSummary]. The full
+// read-modify-write runs under the single write-lock so a concurrent
+// SetCloseSummary on the same id either observes the prior summary
+// (and overwrites it) or wins the transition itself — never both. The
+// validator chain (ctx → id non-nil) runs BEFORE the mutex acquire so
+// a malformed input aborts without blocking other goroutines on the
+// write-lock.
+func (r *MemoryRepository) SetCloseSummary(ctx context.Context, id uuid.UUID, summary string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if id == uuid.Nil {
+		return fmt.Errorf("%w: %s", ErrConversationNotFound, id)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	row, ok := r.rows[id]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrConversationNotFound, id)
+	}
+	if row.Status != StatusArchived {
+		return fmt.Errorf("%w: %s", ErrConversationNotArchived, id)
+	}
+
+	row.CloseSummary = summary
+	r.rows[id] = row
+	return nil
+}
+
 // IncTokens implements [Repository.IncTokens]. The whole
 // read-modify-write runs under the single write-lock so concurrent
 // IncTokens on the same id compose correctly — under a naive

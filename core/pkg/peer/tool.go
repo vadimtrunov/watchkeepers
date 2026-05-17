@@ -47,10 +47,10 @@ type Lister interface {
 	ListPeers(ctx context.Context, req keepclient.ListPeersRequest) (*keepclient.ListPeersResponse, error)
 }
 
-// Lifecycle is the narrow seam [Tool.Ask] consumes from
+// Lifecycle is the narrow seam [Tool.Ask] / [Tool.Close] consume from
 // [k2k.Lifecycle]. Pinned to a method set rather than the concrete
-// type so test wiring can inject a hand-rolled fake that mints
-// conversations without driving real Slack channel I/O.
+// type so test wiring can inject a hand-rolled fake that mints +
+// archives conversations without driving real Slack channel I/O.
 type Lifecycle interface {
 	// Open mints a fresh K2K conversation and returns the resulting
 	// [k2k.Conversation]. The production [k2k.Lifecycle] composes the
@@ -58,6 +58,20 @@ type Lifecycle interface {
 	// provisioning + invite fan-out; test wiring can short-circuit to
 	// a fake that mints a [k2k.Conversation] without Slack I/O.
 	Open(ctx context.Context, params k2k.OpenParams) (k2k.Conversation, error)
+
+	// Close archives the K2K conversation identified by `id` and
+	// records `reason` as the close rationale. The production
+	// [k2k.Lifecycle] composes the Slack [ArchiveChannel] (idempotent
+	// on `already_archived`) with the repository [k2k.Repository.Close]
+	// status transition. [Tool.Close] passes [CloseLifecycleReason] as
+	// the reason on every call so the M1.7 archive-on-summary writer
+	// can identify peer-tool-driven closes.
+	//
+	// Returns [k2k.ErrAlreadyArchived] when the row is already in
+	// [k2k.StatusArchived] (a saga-replay race); [Tool.Close]
+	// translates this to a nil return per the idempotent-close
+	// contract.
+	Close(ctx context.Context, id uuid.UUID, reason string) error
 }
 
 // Repository is the narrow seam [Tool.Ask] / [Tool.Reply] consume
@@ -81,6 +95,13 @@ type Repository interface {
 	// strictly after `since` appears on the conversation, or until
 	// `timeout` elapses.
 	WaitForReply(ctx context.Context, conversationID uuid.UUID, since time.Time, timeout time.Duration) (k2k.Message, error)
+
+	// SetCloseSummary writes the operator-supplied summary onto an
+	// already-archived conversation row. [Tool.Close] calls this AFTER
+	// [Lifecycle.Close] transitions the row to [k2k.StatusArchived];
+	// the seam is here on the peer-tool surface so test wiring can
+	// inject a fake that does not maintain a real persistent row.
+	SetCloseSummary(ctx context.Context, id uuid.UUID, summary string) error
 }
 
 // CapabilityValidator is the narrow seam [Tool.Ask] / [Tool.Reply]

@@ -76,8 +76,22 @@ var ErrInvalidTimeout = errors.New("peer: invalid timeout")
 // identity through the tool-call stack).
 var ErrInvalidActingWatchkeeperID = errors.New("peer: invalid acting watchkeeper id")
 
-// ErrInvalidConversationID is returned by [Tool.Reply] when the
-// supplied conversation id is the zero UUID. The validator runs
-// BEFORE the capability gate so a malformed id fails fast without
+// ErrInvalidConversationID is returned by [Tool.Reply] / [Tool.Close]
+// when the supplied conversation id is the zero UUID. The validator
+// runs BEFORE the capability gate so a malformed id fails fast without
 // burning a broker round-trip.
 var ErrInvalidConversationID = errors.New("peer: invalid conversation id")
+
+// ErrPeerClosePermission is returned by [Tool.Close] when the acting
+// watchkeeper is not a participant in the target conversation. The
+// participant set is the persisted [k2k.Conversation.Participants]
+// list; the gate enforces that only members of the conversation may
+// close it. Mirrors the closed-set acl discipline established by the
+// M3.5.a `capability.Broker.ValidateForOrg` per-tenant gate, but at
+// the conversation level — capability tokens express coarse "may use
+// peer:close at all"; this sentinel expresses fine "is allowed to
+// close THIS particular conversation". A non-participant attempt is a
+// caller bug at the agent layer (an LLM hallucinating a target id) or
+// a malicious cross-conversation poke; either way the call surfaces
+// the typed sentinel rather than the underlying state.
+var ErrPeerClosePermission = errors.New("peer: close permission denied")

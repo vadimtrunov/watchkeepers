@@ -142,3 +142,14 @@ var ErrInvalidWaitTimeout = errors.New("k2k: invalid wait timeout")
 // so callers driving the seam directly (e.g. an M1.6 escalation saga
 // step) can branch on errors.Is without depending on the peer package.
 var ErrWaitForReplyTimeout = errors.New("k2k: wait for reply timeout")
+
+// ErrConversationNotArchived is returned by [Repository.SetCloseSummary]
+// when the target row is still in [StatusOpen]. The M1.3.b `peer.Close`
+// writer is sequenced strictly after `Lifecycle.Close`, so a
+// non-archived row at this surface is a programmer bug at the call
+// site (a forgotten Close call) rather than a legitimate concurrent
+// state. The sentinel is distinct from [ErrAlreadyArchived] so the
+// caller can distinguish "wrong direction" from "duplicate close"
+// without parsing the error chain. Mirrors the [ErrAlreadyArchived]
+// discipline at the inverse state.
+var ErrConversationNotArchived = errors.New("k2k: conversation not archived")
