@@ -60,6 +60,34 @@ func WithAgentID(agentID string) WiredRuntimeOption {
 	}
 }
 
+// WithToolSuccessReflector wires a [ToolSuccessReflector] onto the
+// returned [*WiredRuntime]. When set, every [WiredRuntime.InvokeTool]
+// SUCCESS return path calls the success reflector synchronously
+// BEFORE returning the result to the caller. The reflector is
+// best-effort: any error it returns is logged via the wired
+// [WithLogger] sink and does NOT replace the original tool result
+// returned to the caller.
+//
+// Sampling is the reflector's responsibility (see
+// [WithSuccessSampler]); a nil reflector is a no-op so callers can
+// always pass through whatever they have. The success-path reflection
+// is the M7.2 counterpart of the M5.6.b error-path reflection
+// installed via [WithToolErrorReflector].
+//
+// The [ToolCall.Metadata] map is consulted for the
+// [MetadataKeyToolCallID] key — when present, the value is forwarded
+// to [ToolSuccessReflector.Reflect] so the sampler's per-call
+// deterministic decision survives retries. When absent, the empty
+// string is forwarded and the sampler falls back to hashing only
+// (agentID + toolName) — see [DeterministicSampler.Sample].
+func WithToolSuccessReflector(r *ToolSuccessReflector) WiredRuntimeOption {
+	return func(w *WiredRuntime) {
+		if r != nil {
+			w.successReflector = r
+		}
+	}
+}
+
 // WithKeepersLogWriter wires a [*keeperslog.Writer] onto the returned
 // [*WiredRuntime] (M5.6.c). When set alongside [WithToolErrorReflector],
 // [NewWiredRuntime] threads the writer into the reflector via
@@ -102,11 +130,12 @@ func WithKeepersLogWriter(w *keeperslog.Writer) WiredRuntimeOption {
 // underlying [AgentRuntime] is. The decorator itself holds only
 // immutable configuration after [NewWiredRuntime] returns.
 type WiredRuntime struct {
-	inner      AgentRuntime
-	reflector  *ToolErrorReflector
-	logger     *slog.Logger
-	agentID    string
-	keepersLog *keeperslog.Writer
+	inner            AgentRuntime
+	reflector        *ToolErrorReflector
+	successReflector *ToolSuccessReflector
+	logger           *slog.Logger
+	agentID          string
+	keepersLog       *keeperslog.Writer
 }
 
 // NewWiredRuntime returns a [*WiredRuntime] decorating `inner`. Pass
@@ -185,6 +214,36 @@ func (w *WiredRuntime) SendMessage(ctx context.Context, runtimeID ID, msg Messag
 func (w *WiredRuntime) InvokeTool(ctx context.Context, runtimeID ID, call ToolCall) (ToolResult, error) {
 	res, err := w.inner.InvokeTool(ctx, runtimeID, call)
 	if err == nil {
+		// M7.2: success-path reflection. Reflect ONLY on a true
+		// success — `err == nil` AND `res.Error == ""`. The runtime
+		// surfaces tool-side logical failures (e.g. "record not
+		// found") via `res.Error` while keeping `err == nil`; those
+		// are NOT success outcomes and the M7.2 sampling contract
+		// targets the success path only. Best-effort: any reflector
+		// error is logged via the wired [*slog.Logger] but does NOT
+		// replace the original tool result returned to the caller.
+		// Sampling is the reflector's responsibility; a nil reflector
+		// is a no-op.
+		if w.successReflector != nil && res.Error == "" {
+			callID := ""
+			if call.Metadata != nil {
+				callID = call.Metadata[MetadataKeyToolCallID]
+			}
+			if reflectErr := w.successReflector.Reflect(
+				ctx,
+				w.agentID,
+				call.Name,
+				call.ToolVersion,
+				callID,
+			); reflectErr != nil {
+				w.logger.LogAttrs(
+					ctx, slog.LevelWarn,
+					"runtime: tool-success reflector failed",
+					slog.String("tool", call.Name),
+					slog.String("reflect_err_type", typeName(reflectErr)),
+				)
+			}
+		}
 		return res, nil
 	}
 	if w.reflector == nil {
