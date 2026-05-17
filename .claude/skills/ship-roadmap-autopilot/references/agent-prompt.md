@@ -1,21 +1,42 @@
 # Ship-Agent prompt template
 
-The orchestrator reads this file once per tick, substitutes `{id}` and
-`{family}`, and passes the result as the `prompt` argument of the
-single `Agent` dispatch.
+The orchestrator reads this file once per tick, substitutes `{id}`,
+`{family}`, and `{target_branch}`, and passes the result as the
+`prompt` argument of the single `Agent` dispatch.
 
 `{id}` is the leaf M-id (e.g. `7.2.c`). `{family}` is the leading
-M-family token (e.g. `M7` for any `M7.x.y.z`).
+M-family token (e.g. `M7` for any `M7.x.y.z`). `{target_branch}` is
+the operator-chosen ROADMAP-phase integration branch (e.g. `phase3`);
+it replaces every reference to `main` in the underlying
+`ship-roadmap-item` skill.
 
 ## Template
 
 ```
 You are a single-shot autopilot worker. Repository:
-/Users/user/PhpstormProjects/wathkeepers (branch: main).
+/Users/user/PhpstormProjects/wathkeepers (integration branch: {target_branch}).
 
 Your job: ship ROADMAP item M{id} end-to-end by applying the project
-skill .claude/skills/ship-roadmap-item/SKILL.md exactly. You will return
-a single JSON object as your final tool result. No prose outside JSON.
+skill .claude/skills/ship-roadmap-item/SKILL.md exactly, with one global
+override: wherever ship-roadmap-item SKILL.md says `main`, you must use
+`{target_branch}` instead. You will return a single JSON object as your
+final tool result. No prose outside JSON.
+
+BRANCH-TARGET OVERRIDE (applies to every phase of ship-roadmap-item)
+- Phase 3 (branch creation): `git checkout -b rdd/<id>-<slug>` is cut
+  from `{target_branch}`. Confirm HEAD is `{target_branch}` and fast-
+  forwarded before branching.
+- Phase 6 (roadmap mark): the `[ ]` you flip is in
+  `docs/ROADMAP-{target_branch}.md` only — never touch any other
+  `docs/ROADMAP-phase*.md` in this tick.
+- Phase 8 (PR + merge): `gh pr create --base {target_branch} ...` and
+  `gh pr merge <pr> --squash --delete-branch`. Squash-merge into
+  `{target_branch}`, never into `main`.
+- Phase 9 (local cleanup): `git checkout {target_branch}` then
+  `git pull --ff-only origin {target_branch}`.
+- Phase 10 (lesson-mark follow-up): commit on `{target_branch}` and
+  `git push origin {target_branch}`. The doc-only follow-up must not
+  land on `main`.
 
 CONTEXT
 - M{id} is asserted by the orchestrator to be a LEAF item (not aggregate).
@@ -49,13 +70,16 @@ AUTO-DECISION RULES (NEVER ask the operator; NEVER call AskUserQuestion;
 
 EXECUTION
 - Follow phases 1..10 of ship-roadmap-item SKILL.md exactly, including
-  the final "docs(lessons): mark M{id} shipped" follow-up commit on main.
+  the final "docs(lessons): mark M{id} shipped" follow-up commit — on
+  `{target_branch}` per the override above, not on `main`.
 - Use TodoWrite/TaskCreate to track phases internally.
 - Run go test -race in run_in_background and wait via notification, do
   not poll.
-- Parallel review iter-1 (codex via `omc ask` + critic agent) is
-  MANDATORY and runs as two background tool calls in one message.
-- Delete .omc/artifacts/ask/codex-*.md after extracting findings.
+- Parallel review iter-1 (`codex review` CLI + critic agent) is
+  MANDATORY and runs as two background tool calls in one message. The
+  legacy `omc ask` wrapper is retired — invoke `codex` directly per
+  the updated ship-roadmap-item Phase 7.
+- Delete /tmp/codex-review-M{id}.md after extracting findings.
 
 RETURN VALUE — your final user-facing message MUST contain ONLY this
 JSON, nothing else. The halt_reason enum here covers only agent-side
@@ -83,11 +107,14 @@ agent.
 
 Used in the optional cascade step (see `SKILL.md` step 4) when one or
 more `[ ]` parents have all-`[x]` children. The orchestrator pre-computes
-the diff list and embeds it.
+the diff list and embeds it, along with `{target_branch}` (the active
+ROADMAP-phase integration branch, e.g. `phase3`).
 
 ```
 You are a single-shot writer for a roadmap doc-only commit. Repository
-on /Users/user/PhpstormProjects/wathkeepers, currently on branch main.
+on /Users/user/PhpstormProjects/wathkeepers, currently on branch
+{target_branch}. All edits and the resulting push target
+{target_branch} — never `main`.
 
 Apply the following ROADMAP edits via the Edit tool, then atomically
 commit and push. Do NOT modify any other files. Do NOT touch the
@@ -108,7 +135,7 @@ match.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
-Push to origin/main with `git push origin main`.
+Push to origin/{target_branch} with `git push origin {target_branch}`.
 
 Return value: a single JSON object only.
 

@@ -1,8 +1,10 @@
 ---
 name: ship-roadmap-autopilot
-description: Autopilot wrapper around ship-roadmap-item. One Agent dispatch per
-  ROADMAP leaf, halt-on-blocker policy, cascade-marks parents, fresh subagent
-  context per iteration. Use as `/loop /oh-my-claudecode:ship-roadmap-autopilot`.
+description: Autopilot wrapper around ship-roadmap-item. Takes a `phase<N>`
+  argument and ships ROADMAP-phase<N>.md leaves into branch `phase<N>` (not
+  main). One Agent dispatch per leaf, halt-on-blocker policy, cascade-marks
+  parents, fresh subagent context per iteration. Use as
+  `/loop /oh-my-claudecode:ship-roadmap-autopilot phase<N>`.
 triggers:
   - "/ship-roadmap-autopilot"
   - "ship-autopilot"
@@ -12,10 +14,11 @@ triggers:
 
 # ship-roadmap-autopilot — autonomous ROADMAP shipper
 
-Drive `ship-roadmap-item` end-to-end against `docs/ROADMAP-phase*.md` in
-a loop with no operator intervention. Each iteration produces one merged
-PR on `main`. Halts on any blocker; the operator fixes the blocker, runs
-`reset`, and continues.
+Drive `ship-roadmap-item` end-to-end against a single
+`docs/ROADMAP-phase<N>.md` file in a loop with no operator intervention.
+Each iteration produces one merged PR on the integration branch
+`phase<N>` named by the operator's argument. Halts on any blocker; the
+operator fixes the blocker, runs `reset`, and continues.
 
 The orchestrator session is thin. Each tick spawns one ship-Agent (and
 optionally one writer-Agent for the cascade-pass). Both agents run in
@@ -30,40 +33,73 @@ Reference docs (read on demand, not at tick start):
 
 ## Operator interface
 
+The required positional argument is a ROADMAP-phase token of the form
+`phase<N>` (e.g. `phase3`). It selects the file `docs/ROADMAP-phase<N>.md`
+as the source of leaves AND the branch `phase<N>` as the integration
+target (PR base, cascade push, step-10 follow-up push, working-tree
+restore — everywhere the underlying `ship-roadmap-item` skill mentions
+`main`, this orchestrator substitutes `phase<N>`).
+
 | Command | Behaviour |
 |---|---|
-| `/oh-my-claudecode:ship-roadmap-autopilot` | One tick. Manual / debug / dry-run. |
-| `/loop /oh-my-claudecode:ship-roadmap-autopilot` | Self-paced loop. Recommended. |
-| `/loop 30m /oh-my-claudecode:ship-roadmap-autopilot` | Fixed-interval loop (rare; ticks already self-pace 5–20 min). |
-| `/oh-my-claudecode:ship-roadmap-autopilot reset` | Clear `halted/halt_reason/halt_detail`; keep `history`. After fixing a blocker. |
-| `/oh-my-claudecode:ship-roadmap-autopilot status` | Print last 5 iterations + halt flag in markdown. |
+| `/oh-my-claudecode:ship-roadmap-autopilot phase<N>` | One tick targeting phase `<N>`. Manual / debug / dry-run. |
+| `/loop /oh-my-claudecode:ship-roadmap-autopilot phase<N>` | Self-paced loop on phase `<N>`. Recommended. |
+| `/loop 30m /oh-my-claudecode:ship-roadmap-autopilot phase<N>` | Fixed-interval loop (rare; ticks already self-pace 5–20 min). |
+| `/oh-my-claudecode:ship-roadmap-autopilot reset` | Clear `halted/halt_reason/halt_detail`; keep `phase` + `history`. After fixing a blocker. |
+| `/oh-my-claudecode:ship-roadmap-autopilot reset phase<N>` | Clear halt fields AND switch the persisted `phase` to `<N>`. Use when retargeting after a phase completes. |
+| `/oh-my-claudecode:ship-roadmap-autopilot status` | Print phase, last 5 iterations, halt flag in markdown. |
 
 ## Per-tick procedure
 
 ### Step 0 — Arg dispatch
 
-If invoked with `reset`:
+Parse the slash-command arguments left-to-right. Recognised tokens:
+
+- `reset` — clear-halt subcommand (may be followed by an optional
+  `phase<N>` token to retarget).
+- `status` — print-state subcommand (no further args).
+- `phase<N>` matching the regex `^phase[1-9][0-9]*$` — the ROADMAP
+  phase target for a normal tick.
+
+Anything else → halt `invalid-arg` with `halt_detail="<raw arg>"`.
+
+If invoked with `reset` (with or without a trailing `phase<N>`):
 
 1. Read `.omc/state/ship-autopilot.json` (initialise empty if absent).
-2. Set `halted=false`, `halt_reason=null`, `halt_detail=null`. Keep `history`.
-3. Write back.
-4. Print `✅ ship-autopilot halt cleared. Last item: <last_item.id> (<last_item.status>).`
-5. Exit tick.
+2. Set `halted=false`, `halt_reason=null`, `halt_detail=null`. Keep
+   `history` and `last_item`.
+3. If a `phase<N>` token followed `reset`, set `state.phase = "phase<N>"`
+   (replacing any previously-persisted phase). Otherwise keep
+   `state.phase` as-is.
+4. Write back.
+5. Print `✅ ship-autopilot halt cleared. Phase: <state.phase>. Last
+   item: <last_item.id> (<last_item.status>).`
+6. Exit tick.
 
 If invoked with `status`:
 
 1. Read `.omc/state/ship-autopilot.json` (initialise empty if absent).
-2. Render last 5 entries of `history` and `halted/halt_reason/halt_detail` as a markdown table.
+2. Render `state.phase`, last 5 entries of `history`, and
+   `halted/halt_reason/halt_detail` as a markdown table.
 3. Exit tick.
 
-Otherwise fall through to Step 1.
+Otherwise the arg list must contain exactly one `phase<N>` token. Save
+it as `arg_phase` and fall through to Step 1.
 
 ### Step 1 — Load state
 
 Read `.omc/state/ship-autopilot.json`. If the file is absent, create it
-with the empty-state shape from `references/state-schema.md`. If the
-file is malformed JSON, halt with `halt_reason="unknown"`,
-`halt_detail="state file corrupt: <parse error>"`.
+with the empty-state shape from `references/state-schema.md` and set
+`state.phase = arg_phase`. If the file is malformed JSON, halt with
+`halt_reason="unknown"`, `halt_detail="state file corrupt: <parse error>"`.
+
+If the file exists and `state.phase` is set but differs from
+`arg_phase`, halt `phase-mismatch` with
+`halt_detail="state=<state.phase> arg=<arg_phase>; run 'reset <arg_phase>'
+to switch"`.
+
+If the file exists with `state.phase == null` (legacy state file from a
+prior version), set `state.phase = arg_phase` and proceed.
 
 ### Step 2 — Pre-flight guards
 
@@ -71,8 +107,9 @@ Check, in order. First failure halts the tick (write halt fields to state, exit)
 
 1. `git status --porcelain` must produce empty output → else halt
    `dirty-working-tree`.
-2. `git rev-parse --abbrev-ref HEAD` must return `main` → else halt
-   `wrong-branch` with `halt_detail=<current-branch>`.
+2. `git rev-parse --abbrev-ref HEAD` must return `state.phase` → else
+   halt `wrong-branch` with
+   `halt_detail="expected=<state.phase> got=<current-branch>"`.
 3. `.omc/state/rdd-active` must NOT exist → else halt
    `rdd-session-active`.
 
@@ -89,7 +126,9 @@ underlying issue.)
 
 ### Step 4 — Cascade-pass
 
-Read all of `docs/ROADMAP-phase1.md` … `docs/ROADMAP-phase6.md`.
+Read **only** `docs/ROADMAP-<state.phase>.md` (e.g.
+`docs/ROADMAP-phase3.md`). Other phase files are out of scope for this
+orchestrator and must not be read or written.
 
 For each `[ ]` line that is a parent (matches `^- \[ \] \*\*M[0-9.]+\*\*`
 and has `M<x>.<y>` numbered children below it within the same section):
@@ -99,9 +138,9 @@ and has `M<x>.<y>` numbered children below it within the same section):
 
 If the flip-list is non-empty:
 
-1. Build the writer-Agent prompt by substituting `{edit_list}` and
-   `{parent_ids}` into the cascade template from
-   `references/agent-prompt.md`.
+1. Build the writer-Agent prompt by substituting `{edit_list}`,
+   `{parent_ids}`, and `{target_branch}` (= `state.phase`) into the
+   cascade template from `references/agent-prompt.md`.
 2. Dispatch the writer-Agent: `Agent({description: "cascade ROADMAP
    parents", subagent_type: "general-purpose", model: "sonnet", prompt:
    <built prompt>})`.
@@ -114,8 +153,8 @@ If the flip-list is empty — skip directly to Step 5.
 
 ### Step 5 — Pick next leaf
 
-Re-read `docs/ROADMAP-phase1.md` … `docs/ROADMAP-phase6.md` (cascade
-may have just changed them). Walk top-down (phase1 first, in-file order).
+Re-read `docs/ROADMAP-<state.phase>.md` (cascade may have just changed
+it). Walk top-down in file order.
 
 For each `[ ]` line:
 
@@ -130,8 +169,9 @@ For each `[ ]` line:
 
 If the scan finishes without finding a leaf:
 
-- If there is no `[ ]` left in any phase file → halt
-  `roadmap-complete` (terminal success).
+- If there is no `[ ]` left in `docs/ROADMAP-<state.phase>.md` → halt
+  `phase-complete` (terminal success for this phase; operator retargets
+  the next phase via `reset phase<N+1>`).
 - Otherwise the only remaining `[ ]` items are parents without leaf
   decomposition (no AC bullets, no numbered children) → halt
   `aggregate-needs-decomposition` with `halt_detail="<first such M-id> at <file>:<line>"`.
@@ -141,12 +181,13 @@ If the scan finishes without finding a leaf:
 Compute `{family}` as the leading M-family token of the leaf id (e.g.
 `M7` for `M7.2.c`).
 
-Read `references/agent-prompt.md`. Substitute `{id}` (without the leading
-`M`) and `{family}`. Dispatch:
+Read `references/agent-prompt.md`. Substitute `{id}` (without the
+leading `M`), `{family}`, and `{target_branch}` (= `state.phase`).
+Dispatch:
 
 ```
 Agent({
-  description: "ship-roadmap-item autopilot iteration: M<id>",
+  description: "ship-roadmap-item autopilot iteration: M<id> → <state.phase>",
   subagent_type: "general-purpose",
   model: "opus",
   prompt: <substituted prompt>
@@ -196,6 +237,10 @@ Wait foreground for the JSON return.
    the orchestrator or the dispatched agents.
 5. **Honour the rdd marker.** If `.omc/state/rdd-active` exists, halt
    immediately. Two orchestrators on one repo would conflict.
+6. **Never touch `main` or any phase file other than the active phase.**
+   The integration target is `state.phase`. PR base, cascade push, and
+   the step-10 follow-up commit all land on that branch. The orchestrator
+   never reads/writes other `docs/ROADMAP-phase*.md` files within a tick.
 
 ## Coexistence with `rdd`
 

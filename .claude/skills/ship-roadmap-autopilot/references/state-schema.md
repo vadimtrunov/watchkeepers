@@ -6,9 +6,14 @@ local to the operator's checkout.
 
 ## Shape
 
+`version` is bumped to `2` once the `phase` field is introduced; orchestrator
+upgrades legacy `version=1` files in-place by setting `phase = arg_phase`
+on the first tick after the upgrade.
+
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "phase": "phase3",
   "halted": false,
   "halt_reason": null,
   "halt_detail": null,
@@ -25,7 +30,8 @@ After at least one shipped iteration:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "phase": "phase3",
   "halted": false,
   "halt_reason": null,
   "halt_detail": null,
@@ -48,6 +54,15 @@ After at least one shipped iteration:
 }
 ```
 
+### `phase` field
+
+| Aspect | Value |
+|---|---|
+| Format | `^phase[1-9][0-9]*$` (matches the suffix of `docs/ROADMAP-phase<N>.md` and the integration branch name) |
+| Set on | First tick where state is initialised — copied from the slash-command arg. |
+| Mutated by | `reset phase<N>` only. A normal tick whose arg differs from `state.phase` halts `phase-mismatch`. |
+| Used as | ROADMAP file selector AND git branch target for PR base, cascade push, step-10 follow-up, and HEAD pre-flight. |
+
 ## Halt reasons
 
 Two origins. The agent JSON return enum (see `agent-prompt.md`) carries
@@ -69,10 +84,12 @@ Agent dispatch.
 
 | Reason | When |
 |---|---|
-| `roadmap-complete` | All `[ ]` exhausted (terminal success) |
+| `phase-complete` | All `[ ]` in `docs/ROADMAP-<state.phase>.md` exhausted (terminal success for the active phase; operator retargets the next phase with `reset phase<N+1>`) |
 | `aggregate-needs-decomposition` | Picker hit a `[ ]` parent without leaf decomposition (also reachable from the agent side; same reason, set by either) |
 | `dirty-working-tree` | `git status --porcelain` non-empty at tick start |
-| `wrong-branch` | Orchestrator not on `main` at tick start |
+| `wrong-branch` | Orchestrator not on `state.phase` branch at tick start |
+| `phase-mismatch` | Arg `phase<N>` differs from persisted `state.phase`; operator must run `reset phase<N>` to retarget |
+| `invalid-arg` | Slash-command arg did not parse to `phase<N>` / `reset` / `status` |
 | `rdd-session-active` | `.omc/state/rdd-active` marker present |
 | `unknown` | Agent returned non-JSON / crashed (orchestrator records this after parse failure) |
 

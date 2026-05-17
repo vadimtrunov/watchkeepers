@@ -143,10 +143,17 @@ external model misses, while codex catches subtle correctness +
 API-design issues the agent misses (this exact split landed 2 Major
 findings on M7.1.c.c that one reviewer alone would have missed).
 
-**Reviewer A — codex via `omc ask`** (Bash, run_in_background=true):
+**Reviewer A — `codex review` CLI** (Bash, run_in_background=true). The
+`omc ask` wrapper was retired; invoke `codex` directly, mirroring the
+`codex-review` skill's invocation pattern:
 
 ```bash
-omc ask codex "Review the M<id> changes on branch rdd/<id>-<slug>.
+which codex >/dev/null || { echo "codex CLI not installed"; exit 1; }
+git fetch origin main --quiet
+codex review \
+  --base main \
+  --title "M<id> iter-1 review (branch rdd/<id>-<slug>)" \
+  "Review the M<id> changes on branch rdd/<id>-<slug>.
 [1-paragraph diff summary]
 [1-paragraph project context: Go module, prior-art reference]
 Findings I want from you:
@@ -158,7 +165,8 @@ Findings I want from you:
 - Consistency with prior M<family> patterns
 Branch builds + passes go test -race + go vet clean.
 Be concrete: cite file:line. Severity-rate (Critical/Major/Minor/Nit).
-Don't restate what works."
+Don't restate what works." \
+  > /tmp/codex-review-M<id>.md 2>&1
 ```
 
 **Reviewer B — `oh-my-claudecode:critic` agent** (Agent tool, parallel):
@@ -188,8 +196,8 @@ Notes on reviewer choice:
 Both reviewers run with `run_in_background=true` (codex via Bash,
 agent via Agent tool's background mode). Wait for both notifications
 before merging findings. Read codex output from
-`core/.omc/artifacts/ask/codex-*.md`; the agent returns its summary as
-its tool result.
+`/tmp/codex-review-M<id>.md`; the agent returns its summary as its
+tool result.
 
 **Merge findings**:
 
@@ -204,10 +212,8 @@ Re-run verify (step 5). Update the lesson entry to reflect the iter-1
 patterns (e.g. "defensive deep copy", "fail-fast precedes audit").
 
 **Then delete the codex artifact** — it's a transient review log, not
-a durable record (`rm core/.omc/artifacts/ask/codex-*.md` — markdownlint
-will fail otherwise because `.omc/**` is ignored only at repo root).
-The agent's tool result lives only in the conversation transcript and
-needs no cleanup.
+a durable record (`rm /tmp/codex-review-M<id>.md`). The agent's tool
+result lives only in the conversation transcript and needs no cleanup.
 
 ### 8. Commit + push + PR + watch + merge
 
@@ -312,7 +318,7 @@ Confirm to the operator with a one-liner:
 
 - [x] PR merged to `main` via **squash** with `(#NNN)` suffix on commit subject.
 - [x] All CI checks pass (Go CI, Docker CI, Keep Integration CI, Meta CI, Migrate CI, SQL CI, Security CI, TypeScript CI, CodeRabbit).
-- [x] Parallel review iter-1 ran (codex via `omc ask codex` + `oh-my-claudecode:critic` agent in the same turn) and the union of their findings was either applied or explicitly deferred to a follow-up via user choice.
+- [x] Parallel review iter-1 ran (`codex review` CLI + `oh-my-claudecode:critic` agent in the same turn) and the union of their findings was either applied or explicitly deferred to a follow-up via user choice.
 - [x] Roadmap entry marked `[x]`; lesson entry appended with concrete patterns naming files + line ranges.
 - [x] Local working tree on `main`, fast-forwarded; feature branch deleted.
 - [x] Lesson entry's `**PR**:` and `**Merged**:` placeholders replaced with actual values via a follow-up `docs(lessons): mark M<id> shipped` commit on `main`. The roadmap item is durably "done" only after this final mark.
@@ -321,7 +327,7 @@ Confirm to the operator with a one-liner:
 
 - **Never claim completion before parallel review iter-1.** The original codex+critic run on M7.1.c.c surfaced 2 Major + 2 Minor findings; without iter-1 they would have shipped to main. The two reviewers MUST run in the same turn (one Bash-background + one Agent-background tool call in one message), not sequentially — sequential runs cost 2× wall-clock and make the agent re-do exploration the codex prompt already covered.
 - **Never use `git add .` or `git add -A`.** Stash unrelated work first; stage by-name.
-- **Don't commit codex artifacts.** Delete `.omc/artifacts/ask/codex-*.md` after extraction — markdownlint fails on tab-indented JSON-marshalled go-struct dumps inside the artifact.
+- **Don't commit codex artifacts.** The artifact lives at `/tmp/codex-review-M<id>.md`; delete it with `rm` after extraction. (The legacy `.omc/artifacts/ask/codex-*.md` path is gone with the retired `omc` CLI; do not write inside the working tree.)
 - **Don't introduce per-step error sentinels** when M-family already has one. Reuse `ErrMissingSpawnContext`, `ErrCredsNotFound`, etc.
 - **Don't pin a tenant-scoped value as a process-global static.** Prefer a per-call resolver func — codex iter-1 will catch this and you'll spend a round redoing the API.
 - **Don't shallow-copy reference-typed step config.** Maps + byte slices + slices need defensive deep copy in both the constructor AND on dispatch — codex iter-1 will catch this.
