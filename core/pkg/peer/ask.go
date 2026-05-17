@@ -47,6 +47,7 @@ import (
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/audit"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/budget"
 )
 
 // AskParams is the closed-set input shape [Tool.Ask] accepts. Hoisted
@@ -193,6 +194,21 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 		return AskResult{}, err
 	}
 
+	// Resolve the per-Watchkeeper token-budget override (M1.5). The
+	// resolver is OPTIONAL: nil falls back to
+	// [budget.DefaultTokenBudget]; a resolver returning `ok=false`
+	// falls back the same way. A resolver returning a non-nil error
+	// short-circuits the Ask call BEFORE any K2K state mutation —
+	// a misconfigured per-Watchkeeper budget is a caller bug, not a
+	// runtime observability concern. Resolution runs BEFORE
+	// k2k.Lifecycle.Open so the stamped TokenBudget reflects the
+	// per-Watchkeeper configuration without an Open-then-update
+	// round-trip.
+	tokenBudget, err := t.resolveTokenBudget(ctx, params)
+	if err != nil {
+		return AskResult{}, fmt.Errorf("peer: ask: resolve token budget: %w", err)
+	}
+
 	// Defensive deep-copy of the request body — both for the
 	// [k2k.AppendMessageParams] argument and for any future use by
 	// this function — so a caller mutating the slice after Ask
@@ -207,6 +223,7 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 		OrganizationID: params.OrganizationID,
 		Participants:   []string{params.ActingWatchkeeperID, peer.WatchkeeperID},
 		Subject:        params.Subject,
+		TokenBudget:    tokenBudget,
 		CorrelationID:  params.CorrelationID,
 	})
 	if err != nil {
@@ -223,6 +240,16 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 	if err != nil {
 		return AskResult{}, fmt.Errorf("peer: ask: append request: %w", err)
 	}
+
+	// M1.5 token-budget charge for the request body. Nil Budget is a
+	// no-op (M1.3.\*-era wirings stay valid by design). A Charge
+	// failure does NOT propagate — the persisted message + the
+	// conversation row are the load-bearing surfaces; the IncTokens
+	// counter is observability + the over-budget event is workflow
+	// handoff. Mirrors the M1.4 audit-emit no-propagate discipline.
+	// The charge runs AFTER AppendMessage so the running counter
+	// reflects only successfully-persisted messages.
+	t.chargeRequestBody(ctx, conv, reqBody, tokenBudget, params)
 
 	// Anchor the WaitForReply cursor strictly BELOW the persisted
 	// request's `CreatedAt` (iter-1 codex Major fix). The storage-layer
@@ -294,4 +321,54 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 	out := make([]byte, len(reply.Body))
 	copy(out, reply.Body)
 	return AskResult{ConversationID: conv.ID, ReplyBody: out}, nil
+}
+
+// resolveTokenBudget composes [Deps.TokenBudgetResolver] with
+// [budget.ResolveBudget] to fetch the per-Watchkeeper token-budget
+// override for the acting watchkeeper. A nil resolver short-circuits to
+// [budget.DefaultTokenBudget] (no override declared). Hoisted so
+// [Ask] stays scannable + under the gocyclo budget.
+//
+// The default is sourced from the global [budget.DefaultTokenBudget]
+// constant; a future wiring-time customisation would land as a
+// `Deps.DefaultTokenBudget` field rather than re-routing this helper.
+// Mirrors the M1.3.d `resolveConcurrency` per-call helper discipline.
+func (t *Tool) resolveTokenBudget(ctx context.Context, params AskParams) (int64, error) {
+	if t.deps.TokenBudgetResolver == nil {
+		return budget.DefaultTokenBudget, nil
+	}
+	override, ok, err := t.deps.TokenBudgetResolver(ctx, params.ActingWatchkeeperID, params.OrganizationID)
+	if err != nil {
+		return 0, err
+	}
+	return budget.ResolveBudget(budget.DefaultTokenBudget, override, ok), nil
+}
+
+// chargeRequestBody runs the M1.5 budget charge for the request append
+// site. A nil Budget enforcer is a no-op; a non-nil enforcer charges
+// the estimated token count + handles the over-budget side effects
+// (audit emission + escalation trigger) internally. The Charge error
+// does NOT propagate — see the call-site comment for the rationale.
+//
+// The estimator pre-allocates from `len(reqBody)` so a zero-token
+// estimate (impossible for a non-empty body per the M1.5 estimator's
+// minimum-1 clamp) is detected before burning an IncTokens round-trip.
+// Hoisted so the orchestrator stays scannable + under the gocyclo
+// budget.
+func (t *Tool) chargeRequestBody(ctx context.Context, conv k2k.Conversation, reqBody []byte, tokenBudget int64, params AskParams) {
+	if t.deps.Budget == nil {
+		return
+	}
+	delta := budget.EstimateTokensFromBody(reqBody)
+	if delta <= 0 {
+		return
+	}
+	_, _ = t.deps.Budget.Charge(ctx, budget.ChargeParams{
+		ConversationID:      conv.ID,
+		OrganizationID:      params.OrganizationID,
+		ActingWatchkeeperID: params.ActingWatchkeeperID,
+		TokenBudget:         tokenBudget,
+		Delta:               delta,
+		CorrelationID:       params.CorrelationID,
+	})
 }
