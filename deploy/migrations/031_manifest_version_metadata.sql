@@ -33,14 +33,30 @@
 --     blow out the row + the audit page that surfaces it.
 --   * previous_version_id — uuid FK to `watchkeeper.manifest_version(id)`,
 --     declaring the version this row is derived from. Nullable for the
---     root version of every manifest (there is no previous). NOT a
---     composite FK to `(manifest_id, version_no)` — the lookup chain
---     is `previous_version_id → manifest_version → manifest_id`, so a
---     cross-manifest reference is impossible by construction once
---     callers respect `manifest_id`-scoped reads. A
---     `manifest_version_previous_version_self_ref` CHECK rejects a
---     row pointing at itself (impossible by FK timing on INSERT but
---     a future UPDATE path could try it).
+--     root version of every manifest (there is no previous). The FK
+--     uses the Postgres default `ON DELETE NO ACTION` (effectively
+--     RESTRICT) — once a row's `previous_version_id` is populated,
+--     the target row CANNOT be deleted without first rewriting the
+--     pointer. This is intentional for an immutable audit chain;
+--     conversational-rollback flows (M3.5) write NEW rows naming the
+--     target as `previous_version_id`, never UPDATE / DELETE existing
+--     rows. A `manifest_version_previous_version_self_ref` CHECK
+--     rejects a row pointing at itself (impossible by FK timing on
+--     INSERT but a future UPDATE path could try it).
+--
+--     Same-manifest invariant: the FK does NOT constrain the target
+--     row's `manifest_id` (uuid FKs are single-column by Postgres
+--     design). A composite FK + composite UNIQUE on
+--     `(id, manifest_id)` would push the invariant into the schema,
+--     but M3.3 keeps the schema change minimal and enforces it at
+--     the write-path layer instead (the
+--     `handlePutManifestVersion` INSERT carries a
+--     `NOT EXISTS-implies-row-rejected` gate so a caller cannot
+--     anchor a manifest_version at a previous_version_id whose
+--     `manifest_id` does not match `$1`; cross-tenant rejection
+--     surfaces as `pgx.ErrNoRows → 404 not_found`). A future
+--     migration MAY tighten this to a composite FK once the M3.4
+--     tools' write-paths share a single gate.
 --   * proposer — free-text identifier of the actor that proposed this
 --     version. Not a uuid FK to either `human` or `watchkeeper`
 --     because the M3.4 tools take callers from heterogeneous sources

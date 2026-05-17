@@ -497,12 +497,16 @@ func TestPutManifestVersion_PreviousVersionIDMalformed_400(t *testing.T) {
 // PUT — `previous_version_id` FK target row missing → stable 400.
 // -----------------------------------------------------------------------
 
-// TestPutManifestVersion_PreviousVersionIDUnknown_400 — a syntactically
-// valid UUID whose target row does not exist surfaces as a Postgres
-// `23503 foreign_key_violation` on `manifest_version_previous_version_id_fkey`;
-// the handler translates that to a stable 400 `unknown_previous_version_id`
-// so the M3.4 `manifest.rollback` tool can distinguish "no such version"
-// from a generic 500.
+// TestPutManifestVersion_PreviousVersionIDUnknown_400 — defense-in-depth
+// path: if the INSERT's own NOT EXISTS gate for same-manifest is
+// somehow bypassed (e.g. a race between the gate's SELECT and the FK
+// check), the FK violation `manifest_version_previous_version_id_fkey`
+// surfaces as a Postgres `23503 foreign_key_violation`. The handler
+// translates that to a stable 400 `unknown_previous_version_id` so the
+// M3.4 `manifest.rollback` tool can distinguish "no such version" from
+// a generic 500. In production the same-manifest WHERE EXISTS gate
+// catches the missing-row case first (returning pgx.ErrNoRows → 404
+// not_found, exercised in TestPutManifestVersion_PreviousVersionIDCrossManifest_404).
 func TestPutManifestVersion_PreviousVersionIDUnknown_400(t *testing.T) {
 	queryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
 		return server.NewFakeRowErr(&pgconn.PgError{
@@ -533,6 +537,53 @@ func TestPutManifestVersion_PreviousVersionIDUnknown_400(t *testing.T) {
 	}
 	if env.Error != "unknown_previous_version_id" {
 		t.Errorf("error = %q, want unknown_previous_version_id", env.Error)
+	}
+}
+
+// TestPutManifestVersion_PreviousVersionIDCrossManifest_404 — the M3.3
+// same-manifest invariant for previous_version_id. The INSERT's WHERE
+// clause includes a NOT-NULL-implies-EXISTS-same-manifest subquery
+// (`$15::uuid IS NULL OR EXISTS (... AND manifest_id = $1)`) so a row
+// that names a previous_version_id whose target row lives under a
+// DIFFERENT manifest_id never lands in the table. Postgres returns
+// no row through RETURNING → pgx.ErrNoRows → 404 not_found, mirroring
+// the cross-tenant rejection contract documented on
+// `handleInsertWatchkeeper`. This is the schema-write-path enforcement
+// of the audit-chain invariant the M3.4 `manifest.rollback` tool
+// relies on; without it, a caller in org A could persist a
+// previous_version_id pointing at org B's row (the FK is unscoped) —
+// codex iter-1 P1.
+func TestPutManifestVersion_PreviousVersionIDCrossManifest_404(t *testing.T) {
+	// The fake returns pgx.ErrNoRows: in production the WHERE clause
+	// filters out the row (either the manifest does not belong to the
+	// claim's tenant, OR the previous_version_id row's manifest_id
+	// doesn't match $1). Either branch lands the same surface — the
+	// handler maps both to 404 not_found by design.
+	queryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRowErr(pgx.ErrNoRows)
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":          1,
+			"system_prompt":       "ok",
+			"previous_version_id": "22222222-2222-4222-8222-222222222222",
+		}, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != "not_found" {
+		t.Errorf("error = %q, want not_found", env.Error)
 	}
 }
 

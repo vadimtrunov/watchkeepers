@@ -682,6 +682,25 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 			// policy from migration 013 is the defense-in-depth
 			// backstop; the explicit EXISTS keeps the 404 surface
 			// (rather than the RLS-level error path) deterministic.
+			// M3.3 same-manifest invariant for previous_version_id: the
+			// FK from migration 031 only ensures the target row exists
+			// somewhere in the manifest_version table; it does NOT
+			// constrain the target row's manifest_id. Without an
+			// additional gate, a caller in org A could persist
+			// `previous_version_id = <UUID known to belong to manifest
+			// B>` and corrupt the audit chain — worse, the cross-tenant
+			// case would land a `previous_version_id` pointing at
+			// another org's row (the FK is unscoped). The
+			// `NOT EXISTS (... previous_version_id IS NOT NULL AND no
+			// matching row)` clause below rejects the row at INSERT
+			// time when the target row's manifest_id doesn't match $1,
+			// surfacing pgx.ErrNoRows → handler 404 not_found. The M3.4
+			// `manifest.rollback` tool relies on the chain being
+			// same-manifest-only; this is the schema-layer enforcement
+			// of that invariant. A future migration MAY add a composite
+			// (id, manifest_id) UNIQUE + composite FK to push the
+			// guarantee fully into the schema; M3.3 keeps the change
+			// minimal by enforcing it at the write path instead.
 			return tx.QueryRow(
 				ctx, `
                 INSERT INTO watchkeeper.manifest_version (
@@ -704,6 +723,13 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
                 WHERE EXISTS (
                     SELECT 1 FROM watchkeeper.manifest
                     WHERE id = $1 AND organization_id = $17
+                )
+                AND (
+                    $15::uuid IS NULL
+                    OR EXISTS (
+                        SELECT 1 FROM watchkeeper.manifest_version
+                        WHERE id = $15::uuid AND manifest_id = $1
+                    )
                 )
                 RETURNING id
             `, manifestID, body.VersionNo, body.SystemPrompt,
