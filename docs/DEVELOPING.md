@@ -523,6 +523,82 @@ The Make target enforces the env guard before invoking
 DSN fails loudly. CI runs the same target under the `Keep Integration
 CI` job.
 
+## LLM provider
+
+The harness ships two concrete `LLMProvider` implementations plus a
+`FakeProvider` for tests. `ClaudeCodeProvider` talks to the Anthropic
+Messages API directly (API key required). `ClaudeAgentProvider` wraps
+`@anthropic-ai/claude-agent-sdk` and can run against either an API key
+OR a local `claude` CLI Pro/Max subscription — the SDK auto-detects
+whichever credential is present. `FakeProvider` is synchronous,
+deterministic, and has no network dependency; the full test suite uses
+it exclusively. Adding a fourth provider means implementing the four
+`LLMProvider` methods and passing the relevant `ProviderCase` into the
+conformance suite — no other file needs to change.
+
+### Selecting a provider
+
+The env var `WATCHKEEPER_LLM_PROVIDER` selects which concrete
+implementation `buildProviderFromSecrets` in `harness/src/index.ts`
+constructs at boot.
+
+| Value                     | Provider              | Auth modes supported                       |
+| ------------------------- | --------------------- | ------------------------------------------ |
+| `anthropic-api` (default) | `ClaudeCodeProvider`  | API key only                               |
+| `claude-agent`            | `ClaudeAgentProvider` | API key OR local `claude` CLI subscription |
+
+When the variable is unset or empty the harness falls back to
+`anthropic-api`. An unrecognised value falls back to `anthropic-api`
+and emits a `WARN` line on stderr so a configuration typo surfaces in
+the boot log rather than silently picking the wrong provider.
+
+The API-key path (`anthropic-api`) calls the raw Anthropic Messages
+API; `ANTHROPIC_API_KEY` (read through the secrets seam — see
+`harness/src/secrets/env.ts`) must be present or the harness boots in
+degraded mode with LLM methods unavailable. The subscription path
+(`claude-agent`) does not require an API key: when `ANTHROPIC_API_KEY`
+is absent the Agent SDK looks for a locally authenticated `claude` CLI
+session. API key and subscription can coexist — the key wins when both
+are present.
+
+### Tool bridge
+
+`ClaudeAgentProvider` preserves the outbound-tool contract of the
+`LLMProvider` interface via an in-process MCP stub server combined with
+an iterator interceptor: when the SDK yields an assistant message
+containing `tool_use` blocks the interceptor captures them, calls
+`iter.interrupt()`, and returns a single-turn result. The runtime
+still owns tool execution; the harness never routes a real tool call
+into the SDK's own handler dispatch. A sentinel-tagged error in the stub
+MCP handler acts as belt-and-suspenders detection for any race between
+the assistant message arrival and the interrupt. Full design rationale
+is in
+`docs/superpowers/specs/2026-05-17-m5-7-c-tool-bridge-design.md`.
+
+### Cost metadata
+
+`ClaudeAgentProvider` surfaces the following keys in `Usage.metadata`
+for cost analysis:
+
+- `cacheReadInputTokens` — sum of cache-read tokens across all SDK
+  sub-turns (omitted when zero).
+- `cacheCreationInputTokens` — sum of cache-creation tokens across all
+  SDK sub-turns (omitted when zero).
+- `model:<name>` — per-model breakdown as
+  `"<inputTokens>/<outputTokens>/<costUSD>"`. The cost value uses
+  `toFixed(9)` (nine decimal places) to prevent numbers like `1e-7`
+  collapsing to scientific notation in the JSON wire format.
+
+### Known limitations
+
+- `ClaudeAgentProvider.countTokens` is not implemented. Calling it
+  raises a `providerUnavailable` error. The conformance suite marks it
+  via `skipMethods: ["countTokens"]` so the gap is visible to
+  maintainers without flaking the test run.
+- Inbound `role=tool` message folding (feeding tool results back to the
+  model in a multi-turn conversation) is deferred to the cross-cutting
+  M5.3.c.c.c slice and applies to both providers.
+
 ## Provisioning the dev Slack workspace
 
 ROADMAP §M4.3 wires a parent Slack app via Slack's Manifest API. The

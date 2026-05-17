@@ -359,6 +359,7 @@ Build the minimal viable Party: a **Watchmaster** meta-agent that can spawn a **
 - [x] **M5.7** **Provider plumbing** — Claude Code credentials flow through the secrets interface (no `ANTHROPIC_API_KEY` references in core); a dummy `FakeProvider` passes the same harness tests as the real provider, proving swap-without-touching-core.
   - [x] **M5.7.a** Route Claude Code credentials through secrets.SecretSource and enforce no ANTHROPIC_API_KEY literal in core/ (grep-invariant CI check)
   - [x] **M5.7.b** FakeProvider conformance suite — parameterised TS tests run against both FakeProvider and ClaudeCodeProvider proving swap-without-touching-core
+  - [x] **M5.7.c** ClaudeAgentProvider — second concrete LLMProvider wrapping @anthropic-ai/claude-agent-sdk, enabling local `claude` CLI Pro/Max subscription auth (Phase 1 DoD §7 #1 path A2 subscription mode) alongside the existing API-key path. Outbound tool bridge intercepts model `tool_use` blocks through an in-process MCP stub server; runtime still owns tool execution. Inbound `role=tool` translation deferred to cross-cutting M5.3.c.c.c.
 
 **Artifacts**: Go `runtime/` and `llm/` packages, TS `harness/` package, JSON-RPC contract doc, provider conformance test harness.
 
@@ -662,7 +663,7 @@ Implementation milestones M1–M10 are shipped, but the eight Definition-of-Done
 Parallelizable. Without these, no live verification of §7 #1–#6 is possible.
 
 - [ ] **A1** Dev Slack workspace provisioned, admin access, parent app with `app_configuration` scope. Unblocks M4 / M6 / M7 / §7 #2 #3.
-- [ ] **A2** Claude Code installed on every harness host, credentials wired through the secrets interface (no raw `ANTHROPIC_API_KEY`). Unblocks M5 / §7 #3.
+- [ ] **A2** Claude Code installed on every harness host, credentials wired through the secrets interface (no raw `ANTHROPIC_API_KEY`). M5.7.c (ClaudeAgentProvider) ships the subscription-auth code path; operator-side setup of the local `claude` CLI subscription OR the API-key secrets file is still required per host. See `docs/operator-runbook.md` §"Claude credentials (A2)". Unblocks M5 / §7 #3.
 - [ ] **A3** Jira test project with API credentials and ≥2 seeded tickets. Unblocks M8 / §7 #4.
 - [ ] **A4** `watchkeeper-tools` repo created + shared CI workflow template published + reachable by core. Unblocks M9 / §7 #5.
 

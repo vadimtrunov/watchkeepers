@@ -544,6 +544,85 @@ Operators probing the future deployment shape run
 `docker compose --profile stubs up <name>`; the stub stays in
 `Running` state with the banner readable via `compose logs <name>`.
 
+### Claude credentials (A2)
+
+The harness must be able to reach a Claude model to answer Watch Orders.
+Phase 1 supports two credential paths and the choice is made via the
+`WATCHKEEPER_LLM_PROVIDER` env var. Path A2.1 works with both providers;
+path A2.2 requires `claude-agent` mode. See
+`docs/DEVELOPING.md#LLM-provider` for the full provider comparison table.
+
+#### Path A2.1 — API key (`ANTHROPIC_API_KEY`)
+
+Works with both `anthropic-api` (the default) and `claude-agent` providers.
+
+1. Generate an Anthropic console key at <https://console.anthropic.com/>.
+
+2. Write the key into the secrets directory:
+
+   ```bash
+   ( umask 077 && printf '%s' '<key>' > secrets/anthropic_api_key )
+   ```
+
+   The secrets seam (`harness/src/secrets/env.ts`) reads
+   `ANTHROPIC_API_KEY` from the environment; the deployment's secret
+   mount or the `.env` file should export it from the file:
+
+   ```bash
+   export ANTHROPIC_API_KEY="$(cat secrets/anthropic_api_key)"
+   ```
+
+3. Restart the harness process. The boot log will no longer emit the
+   `WARN: no Anthropic API key` line when a key is present.
+
+#### Path A2.2 — Subscription (`claude` CLI Pro/Max)
+
+Only available with `WATCHKEEPER_LLM_PROVIDER=claude-agent`. The Agent
+SDK auto-detects a locally authenticated `claude` CLI session when
+`ANTHROPIC_API_KEY` is absent — no key file needed.
+
+1. Install the Claude Code CLI by following the instructions in the
+   Claude Code documentation (quickstart). Verify the install:
+
+   ```bash
+   claude --version
+   ```
+
+2. Complete the subscription login by running `claude` interactively
+   once on the harness host:
+
+   ```bash
+   claude
+   ```
+
+   Follow the browser prompts to authenticate your Pro or Max subscription.
+   The session credentials are stored locally by the CLI.
+
+3. Set the provider in `.env` (or the deployment env):
+
+   ```bash
+   WATCHKEEPER_LLM_PROVIDER=claude-agent
+   ```
+
+   Do NOT set `ANTHROPIC_API_KEY`; if both are present the key wins and
+   the subscription path is bypassed.
+
+4. Restart the harness. Confirm the provider is active by checking the
+   boot log for `harness/ready` emitted without the API-key warning.
+
+#### Verification
+
+Run the conformance suite with the desired env in place:
+
+```bash
+WATCHKEEPER_LLM_PROVIDER=claude-agent pnpm -C harness test -- llm-conformance
+```
+
+`FakeProvider` always runs. The live providers (`ClaudeCodeProvider`,
+`ClaudeAgentProvider`) run only when the required credential is present;
+otherwise those cases skip. See `docs/ROADMAP-phase1.md` §10 Phase A item
+A2 for the full prerequisite list and deployment closure criteria.
+
 ### Credential rotation
 
 Phase 1 holds three credential surfaces. Rotation is always a
