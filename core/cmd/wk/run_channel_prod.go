@@ -8,6 +8,24 @@ package main
 // the M1.1.b channel primitives. Hoisted into its own file so the
 // CLI's per-subcommand logic in `run_channel.go` stays focused on
 // flag parsing + the test-injection seam.
+//
+// TRUST MODEL (iter-1 codex Major fix): `wk` is the operator-trusted
+// CLI per the package-level doc on `main.go` — every Keep-backed
+// subcommand consumes `WATCHKEEPER_OPERATOR_TOKEN` from env as a
+// bearer credential and relies on Keep's server-side claim
+// verification for tenant scoping. `wk channel reveal` does NOT go
+// through Keep (M1.1.c has no Keep HTTP endpoint for K2K rows yet —
+// that's an M1.4+ follow-up), so it builds its own org-scoped
+// `auth.Claim` from `WATCHKEEPER_OPERATOR_ORG_ID`. The trust posture
+// is identical to the rest of `wk`: the operator who can run the
+// binary with the DB DSN is already trusted to set the org id; an
+// operator pivoting tenants by swapping the env var is no different
+// than the same operator running `wk` against a different Keep
+// deployment with a different operator token. Future hardening:
+// route `wk channel reveal` through a Keep HTTP endpoint that
+// derives the org claim from a verified operator token, mirroring
+// the existing `wk inspect` / `wk list` Keep-backed surfaces. This
+// is tracked as a follow-up in the M1.1.c lesson entry.
 
 import (
 	"context"
@@ -52,10 +70,18 @@ type productionChannelResolver struct {
 // M1.1.a "Postgres adapter must take a per-call Querier, not a
 // pgxpool.Pool" wiring contract documented on
 // `core/pkg/k2k/postgres.go`. Returns the bound `slack_channel_id`
-// or [k2k.ErrConversationNotFound] (wrapped) when the row is missing
-// / RLS-invisible.
-func (r *productionChannelResolver) ResolveSlackChannel(ctx context.Context, conversationID uuid.UUID) (string, error) {
-	var channelID string
+// + the row's [k2k.Status] (as a string so the CLI does not need to
+// import the k2k package's enum) or [k2k.ErrConversationNotFound]
+// (wrapped) when the row is missing / RLS-invisible.
+//
+// Returning the status (iter-1 codex Minor fix) lets the CLI
+// fail-fast on archived rows with a domain-level diagnostic rather
+// than burning a Slack API call that surfaces `is_archived`.
+func (r *productionChannelResolver) ResolveSlackChannel(ctx context.Context, conversationID uuid.UUID) (string, string, error) {
+	var (
+		channelID string
+		status    string
+	)
 	err := db.WithScope(ctx, r.pool, r.claim, func(scopedCtx context.Context, tx pgx.Tx) error {
 		repo := k2k.NewPostgresRepository(tx, nil)
 		conv, getErr := repo.Get(scopedCtx, conversationID)
@@ -63,12 +89,13 @@ func (r *productionChannelResolver) ResolveSlackChannel(ctx context.Context, con
 			return getErr
 		}
 		channelID = conv.SlackChannelID
+		status = string(conv.Status)
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return channelID, nil
+	return channelID, status, nil
 }
 
 // RevealChannel forwards to [*slack.Client.RevealChannel]. The M1.1.b

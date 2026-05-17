@@ -157,12 +157,20 @@ type Repository interface {
 	IncTokens(ctx context.Context, id uuid.UUID, delta int64) (int64, error)
 
 	// BindSlackChannel stamps `slackChannelID` onto an existing open
-	// row. Driven by the M1.1.c lifecycle wiring after a successful
-	// `CreateChannel` call: the K2K Open() flow opens the repository
-	// row (which mints the conversation id), uses that id to derive the
-	// Slack channel name, calls Slack `conversations.create`, then
-	// binds the returned channel id back onto the row before fan-out
-	// invite + return to the caller.
+	// row. Driven by the M1.1.c lifecycle wiring AFTER a successful
+	// `CreateChannel` call and BEFORE the `InviteToChannel` fan-out:
+	// the K2K Open() flow opens the repository row (which mints the
+	// conversation id), uses that id to derive the Slack channel name,
+	// calls Slack `conversations.create`, binds the returned channel id
+	// back onto the row, then fans out the participant invites.
+	// Bind-before-invite ordering (iter-1 codex Major fix) is
+	// load-bearing: a concurrent `Close` racing the Open() between
+	// `CreateChannel` and the bind would archive the row while leaving
+	// the Slack channel live and unreachable (`Close` skips
+	// `ArchiveChannel` when SlackChannelID is empty, by design for the
+	// orphan-row path). Binding before the invite makes the row+channel
+	// pair atomically consistent from the moment any reader sees the
+	// row.
 	//
 	// Resolution order:
 	//   1. ctx.Err — refuses a pre-cancelled ctx.

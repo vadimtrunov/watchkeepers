@@ -61,14 +61,18 @@ const (
 // stubs to implement methods the CLI never calls. Mirrors the
 // "narrow per-call seam" discipline from M1.1.a's [k2k.Querier].
 type channelResolver interface {
-	// ResolveSlackChannel returns the `slack_channel_id` bound to the
-	// supplied K2K conversation id, scoped to the operator's
-	// organization. Returns the empty string when the row exists but
-	// has no Slack channel bound (an M1.1.c orphan from a failed
-	// Open()); the caller surfaces a typed error in that case so the
-	// operator gets a clear "channel not provisioned" diagnostic
-	// rather than a Slack-side `channel_not_found`.
-	ResolveSlackChannel(ctx context.Context, conversationID uuid.UUID) (string, error)
+	// ResolveSlackChannel returns the `slack_channel_id` plus the
+	// row's lifecycle [k2k.Status] bound to the supplied K2K
+	// conversation id, scoped to the operator's organization.
+	// Returning the status alongside the channel id (iter-1 codex
+	// Minor fix) lets the CLI fail-fast on archived rows with a
+	// domain-level diagnostic rather than burning a Slack API call
+	// that surfaces `is_archived`.
+	//
+	// Returns an empty channel id when the row exists but has no
+	// Slack channel bound (an M1.1.c orphan from a failed Open());
+	// the caller surfaces a typed error in that case.
+	ResolveSlackChannel(ctx context.Context, conversationID uuid.UUID) (channelID string, status string, err error)
 
 	// RevealChannel calls Slack `conversations.invite` (single-user
 	// payload) to reveal the channel to the supplied human user. The
@@ -168,9 +172,20 @@ func runChannelReveal(ctx context.Context, args []string, stdout, stderr io.Writ
 		defer cleanup()
 	}
 
-	channelID, err := resolver.ResolveSlackChannel(ctx, convID)
+	channelID, status, err := resolver.ResolveSlackChannel(ctx, convID)
 	if err != nil {
 		stderrf(stderr, fmt.Sprintf("wk: channel reveal: resolve conversation %s: %v\n", convID, err))
+		return 1
+	}
+	// Iter-1 codex Minor fix: fail-fast on archived rows with a
+	// domain-level diagnostic instead of burning a Slack API call
+	// that surfaces `is_archived`. Matches M1's fail-fast-precedes-
+	// Slack discipline from the lessons.
+	if status == "archived" {
+		stderrf(stderr, fmt.Sprintf(
+			"wk: channel reveal: conversation %s is already archived; reveal is not meaningful on a closed K2K channel\n",
+			convID,
+		))
 		return 1
 	}
 	if channelID == "" {

@@ -15,10 +15,14 @@ import (
 // project test discipline. Captures every call so tests can assert
 // resolver / Slack-side interactions independently.
 type fakeChannelResolver struct {
-	resolveID      uuid.UUID
-	resolveReturns string
-	resolveErr     error
-	resolveCalls   int
+	resolveID            uuid.UUID
+	resolveReturnsChanID string
+	// resolveReturnsStatus defaults to "open" (the lifecycle's
+	// initial state) so tests that don't care about status can leave
+	// it zero-valued via the "open"-default branch.
+	resolveReturnsStatus string
+	resolveErr           error
+	resolveCalls         int
 
 	revealChannel string
 	revealUser    string
@@ -26,10 +30,14 @@ type fakeChannelResolver struct {
 	revealCalls   int
 }
 
-func (f *fakeChannelResolver) ResolveSlackChannel(_ context.Context, id uuid.UUID) (string, error) {
+func (f *fakeChannelResolver) ResolveSlackChannel(_ context.Context, id uuid.UUID) (string, string, error) {
 	f.resolveCalls++
 	f.resolveID = id
-	return f.resolveReturns, f.resolveErr
+	status := f.resolveReturnsStatus
+	if status == "" {
+		status = "open"
+	}
+	return f.resolveReturnsChanID, status, f.resolveErr
 }
 
 func (f *fakeChannelResolver) RevealChannel(_ context.Context, channelID, userID string) error {
@@ -177,8 +185,28 @@ func TestChannelReveal_ResolveError_RuntimeExit(t *testing.T) {
 	}
 }
 
+func TestChannelReveal_ArchivedRow_FailsFastBeforeSlack(t *testing.T) {
+	fake := &fakeChannelResolver{resolveReturnsChanID: "C-X", resolveReturnsStatus: "archived"}
+	withFakeResolver(t, fake, nil)
+
+	convID := uuid.New()
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{
+		"channel", "reveal", "--user", "U-1", convID.String(),
+	}, &stdout, &stderr, &fakeEnv{})
+	if code != 1 {
+		t.Errorf("exit: got %d want 1", code)
+	}
+	if fake.revealCalls != 0 {
+		t.Errorf("reveal calls = %d, want 0 (archived row must fail before Slack)", fake.revealCalls)
+	}
+	if !strings.Contains(stderr.String(), "already archived") {
+		t.Errorf("stderr missing archived diagnostic: %q", stderr.String())
+	}
+}
+
 func TestChannelReveal_EmptyChannelID_RuntimeExit(t *testing.T) {
-	fake := &fakeChannelResolver{resolveReturns: ""}
+	fake := &fakeChannelResolver{resolveReturnsChanID: ""}
 	withFakeResolver(t, fake, nil)
 
 	convID := uuid.New()
@@ -199,8 +227,8 @@ func TestChannelReveal_EmptyChannelID_RuntimeExit(t *testing.T) {
 
 func TestChannelReveal_RevealError_RuntimeExit(t *testing.T) {
 	fake := &fakeChannelResolver{
-		resolveReturns: "C-X",
-		revealErr:      errors.New("slack: conversations.invite: 401"),
+		resolveReturnsChanID: "C-X",
+		revealErr:            errors.New("slack: conversations.invite: 401"),
 	}
 	withFakeResolver(t, fake, nil)
 
@@ -220,7 +248,7 @@ func TestChannelReveal_RevealError_RuntimeExit(t *testing.T) {
 }
 
 func TestChannelReveal_HappyPath(t *testing.T) {
-	fake := &fakeChannelResolver{resolveReturns: "C-ABC"}
+	fake := &fakeChannelResolver{resolveReturnsChanID: "C-ABC"}
 	withFakeResolver(t, fake, nil)
 
 	convID := uuid.New()

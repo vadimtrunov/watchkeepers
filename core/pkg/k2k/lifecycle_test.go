@@ -3,7 +3,6 @@ package k2k_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -283,7 +282,7 @@ func TestLifecycle_Open_EmptyChannelIDReturned_FailsFast(t *testing.T) {
 	}
 }
 
-func TestLifecycle_Open_InviteError_RowRemainsOpen(t *testing.T) {
+func TestLifecycle_Open_InviteError_RowRemainsOpenWithBoundChannel(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("slack: conversations.invite: simulated")
@@ -298,8 +297,11 @@ func TestLifecycle_Open_InviteError_RowRemainsOpen(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Errorf("Open: err = %v, want wrap of sentinel", err)
 	}
-	// Row exists open with empty SlackChannelID — bind did NOT run
-	// because invite failed first.
+	// Bind-before-invite ordering (iter-1 codex Major fix): the row
+	// carries the bound SlackChannelID even though the subsequent
+	// invite call failed. A follow-up Close on this row will
+	// correctly archive both the row AND the live Slack channel
+	// (no orphan-channel leak).
 	rows, listErr := repo.List(
 		context.Background(),
 		k2k.ListFilter{OrganizationID: p.OrganizationID, Status: k2k.StatusOpen},
@@ -310,9 +312,64 @@ func TestLifecycle_Open_InviteError_RowRemainsOpen(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1", len(rows))
 	}
-	if rows[0].SlackChannelID != "" {
-		t.Errorf("post-invite-fail row SlackChannelID = %q, want empty", rows[0].SlackChannelID)
+	if rows[0].SlackChannelID != "C-X" {
+		t.Errorf("post-invite-fail row SlackChannelID = %q, want %q (bind precedes invite)", rows[0].SlackChannelID, "C-X")
 	}
+}
+
+// TestLifecycle_Open_BindPrecedesInvite pins the iter-1 codex Major
+// fix: Repository.BindSlackChannel is called BEFORE
+// SlackChannels.InviteToChannel so a concurrent Close cannot observe
+// a row with empty SlackChannelID after CreateChannel succeeded. We
+// drive the ordering with a fake InviteToChannel that reads back the
+// row state and asserts the bind already happened.
+func TestLifecycle_Open_BindPrecedesInvite(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(t)
+	var capturedChannelIDAtInvite string
+	probe := &probingFakeSlack{
+		fakeSlackChannels: fakeSlackChannels{createReturns: "C-INV"},
+		onInvite: func(_ string) {
+			rows, _ := repo.List(
+				context.Background(),
+				k2k.ListFilter{OrganizationID: lastOrgIDForProbing, Status: k2k.StatusOpen},
+			)
+			if len(rows) == 1 {
+				capturedChannelIDAtInvite = rows[0].SlackChannelID
+			}
+		},
+	}
+	lc := k2k.NewLifecycle(k2k.LifecycleDeps{Repo: repo, Slack: probe})
+
+	p := validParams()
+	lastOrgIDForProbing = p.OrganizationID
+	if _, err := lc.Open(context.Background(), p); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if capturedChannelIDAtInvite != "C-INV" {
+		t.Errorf("at-invite SlackChannelID = %q, want %q (bind must precede invite)", capturedChannelIDAtInvite, "C-INV")
+	}
+}
+
+// lastOrgIDForProbing is used by the bind-precedes-invite probe so
+// the InviteToChannel callback can re-query the repo by org. Scoped
+// to a package var (not test-local closure) because the probe
+// callback runs from inside lifecycle.Open's call stack.
+var lastOrgIDForProbing uuid.UUID
+
+// probingFakeSlack extends fakeSlackChannels with an InviteToChannel
+// hook so a test can observe lifecycle ordering invariants.
+type probingFakeSlack struct {
+	fakeSlackChannels
+	onInvite func(channelID string)
+}
+
+func (f *probingFakeSlack) InviteToChannel(ctx context.Context, channelID string, userIDs []string) error {
+	if f.onInvite != nil {
+		f.onInvite(channelID)
+	}
+	return f.fakeSlackChannels.InviteToChannel(ctx, channelID, userIDs)
 }
 
 func TestLifecycle_Open_DefensiveCopyOfParticipants(t *testing.T) {
@@ -566,8 +623,3 @@ func equalStringSlice(a, b []string) bool {
 	}
 	return true
 }
-
-// Ensure unused imports trip a build failure if a future refactor
-// removes a reference. Hoisted under a no-op to keep the file
-// self-contained.
-var _ = fmt.Sprintf

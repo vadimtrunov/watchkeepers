@@ -13,12 +13,23 @@
 //	Open  → ctx.Err → param validation (delegated to Repository) →
 //	        Repository.Open (mints row id) → derive channel name
 //	        (`k2k-<id-prefix>`) → SlackChannels.CreateChannel(private=true)
-//	        → SlackChannels.InviteToChannel(participants) →
-//	        Repository.BindSlackChannel(id, slackChannelID) → Get to
+//	        → Repository.BindSlackChannel(id, slackChannelID) →
+//	        SlackChannels.InviteToChannel(participants) → Get to
 //	        return the row reflecting the bound channel id.
 //	Close → ctx.Err → Repository.Get (resolves the bound channel id)
 //	        → SlackChannels.ArchiveChannel (idempotent on
 //	        `already_archived`) → Repository.Close(id, reason).
+//
+// Bind-before-invite ordering (iter-1 codex Major fix): a concurrent
+// Close racing with Open() in the window between CreateChannel and
+// BindSlackChannel would archive the row while leaving the Slack
+// channel live — `Close` skips ArchiveChannel when SlackChannelID is
+// empty, by design for the orphan-row path. Persisting the channel
+// id BEFORE the invite fan-out closes that window: any concurrent
+// Close after CreateChannel observes the bound channel id and can
+// archive the channel correctly. The invite step can still fail, but
+// the row+channel pair is consistent in that case (the channel exists
+// AND is bound to the row; Close will archive both correctly).
 //
 // audit discipline: this file does NOT import `keeperslog` and does
 // NOT call `.Append(`. The K2K event taxonomy
@@ -212,27 +223,38 @@ func DeriveChannelName(id uuid.UUID) string {
 //     [SlackChannels.CreateChannel](name, isPrivate=true). M1.1.b
 //     idempotently resolves a `name_taken` collision against a
 //     non-archived same-name same-kind channel by returning its id.
-//  4. Fan-out invite to the participant bots via
+//  4. Bind the resolved `slack_channel_id` onto the row via
+//     [Repository.BindSlackChannel] — BEFORE the invite fan-out so
+//     a concurrent [Close] in this window cannot leak the Slack
+//     channel as an orphan unreachable from the persisted row
+//     (iter-1 codex Major fix).
+//  5. Fan-out invite to the participant bots via
 //     [SlackChannels.InviteToChannel]. Slack's all-or-nothing
 //     multi-user invite semantics surface as
 //     [slack.ErrAlreadyInChannel] for partial-member batches per
 //     the M1.1.b contract; the lifecycle layer surfaces this verbatim
 //     so the caller can decide on retry strategy (the K2K consumer
 //     of the lifecycle owns the saga-replay discipline).
-//  5. Bind the resolved `slack_channel_id` onto the row via
-//     [Repository.BindSlackChannel].
 //  6. [Repository.Get] the row to return the up-to-date
 //     [Conversation] with the bound channel id.
 //
-// On Slack-side failure between steps 3–5 the persisted row remains
-// in [StatusOpen] with an empty `slack_channel_id` — the caller can
-// retry Open() with the same params (a fresh conversation id will be
-// minted; the orphan row is the lifecycle layer's deliberate ledger of
-// the failed attempt for the M1.4 audit subscriber). The orphan-row
-// cleanup is M1.7's responsibility (the archive-on-summary writer
-// reconciles any orphans by closing them with a stable sentinel
-// reason); shipping cleanup here would couple the lifecycle layer to
-// M1.7 and double-archive on a successful retry.
+// Failure modes:
+//
+//   - Slack [CreateChannel] failure (step 3): the persisted row remains
+//     in [StatusOpen] with empty `slack_channel_id`. The orphan-row
+//     pattern from M1.1.a applies — M1.7's archive-on-summary writer
+//     is the canonical reaper.
+//   - [BindSlackChannel] failure (step 4) AFTER a successful Slack
+//     [CreateChannel]: the Slack channel is live but unbound. The
+//     M1.7 reaper is the same path; the M1.1.c godoc on
+//     [Repository.BindSlackChannel] documents the one-shot contract
+//     so a future contributor never tries silent re-bind.
+//   - [InviteToChannel] failure (step 5): the row carries the bound
+//     channel id; a subsequent [Close] archives both row and Slack
+//     channel correctly. Iter-1 codex Minor fix relative to the
+//     original "bind after invite" ordering — that ordering would
+//     have left a successful-invite + failed-bind interleaving in
+//     which the row pointed at no channel even though one was live.
 //
 // Returns the bound [Conversation] on success.
 func (l *Lifecycle) Open(ctx context.Context, params OpenParams) (Conversation, error) {
@@ -259,12 +281,19 @@ func (l *Lifecycle) Open(ctx context.Context, params OpenParams) (Conversation, 
 		return Conversation{}, fmt.Errorf("k2k: lifecycle open: create channel %q: empty channel id returned", name)
 	}
 
-	if err := l.deps.Slack.InviteToChannel(ctx, channelID, conv.Participants); err != nil {
-		return Conversation{}, fmt.Errorf("k2k: lifecycle open: invite to channel %s: %w", channelID, err)
-	}
-
+	// Bind BEFORE invite (iter-1 codex Major fix): a concurrent Close
+	// racing this Open in the window between CreateChannel and the
+	// row-side bind would archive the DB row while leaving the Slack
+	// channel live and unreachable from the persisted state (Close
+	// skips ArchiveChannel when SlackChannelID is still empty). Doing
+	// the bind first makes the row+channel pair atomically consistent
+	// from the moment any reader sees the row.
 	if err := l.deps.Repo.BindSlackChannel(ctx, conv.ID, channelID); err != nil {
 		return Conversation{}, fmt.Errorf("k2k: lifecycle open: bind slack channel: %w", err)
+	}
+
+	if err := l.deps.Slack.InviteToChannel(ctx, channelID, conv.Participants); err != nil {
+		return Conversation{}, fmt.Errorf("k2k: lifecycle open: invite to channel %s: %w", channelID, err)
 	}
 
 	bound, err := l.deps.Repo.Get(ctx, conv.ID)
