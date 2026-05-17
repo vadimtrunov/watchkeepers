@@ -214,12 +214,17 @@ func (w *WiredRuntime) SendMessage(ctx context.Context, runtimeID ID, msg Messag
 func (w *WiredRuntime) InvokeTool(ctx context.Context, runtimeID ID, call ToolCall) (ToolResult, error) {
 	res, err := w.inner.InvokeTool(ctx, runtimeID, call)
 	if err == nil {
-		// M7.2: success-path reflection. Best-effort: any reflector
+		// M7.2: success-path reflection. Reflect ONLY on a true
+		// success — `err == nil` AND `res.Error == ""`. The runtime
+		// surfaces tool-side logical failures (e.g. "record not
+		// found") via `res.Error` while keeping `err == nil`; those
+		// are NOT success outcomes and the M7.2 sampling contract
+		// targets the success path only. Best-effort: any reflector
 		// error is logged via the wired [*slog.Logger] but does NOT
 		// replace the original tool result returned to the caller.
 		// Sampling is the reflector's responsibility; a nil reflector
 		// is a no-op.
-		if w.successReflector != nil {
+		if w.successReflector != nil && res.Error == "" {
 			callID := ""
 			if call.Metadata != nil {
 				callID = call.Metadata[MetadataKeyToolCallID]

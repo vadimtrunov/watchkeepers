@@ -201,6 +201,110 @@ func TestWiredRuntime_Success_ReflectorFailure_OriginalResultPreserved(t *testin
 	_ = res
 }
 
+// fakeAgentRuntimeToolError is a stand-in whose InvokeTool returns
+// `(ToolResult{Error: "tool said no"}, nil)` — the runtime-level
+// `err == nil` SUCCESS path but with a tool-side logical failure
+// reported via ToolResult.Error. The M7.2 success reflector MUST
+// short-circuit on this branch so a tool-reported failure does not
+// surface as an `observation` row.
+type fakeAgentRuntimeToolError struct {
+	t         *testing.T
+	toolset   map[string]struct{}
+	startedID runtime.ID
+}
+
+func newFakeAgentRuntimeToolError(t *testing.T) *fakeAgentRuntimeToolError {
+	t.Helper()
+	return &fakeAgentRuntimeToolError{t: t}
+}
+
+func (f *fakeAgentRuntimeToolError) Start(_ context.Context, manifest runtime.Manifest, _ ...runtime.StartOption) (runtime.Runtime, error) {
+	if manifest.AgentID == "" || manifest.SystemPrompt == "" || manifest.Model == "" {
+		return nil, runtime.ErrInvalidManifest
+	}
+	names := manifest.Toolset.Names()
+	f.toolset = make(map[string]struct{}, len(names))
+	for _, name := range names {
+		f.toolset[name] = struct{}{}
+	}
+	f.startedID = runtime.ID("fake-wired-runtime-tool-error-1")
+	return &fakeRuntimeHandle{id: f.startedID}, nil
+}
+
+func (f *fakeAgentRuntimeToolError) SendMessage(_ context.Context, _ runtime.ID, _ runtime.Message) error {
+	return nil
+}
+
+func (f *fakeAgentRuntimeToolError) InvokeTool(_ context.Context, id runtime.ID, call runtime.ToolCall) (runtime.ToolResult, error) {
+	if call.Name == "" {
+		return runtime.ToolResult{}, runtime.ErrInvalidToolCall
+	}
+	if id != f.startedID {
+		return runtime.ToolResult{}, runtime.ErrRuntimeNotFound
+	}
+	if _, ok := f.toolset[call.Name]; !ok {
+		return runtime.ToolResult{}, runtime.ErrToolUnauthorized
+	}
+	return runtime.ToolResult{Error: "tool said no"}, nil
+}
+
+func (f *fakeAgentRuntimeToolError) Subscribe(_ context.Context, _ runtime.ID, _ runtime.EventHandler) (runtime.Subscription, error) {
+	return nil, nil
+}
+
+func (f *fakeAgentRuntimeToolError) Terminate(_ context.Context, _ runtime.ID) error {
+	return nil
+}
+
+// TestWiredRuntime_Success_ToolReportedError_NoReflection verifies the
+// success reflector does NOT fire when the runtime returns
+// `(ToolResult{Error: ...}, nil)`. The roadmap targets "tool-call
+// SUCCESS"; a tool-reported logical failure is NOT a success even
+// though the transport-level `err` is nil.
+func TestWiredRuntime_Success_ToolReportedError_NoReflection(t *testing.T) {
+	db := freshReflectorDB(t)
+	inner := newFakeAgentRuntimeToolError(t)
+
+	successReflector, err := runtime.NewToolSuccessReflector(
+		db,
+		runtime.WithSuccessEmbedder(llm.NewFakeEmbeddingProvider()),
+		runtime.WithSuccessSampler(alwaysSampler()),
+	)
+	if err != nil {
+		t.Fatalf("NewToolSuccessReflector: %v", err)
+	}
+
+	w := runtime.NewWiredRuntime(
+		inner,
+		runtime.WithAgentID(reflectorAgentID),
+		runtime.WithToolSuccessReflector(successReflector),
+	)
+
+	mf := newSuccessReflectorManifest(t)
+	if _, err := w.Start(context.Background(), mf); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	for i := 0; i < 20; i++ {
+		res, err := w.InvokeTool(context.Background(), inner.startedID, runtime.ToolCall{
+			Name:        "tool",
+			ToolVersion: "v1",
+			Metadata:    map[string]string{runtime.MetadataKeyToolCallID: "call-" + strconv.Itoa(i)},
+		})
+		if err != nil {
+			t.Fatalf("InvokeTool #%d: %v", i, err)
+		}
+		if res.Error == "" {
+			t.Fatalf("InvokeTool #%d: res.Error = %q, want non-empty", i, res.Error)
+		}
+	}
+
+	obs := recallAllObservations(t, db, time.Now().Add(1*time.Hour))
+	if len(obs) != 0 {
+		t.Errorf("observation count = %d, want 0 (tool-reported error)", len(obs))
+	}
+}
+
 // TestWiredRuntime_Success_AcceptanceCriterion_100CallsRate1in50
 // verifies the M7.2 acceptance criterion at the wiring level: drive
 // 100 successful tool calls through the wired runtime at the default
