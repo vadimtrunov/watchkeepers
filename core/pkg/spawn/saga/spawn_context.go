@@ -98,6 +98,45 @@ type SpawnContext struct {
 	// do not consume this field continue to ignore it (additive change
 	// — every previously-zero usage stays valid).
 	OAuthCode string
+
+	// RoleID is the Phase 2 §M7.1.a opaque role-identity string the
+	// new Watchkeeper carries. The M7.1.c NotebookInheritStep reads it
+	// to call `keepclient.LatestRetiredByRole(ctx,
+	// claim.OrganizationID, sc.RoleID)`; an empty value is the
+	// documented no-predecessor short-circuit (the step skips the
+	// lookup and emits NO audit event — semantically equivalent to a
+	// 404 from the predecessor endpoint). Steps that do not consume
+	// this field continue to ignore it (additive change — every
+	// previously-zero usage stays valid).
+	//
+	// Plumbing: the kickoffer seeds this from the freshly-allocated
+	// Watchkeeper row's `role_id` projection (`*string` → empty when
+	// SQL NULL). Phase-1 admin-grant flow leaves the field empty
+	// until the future Slack-bot binary wires the projection through
+	// the kickoff call site; M7.1.c's NotebookInheritStep degrades
+	// gracefully (no-op + no audit) in that interim.
+	RoleID string
+
+	// NoInherit is the Phase 2 §M7.1.c operator opt-out. When true,
+	// NotebookInheritStep is a documented no-op AND emits NO audit
+	// event (semantically distinct from a no-predecessor miss: the
+	// operator EXPLICITLY suppressed inheritance for this spawn).
+	// Steps that do not consume this field continue to ignore it
+	// (additive change — every previously-zero usage stays valid).
+	//
+	// Plumbing: the `wk spawn --no-inherit` flag captures the
+	// operator's intent at the CLI surface and persists it onto the
+	// `InsertWatchkeeperRequest.NoInherit` field (the Watchmaster's
+	// spawn tool — `core/cmd/wk/run_watchkeeper.go`). Phase-1
+	// admin-grant flow currently terminates the round-trip at the
+	// CLI's success message because the saga is not yet kicked off
+	// from `wk spawn` (the saga runs from the Slack approval
+	// dispatcher path which lands in a future M7.x leaf); when that
+	// wiring lands, the kickoffer's caller will seed this field from
+	// the same row it stored `RoleID` on. The field is load-bearing
+	// at the saga layer today — the NotebookInheritStep honours it
+	// in every test path.
+	NoInherit bool
 }
 
 // WithSpawnContext returns a new context carrying `sc` under

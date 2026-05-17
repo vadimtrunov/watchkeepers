@@ -81,7 +81,10 @@ type ApprovalDispatcherDeps struct {
 	// hands to [saga.Runner.Run] on every Kickoff. Optional — a nil
 	// / empty slice keeps the M7.1.b zero-step behaviour. The
 	// future Slack-bot binary populates this with the M7.1.c–.e
-	// concrete step instances when the binary takes over wiring.
+	// concrete step instances when the binary takes over wiring,
+	// including the Phase 2 §M7.1.c NotebookInherit step (placed
+	// BEFORE NotebookProvision so the provision step finds an
+	// already-seeded file when a predecessor exists).
 	Steps []saga.Step
 }
 

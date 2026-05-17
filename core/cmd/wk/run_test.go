@@ -545,6 +545,64 @@ func TestRun_Spawn_HappyPath(t *testing.T) {
 	}
 }
 
+// TestRun_Spawn_NoInheritFlag_EchoedOnSuccess pins the Phase 2
+// §M7.1.c operator opt-out flag at the CLI surface: `--no-inherit`
+// is accepted AND reflected in the success message so an audit-aware
+// reader of a shell transcript has a record of the operator's intent.
+// The flag is currently a CLI-surface declaration only — the full
+// round-trip into `saga.SpawnContext.NoInherit` lands when the
+// future Slack-bot binary wires the kickoffer; see the
+// `core/internal/keep/approval_wiring/wiring.go` DEFERRED WIRING
+// note and the M7.1.c lesson appendix.
+func TestRun_Spawn_NoInheritFlag_EchoedOnSuccess(t *testing.T) {
+	t.Parallel()
+	srv := fakeKeep(t, map[string]http.HandlerFunc{
+		"POST /v1/watchkeepers": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"id":"00000000-0000-0000-0000-000000000099"}`)
+		},
+	})
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{
+		"spawn",
+		"--manifest", "11111111-1111-1111-1111-111111111111",
+		"--lead", "22222222-2222-2222-2222-222222222222",
+		"--reason", "M7.1.c smoke",
+		"--no-inherit",
+	}, &stdout, &stderr, keepEnv(srv))
+	if code != 0 {
+		t.Fatalf("exit=%d want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "no_inherit=true") {
+		t.Errorf("stdout missing no_inherit echo: %q", stdout.String())
+	}
+}
+
+// TestRun_Spawn_DefaultNoInherit_FalseEcho pins the default
+// (omitted-flag) shape of the success message: `no_inherit=false`
+// must always be present so a downstream parser does not need to
+// branch on flag presence.
+func TestRun_Spawn_DefaultNoInherit_FalseEcho(t *testing.T) {
+	t.Parallel()
+	srv := fakeKeep(t, map[string]http.HandlerFunc{
+		"POST /v1/watchkeepers": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"id":"00000000-0000-0000-0000-000000000098"}`)
+		},
+	})
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{
+		"spawn",
+		"--manifest", "11111111-1111-1111-1111-111111111111",
+		"--lead", "22222222-2222-2222-2222-222222222222",
+		"--reason", "M7.1.c default",
+	}, &stdout, &stderr, keepEnv(srv))
+	if code != 0 {
+		t.Fatalf("exit=%d want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "no_inherit=false") {
+		t.Errorf("stdout missing default no_inherit=false echo: %q", stdout.String())
+	}
+}
+
 func TestRun_Spawn_MissingKeepEnv_UsageError(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
