@@ -239,15 +239,17 @@ func decodeImmutableCore(raw json.RawMessage) (*runtime.ImmutableCore, error) {
 	out := &runtime.ImmutableCore{}
 	// Decode each canonical bucket with the bucket's typed shape; an
 	// absent key leaves the corresponding field as its zero value
-	// (nil slice / nil map). Mirrors the strict-but-tolerant decode
-	// pattern from [decodeAuthorityMatrix].
-	if err := decodeImmutableCoreBuckets(fields, out); err != nil {
-		return nil, err
-	}
-	// Whatever remains is a forward-compatible bucket the M3.1 loader
-	// does not yet recognise; preserve it verbatim so a Phase 2 §M3.4
-	// `merge_fields` / `rollback` flow can introspect bucket additions
-	// without re-decoding the raw jsonb.
+	// (nil slice / nil map). M3.1 tolerant-decode contract: a typed
+	// shape mismatch leaves the bucket in `fields` so it rides through
+	// `Extra` rather than failing the whole load (see
+	// [decodeImmutableCoreBuckets] doc).
+	decodeImmutableCoreBuckets(fields, out)
+	// Whatever remains is either a forward-compatible bucket the M3.1
+	// loader does not yet recognise (a Phase 2 §M3.4 `merge_fields` /
+	// `rollback` flow) or a canonical bucket whose typed decode
+	// rejected the payload — both ride through Extra so a future
+	// consumer (M3.4 introspection tools, M3.6 self-tuning validator)
+	// can re-decode the raw jsonb.
 	if len(fields) > 0 {
 		out.Extra = fields
 	}
@@ -256,50 +258,60 @@ func decodeImmutableCore(raw json.RawMessage) (*runtime.ImmutableCore, error) {
 
 // decodeImmutableCoreBuckets pulls each canonical M3.1 bucket out of
 // the keyed RawMessage map and projects it onto the typed field of
-// out. Recognised buckets are deleted from fields so the caller can
-// stash whatever remains onto [runtime.ImmutableCore.Extra]. A
-// per-bucket decode failure surfaces as
-// `fmt.Errorf("manifest: immutable_core: <bucket>: %w", err)` so the
-// caller can pinpoint which bucket misshaped.
+// out when the bucket payload matches the typed shape. Recognised
+// buckets are deleted from fields on a successful typed decode so the
+// caller can stash whatever remains onto [runtime.ImmutableCore.Extra].
+//
+// **Tolerant decode** (codex iter-1 review): M3.1 is schema-only —
+// the write path only enforces "top-level object" via the
+// `manifest_version_immutable_core_shape` CHECK (migration 030), so
+// any bucket payload whose Go shape happens to mismatch the M3.1
+// canonical typed projection (e.g. `{"role_boundaries":[1]}` —
+// numbers-not-strings, or `{"security_constraints":["x"]}` —
+// array-not-object) is a wire payload the server accepted. Rather
+// than turning a successfully-stored manifest into an unloadable
+// runtime manifest, a per-bucket decode mismatch leaves the typed
+// field as its zero value and routes the raw bucket payload through
+// [runtime.ImmutableCore.Extra] under its canonical key. The strict
+// per-bucket shape gate is intentionally deferred to M3.6's
+// self-tuning validator — see `docs/ROADMAP-phase2.md` §M3 → M3.6.
 //
 // Extracted from [decodeImmutableCore] to keep that function under
 // the gocyclo budget — five identically-shaped lookup+unmarshal+delete
 // triples each contribute to cyclomatic complexity, so factoring them
 // out is a structural simplification not a code-smell-hide.
-func decodeImmutableCoreBuckets(fields map[string]json.RawMessage, out *runtime.ImmutableCore) error {
-	if err := decodeBucket(fields, "role_boundaries", &out.RoleBoundaries); err != nil {
-		return err
-	}
-	if err := decodeBucket(fields, "security_constraints", &out.SecurityConstraints); err != nil {
-		return err
-	}
-	if err := decodeBucket(fields, "escalation_protocols", &out.EscalationProtocols); err != nil {
-		return err
-	}
-	if err := decodeBucket(fields, "cost_limits", &out.CostLimits); err != nil {
-		return err
-	}
-	if err := decodeBucket(fields, "audit_requirements", &out.AuditRequirements); err != nil {
-		return err
-	}
-	return nil
+func decodeImmutableCoreBuckets(fields map[string]json.RawMessage, out *runtime.ImmutableCore) {
+	decodeBucket(fields, "role_boundaries", &out.RoleBoundaries)
+	decodeBucket(fields, "security_constraints", &out.SecurityConstraints)
+	decodeBucket(fields, "escalation_protocols", &out.EscalationProtocols)
+	decodeBucket(fields, "cost_limits", &out.CostLimits)
+	decodeBucket(fields, "audit_requirements", &out.AuditRequirements)
 }
 
 // decodeBucket is the generic per-bucket helper for
 // [decodeImmutableCoreBuckets]: look up the named key in the
-// RawMessage map, decode into dst, delete the key on success so the
-// caller can collect leftovers into Extra. Wraps the decode error
-// with the bucket name so the per-bucket diagnostics survive.
-func decodeBucket[T any](fields map[string]json.RawMessage, name string, dst *T) error {
+// RawMessage map; on a successful typed decode store the value onto
+// dst and delete the key so the caller can collect leftovers into
+// Extra. On a typed-decode failure (M3.1 tolerant-decode contract —
+// see [decodeImmutableCoreBuckets]) the raw bucket payload stays in
+// the fields map and rides through Extra rather than failing the
+// whole LoadManifest call.
+func decodeBucket[T any](fields map[string]json.RawMessage, name string, dst *T) {
 	v, ok := fields[name]
 	if !ok {
-		return nil
+		return
 	}
 	if err := json.Unmarshal(v, dst); err != nil {
-		return fmt.Errorf("manifest: immutable_core: %s: %w", name, err)
+		// Reset dst to its zero value so a partial decode (e.g. the
+		// JSON decoder accepting the first half of a slice before
+		// failing on the second) does not leak garbage onto the
+		// typed projection. Leaving the key in fields routes the
+		// raw bucket payload through Extra.
+		var zero T
+		*dst = zero
+		return
 	}
 	delete(fields, name)
-	return nil
 }
 
 // composeSystemPrompt is the deterministic templater documented on

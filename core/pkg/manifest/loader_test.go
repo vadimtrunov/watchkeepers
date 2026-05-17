@@ -856,23 +856,55 @@ func TestLoadManifest_ImmutableCore_MalformedRejected(t *testing.T) {
 	}
 }
 
-// TestLoadManifest_ImmutableCore_TypedBucketTypeMismatchRejected asserts
-// that a per-bucket type error (e.g. role_boundaries supplied as an
-// object instead of an array) wraps as a bucket-named error so the
-// caller can tell which bucket misshaped.
-func TestLoadManifest_ImmutableCore_TypedBucketTypeMismatchRejected(t *testing.T) {
+// TestLoadManifest_ImmutableCore_TypedBucketTypeMismatchRidesThroughExtra
+// asserts the M3.1 tolerant-decode contract (codex iter-1 P1 finding):
+// when a bucket's wire payload does not match the canonical typed
+// shape the write path admitted (the write path enforces "top-level
+// object" only), the loader leaves the typed field at its zero value
+// and stashes the raw bucket payload under its canonical key on
+// [runtime.ImmutableCore.Extra] — rather than turning a
+// successfully-stored manifest into an unloadable runtime manifest.
+// The strict per-bucket shape gate lives in M3.6's self-tuning
+// validator.
+func TestLoadManifest_ImmutableCore_TypedBucketTypeMismatchRidesThroughExtra(t *testing.T) {
 	t.Parallel()
 
+	const payload = `{"role_boundaries":{"oops":"object_not_array"},"cost_limits":{"per_task_tokens":1000}}`
 	f := &fakeFetcher{response: &keepclient.ManifestVersion{
 		ManifestID:    "m",
 		SystemPrompt:  "x",
-		ImmutableCore: json.RawMessage(`{"role_boundaries":{"oops":"object_not_array"}}`),
+		ImmutableCore: json.RawMessage(payload),
 	}}
-	_, err := LoadManifest(context.Background(), f, "m")
-	if err == nil {
-		t.Fatal("err = nil, want wrapped per-bucket decode error")
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v (M3.1 tolerant-decode contract — must not reject)", err)
 	}
-	if !strings.Contains(err.Error(), "role_boundaries") {
-		t.Errorf("err = %q, want it to name the role_boundaries bucket", err.Error())
+	if got.ImmutableCore == nil {
+		t.Fatal("ImmutableCore = nil; want non-nil projection so cost_limits + Extra survive")
+	}
+	// role_boundaries failed the typed decode (object-not-array) — the
+	// typed field stays nil, the raw payload rides through Extra.
+	if got.ImmutableCore.RoleBoundaries != nil {
+		t.Errorf("RoleBoundaries = %v, want nil (typed decode failed)", got.ImmutableCore.RoleBoundaries)
+	}
+	extra, ok := got.ImmutableCore.Extra["role_boundaries"]
+	if !ok {
+		t.Fatalf("Extra[role_boundaries] missing; Extra=%v (raw payload must ride through)", got.ImmutableCore.Extra)
+	}
+	// Re-decode confirms the raw bytes survived verbatim.
+	var rawObj map[string]string
+	if err := json.Unmarshal(extra, &rawObj); err != nil {
+		t.Fatalf("Extra[role_boundaries] decode: %v", err)
+	}
+	if rawObj["oops"] != "object_not_array" {
+		t.Errorf("Extra[role_boundaries].oops = %v, want object_not_array", rawObj["oops"])
+	}
+	// cost_limits matched the typed shape so it lands on the typed
+	// field, NOT on Extra (verifies the partial-success branch).
+	if v, ok := got.ImmutableCore.CostLimits["per_task_tokens"].(float64); !ok || v != 1000 {
+		t.Errorf("CostLimits[per_task_tokens] = %v, want 1000", got.ImmutableCore.CostLimits["per_task_tokens"])
+	}
+	if _, present := got.ImmutableCore.Extra["cost_limits"]; present {
+		t.Errorf("Extra[cost_limits] present; want absent (typed decode succeeded)")
 	}
 }
