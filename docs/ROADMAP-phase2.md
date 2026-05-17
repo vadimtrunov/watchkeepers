@@ -187,7 +187,7 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
   - `manifest.rollback(watchkeeper, target_version, reason)` — creates a new Manifest version that is a copy of `target_version`, routed through approval.
   - `manifest.merge_fields(watchkeeper, base_version, source_version, fields)` — creates a proposal taking specified fields from `source_version` on top of `base_version`. Routed through approval.
 - [ ] **M3.5** Slack UX: lead says "coordinator was better last Tuesday" to Watchmaster → Watchmaster calls `manifest.history`, finds the version active on that date, calls `manifest.diff` vs current, posts the diff in chat, asks "revert to that version?" with Approve/Reject. On approve: `manifest.rollback` → approval card → Manifest applied.
-- [ ] **M3.6** Self-tuning validator (enforced in M2): any proposal touching `immutable_core` fields refused before reaching the approval card.
+- [x] **M3.6** Self-tuning validator (enforced in M2): any proposal touching `immutable_core` fields refused before reaching the approval card.
 
 **Artifacts**: schema migration for `immutable_core` + `manifest_version` metadata, Watchmaster manifest tools, Slack UX templates for history navigation, validator tests.
 
