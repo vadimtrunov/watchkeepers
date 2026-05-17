@@ -73,3 +73,22 @@ var ErrEmptyOrganization = errors.New("k2k: empty organization id")
 // failure" — the M1.1.c wiring treats the sentinel as a silent OK
 // per the saga-replay discipline.
 var ErrAlreadyArchived = errors.New("k2k: conversation already archived")
+
+// ErrEmptySlackChannelID is returned by [Repository.BindSlackChannel]
+// when the supplied channel id is empty / whitespace-only. The M1.1.c
+// lifecycle wiring only calls Bind after a successful
+// `conversations.create`, which returns a non-empty platform-assigned
+// id; an empty value at this boundary is a programmer bug (a forgotten
+// error-check on the upstream Slack call).
+var ErrEmptySlackChannelID = errors.New("k2k: empty slack channel id")
+
+// ErrSlackChannelAlreadyBound is returned by
+// [Repository.BindSlackChannel] when the target row already carries a
+// non-empty `slack_channel_id`. The M1.1.c lifecycle wiring binds at
+// most once per conversation; a second Bind indicates either a
+// duplicate Open() with the same conversation id (impossible because
+// the repository mints fresh ids) or a programmer bug in the consumer
+// layer. The sentinel is distinct from [ErrAlreadyArchived] so the
+// consumer can branch on "wrong lifecycle state" vs "stale
+// post-create idempotent replay" without parsing the error chain.
+var ErrSlackChannelAlreadyBound = errors.New("k2k: slack channel already bound")

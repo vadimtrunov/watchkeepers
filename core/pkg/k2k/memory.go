@@ -215,6 +215,40 @@ func (r *MemoryRepository) Close(ctx context.Context, id uuid.UUID, reason strin
 	return nil
 }
 
+// BindSlackChannel implements [Repository.BindSlackChannel]. The
+// validator chain (ctx → trimmed id non-empty) runs BEFORE the mutex
+// acquire so a malformed input aborts without blocking other
+// goroutines on the write-lock. The full read-modify-write runs under
+// the single write-lock so a concurrent duplicate Bind on the same id
+// either observes the prior bind (and surfaces
+// [ErrSlackChannelAlreadyBound]) or wins the transition itself.
+func (r *MemoryRepository) BindSlackChannel(ctx context.Context, id uuid.UUID, slackChannelID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(slackChannelID) == "" {
+		return ErrEmptySlackChannelID
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	row, ok := r.rows[id]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrConversationNotFound, id)
+	}
+	if row.Status != StatusOpen {
+		return fmt.Errorf("%w: %s", ErrAlreadyArchived, id)
+	}
+	if row.SlackChannelID != "" {
+		return fmt.Errorf("%w: %s", ErrSlackChannelAlreadyBound, id)
+	}
+
+	row.SlackChannelID = slackChannelID
+	r.rows[id] = row
+	return nil
+}
+
 // IncTokens implements [Repository.IncTokens]. The whole
 // read-modify-write runs under the single write-lock so concurrent
 // IncTokens on the same id compose correctly — under a naive
