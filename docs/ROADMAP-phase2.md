@@ -179,7 +179,7 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
   - `escalation_protocols` — when and to whom to escalate; cannot be disabled.
   - `cost_limits` — max token spend per task / day / week.
   - `audit_requirements` — what must be logged; cannot be reduced.
-- [ ] **M3.2** Set at spawn by a platform admin (config file or Watchmaster flow); changeable only via direct Manifest edit + core restart. Never modifiable by the agent, the lead, or any self-tuning path.
+- [x] **M3.2** Set at spawn by a platform admin (config file or Watchmaster flow); changeable only via direct Manifest edit + core restart. Never modifiable by the agent, the lead, or any self-tuning path.
 - [x] **M3.3** `manifest_version` schema: add `reason`, `previous_version_id`, `proposer` columns (make explicit; Phase 1 may have them implicit by timestamp).
 - [ ] **M3.4** Watchmaster tools:
   - `manifest.history(watchkeeper, limit)` — returns versions with timestamps, reasons, proposers.

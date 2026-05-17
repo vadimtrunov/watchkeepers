@@ -273,6 +273,18 @@ func runManifestSet(ctx context.Context, args []string, stdout, stderr io.Writer
 			Autonomy:                   mv.Autonomy,
 			NotebookTopK:               mv.NotebookTopK,
 			NotebookRelevanceThreshold: mv.NotebookRelevanceThreshold,
+			// M3.2 admin-only-editability gate (Phase 2 §M3.2): forward
+			// the parent row's `immutable_core` verbatim so the Keep
+			// handler's parity gate accepts the bumped version. The
+			// `wk manifest set …` CLI mutates a single field (personality
+			// / language / model / autonomy / notebook recall) and is
+			// NOT a privileged "edit the immutable_core" surface — the
+			// spec says immutable_core is only editable via direct
+			// Manifest edit + core restart, never via the bumped-version
+			// path this CLI walks. Without this line the gate would
+			// (correctly) reject every CLI bump on a manifest that
+			// declared immutable_core.
+			ImmutableCore: mv.ImmutableCore,
 		}
 		resp, err := c.PutManifestVersion(ctx, mv.ManifestID, req)
 		if err != nil {
