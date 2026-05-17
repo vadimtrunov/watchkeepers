@@ -101,6 +101,48 @@ func TestPostgresEventBus_Publish_HappyPath_RunsInsert(t *testing.T) {
 	if call.args[3] != ev.EventType {
 		t.Errorf("Exec args[3] = %v, want %v", call.args[3], ev.EventType)
 	}
+	// Payload is passed as a string with an explicit ::jsonb cast in the
+	// SQL so pgx encodes it as a Postgres jsonb literal rather than as a
+	// bytea blob. Mirror the M9.4.a handlers_write.handleLogAppend
+	// discipline.
+	if !strings.Contains(call.sql, "::jsonb") {
+		t.Errorf("Exec SQL = %q, want explicit ::jsonb cast", call.sql)
+	}
+	payloadArg, ok := call.args[4].(string)
+	if !ok {
+		t.Errorf("Exec args[4] type = %T, want string (for ::jsonb cast)", call.args[4])
+	}
+	if payloadArg != `{"a":1}` {
+		t.Errorf("Exec args[4] = %q, want %q", payloadArg, `{"a":1}`)
+	}
+}
+
+func TestPostgresEventBus_Publish_EmptyPayloadCoercesToEmptyObject(t *testing.T) {
+	t.Parallel()
+
+	q := &fakeQuerier{}
+	acq := &fakePoolAcquirer{}
+	bus := peer.NewPostgresEventBus(q, acq)
+
+	orgID := uuid.New()
+	ev := peer.Event{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		WatchkeeperID:  "wk",
+		EventType:      "evt",
+		Payload:        nil, // omit body
+	}
+	if err := bus.Publish(context.Background(), ev); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.execCalls) != 1 {
+		t.Fatalf("Exec calls = %d, want 1", len(q.execCalls))
+	}
+	if got, _ := q.execCalls[0].args[4].(string); got != "{}" {
+		t.Errorf("payload arg = %q, want {} (empty/nil coerces to empty JSON object)", got)
+	}
 }
 
 func TestPostgresEventBus_PublishValidationFailures(t *testing.T) {

@@ -185,15 +185,24 @@ func (b *PostgresEventBus) Publish(ctx context.Context, event Event) error {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
+	// Empty / nil payload coerces to the canonical empty JSON object so
+	// the `payload jsonb NOT NULL DEFAULT '{}'::jsonb` column does not
+	// surface a CHECK / NOT NULL violation on a publisher that omits the
+	// body. Mirrors the M9.4.a `handlers_write.handleLogAppend` "default
+	// empty object" discipline.
+	payloadStr := string(payload)
+	if len(payload) == 0 {
+		payloadStr = "{}"
+	}
 
 	const insertSQL = `
 INSERT INTO watchkeeper.peer_events (
   id, organization_id, watchkeeper_id, event_type, payload, created_at
-) VALUES ($1, $2, $3, $4, $5, $6)`
+) VALUES ($1, $2, $3, $4, $5::jsonb, $6)`
 	if _, err := b.q.Exec(
 		ctx, insertSQL,
 		event.ID, event.OrganizationID, event.WatchkeeperID, event.EventType,
-		payload, event.CreatedAt,
+		payloadStr, event.CreatedAt,
 	); err != nil {
 		return fmt.Errorf("peer: publish event: %w", err)
 	}
@@ -249,21 +258,45 @@ func (b *PostgresEventBus) Subscribe(ctx context.Context, filter SubscribeFilter
 // WaitForNotification → SELECT new rows → non-blocking deliver. Exits
 // when ctx cancels, the connection drops, or a non-transient SQL error
 // fires.
+//
+// Cursor discipline (codex iter-1 P1+P2 fix): a wall-clock-only cursor
+// like `time.Now()` can permanently miss events under two realistic
+// scenarios: (1) the publisher's transaction commits at a Postgres
+// `now()` that is older than the drainer's app-side `time.Now()`
+// (long-running tx) or older than this process's wall-clock (clock
+// skew across hosts), so the SELECT filter `created_at > $since` drops
+// the row; (2) two concurrent publish transactions stamp the same
+// `now()` timestamp (Postgres `now()` is transaction-scoped, not
+// statement-scoped) and the strictly-greater filter drops the
+// later-inserted-but-equal-timestamp row.
+//
+// Fix shape: track delivered rows via a `(created_at, id)` tuple
+// cursor — the SELECT uses `(created_at, id) > ($cursor_ts, $cursor_id)`
+// so two rows sharing a `created_at` are ordered by id and neither is
+// dropped. Initial cursor reads `MAX(created_at)` from the table once
+// after LISTEN binds: any row committed before LISTEN is observable to
+// a fresh SELECT, so the initial cursor is the row anchor at LISTEN
+// time. A row that commits AFTER LISTEN but with `created_at < MAX`
+// (long-running tx) is still drained on the next notification because
+// its id will be strictly greater than the cursor id at the matching
+// timestamp.
 func (b *PostgresEventBus) drain(ctx context.Context, conn ListenerConn, filter SubscribeFilter, out chan<- Event, closeOut func()) {
 	defer func() {
 		conn.Release()
 		closeOut()
 	}()
 
-	// `since` is the last-seen event timestamp; the SELECT uses
-	// strict-after comparison so an event stamped at exactly `since`
-	// does not repeat. Initial cursor is the goroutine-start wall-clock
-	// so a Subscribe that races a concurrent Publish observes only
-	// post-Subscribe events.
-	since := time.Now().UTC()
+	// Initial cursor: the largest persisted `created_at` (and the
+	// matching id at that timestamp). A row committed before LISTEN is
+	// observable via the synchronous prime-the-cursor SELECT; the
+	// SELECT's anchor becomes the strict-greater cursor for every
+	// subsequent notification poll. If the table is empty, anchor at
+	// (epoch, uuid.Nil) so the first real row is strictly greater.
+	cursorTs, cursorID, err := b.primeCursor(ctx, conn, filter.OrganizationID)
+	if err != nil {
+		return
+	}
 
-	// Build SQL once. The filter portions are dynamically appended
-	// based on the supplied filter.
 	for {
 		if err := ctx.Err(); err != nil {
 			return
@@ -280,69 +313,118 @@ func (b *PostgresEventBus) drain(ctx context.Context, conn ListenerConn, filter 
 			return
 		}
 
-		// Drain every matching row stamped strictly after `since`. A
-		// single notification may correspond to multiple rows if a
-		// burst of inserts collapsed.
-		newSince, err := b.deliverSince(ctx, conn, filter, since, out)
+		// Drain every matching row strictly after the `(cursorTs,
+		// cursorID)` tuple. A single notification may correspond to
+		// multiple rows if a burst of inserts collapsed.
+		newTs, newID, err := b.deliverSince(ctx, conn, filter, cursorTs, cursorID, out)
 		if err != nil {
 			return
 		}
-		since = newSince
+		cursorTs = newTs
+		cursorID = newID
 	}
 }
 
-// deliverSince SELECTs every matching row strictly after `since` and
-// non-blocking-delivers each onto `out`. Returns the largest observed
-// `created_at` so the caller advances the cursor.
-func (b *PostgresEventBus) deliverSince(ctx context.Context, conn ListenerConn, filter SubscribeFilter, since time.Time, out chan<- Event) (time.Time, error) {
-	rows, err := conn.Query(ctx, buildSelectSQL(filter), buildSelectArgs(filter, since)...)
+// primeCursor reads `(MAX(created_at), id at that timestamp)` from
+// `peer_events` for the supplied tenant so the drainer's initial
+// cursor anchors on the latest persisted row at LISTEN-bind time. A
+// drainer that starts against an empty table returns `(epoch,
+// uuid.Nil)` so the first real row is strictly greater on the
+// `(ts, id) > (cursor)` comparator.
+func (b *PostgresEventBus) primeCursor(ctx context.Context, conn ListenerConn, orgID uuid.UUID) (time.Time, uuid.UUID, error) {
+	const sql = `
+SELECT created_at, id
+FROM watchkeeper.peer_events
+WHERE organization_id = $1
+ORDER BY created_at DESC, id DESC
+LIMIT 1`
+	rows, err := conn.Query(ctx, sql, orgID)
 	if err != nil {
-		return since, fmt.Errorf("peer: subscribe drain query: %w", err)
+		return time.Time{}, uuid.Nil, fmt.Errorf("peer: subscribe prime cursor: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var ts time.Time
+		var id uuid.UUID
+		if err := rows.Scan(&ts, &id); err != nil {
+			return time.Time{}, uuid.Nil, fmt.Errorf("peer: subscribe prime cursor scan: %w", err)
+		}
+		return ts.UTC(), id, nil
+	}
+	if err := rows.Err(); err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("peer: subscribe prime cursor rows: %w", err)
+	}
+	// Empty table: anchor at the zero time + zero uuid so the first
+	// real row is strictly greater on the tuple comparator.
+	return time.Time{}, uuid.Nil, nil
+}
+
+// deliverSince SELECTs every matching row strictly after `(cursorTs,
+// cursorID)` and non-blocking-delivers each onto `out`. Returns the
+// new largest `(created_at, id)` tuple so the caller advances the
+// cursor.
+//
+// The tuple-cursor shape `(created_at, id) > ($ts, $id)` is the codex
+// iter-1 P2 fix: two rows sharing a `created_at` (Postgres `now()` is
+// transaction-scoped, so two concurrent inserts may legitimately
+// stamp the same timestamp) are ordered by id, and neither is dropped.
+// The strict-greater operator on the tuple is well-defined per the
+// SQL standard — Postgres evaluates lexicographically across the
+// composite.
+func (b *PostgresEventBus) deliverSince(ctx context.Context, conn ListenerConn, filter SubscribeFilter, cursorTs time.Time, cursorID uuid.UUID, out chan<- Event) (time.Time, uuid.UUID, error) {
+	rows, err := conn.Query(ctx, buildSelectSQL(filter), buildSelectArgs(filter, cursorTs, cursorID)...)
+	if err != nil {
+		return cursorTs, cursorID, fmt.Errorf("peer: subscribe drain query: %w", err)
 	}
 	defer rows.Close()
 
-	newSince := since
+	newTs := cursorTs
+	newID := cursorID
 	for rows.Next() {
 		var ev Event
 		if err := rows.Scan(
 			&ev.ID, &ev.OrganizationID, &ev.WatchkeeperID, &ev.EventType,
 			&ev.Payload, &ev.CreatedAt,
 		); err != nil {
-			return newSince, fmt.Errorf("peer: subscribe drain scan: %w", err)
+			return newTs, newID, fmt.Errorf("peer: subscribe drain scan: %w", err)
 		}
 		ev.CreatedAt = ev.CreatedAt.UTC()
-		if ev.CreatedAt.After(newSince) {
-			newSince = ev.CreatedAt
-		}
+		// Advance the tuple cursor: ORDER BY created_at ASC, id ASC
+		// guarantees the last-seen row is the new high-water mark.
+		newTs = ev.CreatedAt
+		newID = ev.ID
 		// Defensive deep-copy of the payload on egress so a consumer
 		// mutating the slice cannot bleed across replays.
 		deliver := ev
 		deliver.Payload = clonePayload(ev.Payload)
 		select {
 		case <-ctx.Done():
-			return newSince, ctx.Err()
+			return newTs, newID, ctx.Err()
 		case out <- deliver:
 		default:
 			b.dropped.Add(1)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return newSince, fmt.Errorf("peer: subscribe drain rows: %w", err)
+		return newTs, newID, fmt.Errorf("peer: subscribe drain rows: %w", err)
 	}
-	return newSince, nil
+	return newTs, newID, nil
 }
 
 // buildSelectSQL constructs the SELECT statement used by the drainer.
-// The base statement filters by organization_id + the `since` cursor;
-// the optional TargetWatchkeeperID and EventTypes filter portions are
-// dynamically appended.
+// The base statement filters by organization_id + the `(created_at, id)`
+// tuple cursor; the optional TargetWatchkeeperID and EventTypes filter
+// portions are dynamically appended.
+//
+// Tuple-cursor SQL: `(created_at, id) > ($2, $3)` is the codex iter-1
+// P2 fix — see [deliverSince] for the rationale.
 func buildSelectSQL(filter SubscribeFilter) string {
 	var sb strings.Builder
 	sb.WriteString(`SELECT id, organization_id, watchkeeper_id, event_type, payload, created_at
 FROM watchkeeper.peer_events
 WHERE organization_id = $1
-  AND created_at > $2`)
-	argIdx := 3
+  AND (created_at, id) > ($2, $3)`)
+	argIdx := 4
 	if filter.TargetWatchkeeperID != "" {
 		fmt.Fprintf(&sb, "\n  AND watchkeeper_id = $%d", argIdx)
 		argIdx++
@@ -350,14 +432,14 @@ WHERE organization_id = $1
 	if len(filter.EventTypes) > 0 {
 		fmt.Fprintf(&sb, "\n  AND event_type = ANY($%d)", argIdx)
 	}
-	sb.WriteString("\nORDER BY created_at ASC")
+	sb.WriteString("\nORDER BY created_at ASC, id ASC")
 	return sb.String()
 }
 
 // buildSelectArgs mirrors [buildSelectSQL]: returns the matching arg
 // slice in the same order.
-func buildSelectArgs(filter SubscribeFilter, since time.Time) []any {
-	args := []any{filter.OrganizationID, since}
+func buildSelectArgs(filter SubscribeFilter, cursorTs time.Time, cursorID uuid.UUID) []any {
+	args := []any{filter.OrganizationID, cursorTs, cursorID}
 	if filter.TargetWatchkeeperID != "" {
 		args = append(args, filter.TargetWatchkeeperID)
 	}
