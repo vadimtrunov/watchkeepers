@@ -916,5 +916,213 @@ func TestIsJSONObjectOrEmpty_Boundaries(t *testing.T) {
 	}
 }
 
+// -----------------------------------------------------------------------
+// Phase 2 §M3.3 — manifest_version metadata wire-shape + preflight tests
+// -----------------------------------------------------------------------
+
+// TestPutManifestVersion_Metadata_RoundTrip asserts that a request body
+// carrying non-empty `reason` / `previous_version_id` / `proposer` is
+// forwarded to the server verbatim under those JSON keys (`omitempty`
+// must NOT strip a non-empty value). The companion negative case
+// `TestPutManifestVersion_Metadata_OmitEmpty` pins the wire-omit
+// posture for the empty case.
+func TestPutManifestVersion_Metadata_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wantReason            = "lead-approved rollback"
+		wantPreviousVersionID = "22222222-2222-4222-8222-222222222222"
+		wantProposer          = "watchmaster"
+	)
+
+	var capturedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		capturedBody = b
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"row-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:         1,
+		SystemPrompt:      "sp",
+		Reason:            wantReason,
+		PreviousVersionID: wantPreviousVersionID,
+		Proposer:          wantProposer,
+	})
+	if err != nil {
+		t.Fatalf("PutManifestVersion: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(capturedBody, &got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	for k, want := range map[string]string{
+		"reason":              `"` + wantReason + `"`,
+		"previous_version_id": `"` + wantPreviousVersionID + `"`,
+		"proposer":            `"` + wantProposer + `"`,
+	} {
+		if string(got[k]) != want {
+			t.Errorf("body[%q] = %s, want %s", k, got[k], want)
+		}
+	}
+}
+
+// TestPutManifestVersion_Metadata_OmitEmpty asserts that empty
+// `reason` / `previous_version_id` / `proposer` round-trip via
+// `omitempty` so the wire body carries no key at all. Mirrors the
+// `immutable_core` / `model` / `personality` wire-omit precedents.
+func TestPutManifestVersion_Metadata_OmitEmpty(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		capturedBody = b
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"row-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:    1,
+		SystemPrompt: "sp",
+	})
+	if err != nil {
+		t.Fatalf("PutManifestVersion: %v", err)
+	}
+	for _, k := range []string{`"reason"`, `"previous_version_id"`, `"proposer"`} {
+		if strings.Contains(string(capturedBody), k) {
+			t.Errorf("body = %s, want no %s key (omitempty + zero value)", capturedBody, k)
+		}
+	}
+}
+
+// TestPutManifestVersion_Metadata_PreHTTPRejections exercises the
+// preflight rejections introduced by M3.3: a too-long `reason`, a
+// too-long `proposer`, and a malformed `previous_version_id` all
+// short-circuit before any network hit so the caller sees
+// `ErrInvalidRequest` rather than a server-side 400. Both ASCII and
+// CJK boundary cases are exercised so the rune-not-byte semantics stay
+// pinned (a byte-count cap would let the CJK case through but
+// `utf8.RuneCountInString` does not).
+func TestPutManifestVersion_Metadata_PreHTTPRejections(t *testing.T) {
+	t.Parallel()
+
+	// httptest server is staged to fail the test if any preflight leaks
+	// through to a network hit. Each rejection MUST happen before this
+	// handler ever runs.
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Errorf("server hit; expected preflight rejection")
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+
+	cases := []struct {
+		name string
+		req  PutManifestVersionRequest
+	}{
+		{"reason_ascii_1025", PutManifestVersionRequest{
+			VersionNo:    1,
+			SystemPrompt: "sp",
+			Reason:       strings.Repeat("a", 1025),
+		}},
+		{"reason_cjk_1025", PutManifestVersionRequest{
+			VersionNo:    1,
+			SystemPrompt: "sp",
+			Reason:       strings.Repeat("漢", 1025),
+		}},
+		{"proposer_ascii_257", PutManifestVersionRequest{
+			VersionNo:    1,
+			SystemPrompt: "sp",
+			Proposer:     strings.Repeat("p", 257),
+		}},
+		{"proposer_cjk_257", PutManifestVersionRequest{
+			VersionNo:    1,
+			SystemPrompt: "sp",
+			Proposer:     strings.Repeat("漢", 257),
+		}},
+		{"previous_version_id_not_uuid", PutManifestVersionRequest{
+			VersionNo:         1,
+			SystemPrompt:      "sp",
+			PreviousVersionID: "not-a-uuid",
+		}},
+		{"previous_version_id_trailing_garbage", PutManifestVersionRequest{
+			VersionNo:         1,
+			SystemPrompt:      "sp",
+			PreviousVersionID: "11111111-1111-4111-8111-111111111111-extra",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := c.PutManifestVersion(context.Background(), validManifestID, tc.req)
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("err = %v, want ErrInvalidRequest", err)
+			}
+		})
+	}
+}
+
+// TestPutManifestVersion_Metadata_Boundaries — boundary cases that MUST
+// be accepted: 1024-rune reason, 256-rune proposer, well-formed UUID
+// previous_version_id. Pins the off-by-one between `<=` and `<` for both
+// caps and the canonical-UUID regex acceptance.
+func TestPutManifestVersion_Metadata_Boundaries(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"row-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+
+	cases := []struct {
+		name string
+		req  PutManifestVersionRequest
+	}{
+		{"reason_ascii_1024", PutManifestVersionRequest{
+			VersionNo: 1, SystemPrompt: "sp",
+			Reason: strings.Repeat("a", 1024),
+		}},
+		{"reason_cjk_1024", PutManifestVersionRequest{
+			VersionNo: 1, SystemPrompt: "sp",
+			Reason: strings.Repeat("漢", 1024),
+		}},
+		{"proposer_ascii_256", PutManifestVersionRequest{
+			VersionNo: 1, SystemPrompt: "sp",
+			Proposer: strings.Repeat("p", 256),
+		}},
+		{"proposer_cjk_256", PutManifestVersionRequest{
+			VersionNo: 1, SystemPrompt: "sp",
+			Proposer: strings.Repeat("漢", 256),
+		}},
+		{"previous_version_id_canonical", PutManifestVersionRequest{
+			VersionNo: 1, SystemPrompt: "sp",
+			PreviousVersionID: "22222222-2222-4222-8222-222222222222",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := c.PutManifestVersion(context.Background(), validManifestID, tc.req)
+			if err != nil {
+				t.Errorf("err = %v, want nil at boundary", err)
+			}
+		})
+	}
+}
+
 // Compile-time hint: keep the utf8 import used by neighbour tests.
 var _ = utf8.RuneCountInString

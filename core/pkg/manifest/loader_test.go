@@ -908,3 +908,73 @@ func TestLoadManifest_ImmutableCore_TypedBucketTypeMismatchRidesThroughExtra(t *
 		t.Errorf("Extra[cost_limits] present; want absent (typed decode succeeded)")
 	}
 }
+
+// -----------------------------------------------------------------------
+// Phase 2 §M3.3 — manifest_version metadata projection
+// -----------------------------------------------------------------------
+
+// TestLoadManifest_Metadata_Projected asserts that the three Phase 2
+// §M3.3 metadata fields (reason / previous_version_id / proposer) ride
+// from the wire `keepclient.ManifestVersion` onto the typed runtime
+// fields verbatim. PreviousVersionID is flattened from `*string` to
+// `string` at the loader boundary (empty string ⇒ root version), so the
+// non-nil-pointer case must surface as a non-empty string.
+func TestLoadManifest_Metadata_Projected(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wantReason            = "lead-approved rollback to last Friday's version"
+		wantPreviousVersionID = "22222222-2222-4222-8222-222222222222"
+		wantProposer          = "watchmaster"
+	)
+	prev := wantPreviousVersionID
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:        "m",
+		SystemPrompt:      "x",
+		Reason:            wantReason,
+		PreviousVersionID: &prev,
+		Proposer:          wantProposer,
+	}}
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.Reason != wantReason {
+		t.Errorf("Reason = %q, want %q", got.Reason, wantReason)
+	}
+	if got.PreviousVersionID != wantPreviousVersionID {
+		t.Errorf("PreviousVersionID = %q, want %q", got.PreviousVersionID, wantPreviousVersionID)
+	}
+	if got.Proposer != wantProposer {
+		t.Errorf("Proposer = %q, want %q", got.Proposer, wantProposer)
+	}
+}
+
+// TestLoadManifest_Metadata_OmittedStaysZero asserts that a manifest
+// version whose three M3.3 metadata fields are unset (nil pointer for
+// PreviousVersionID, empty strings for Reason / Proposer — the legacy
+// Phase 1 row OR a row that simply omitted them) projects to the zero
+// values on the runtime side. Mirrors the wire-omit posture documented
+// on [runtime.Manifest.Reason] / [runtime.Manifest.PreviousVersionID] /
+// [runtime.Manifest.Proposer].
+func TestLoadManifest_Metadata_OmittedStaysZero(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+	}}
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.Reason != "" {
+		t.Errorf("Reason = %q, want empty", got.Reason)
+	}
+	if got.PreviousVersionID != "" {
+		t.Errorf("PreviousVersionID = %q, want empty (root version)", got.PreviousVersionID)
+	}
+	if got.Proposer != "" {
+		t.Errorf("Proposer = %q, want empty", got.Proposer)
+	}
+}

@@ -613,3 +613,97 @@ func TestGetManifest_ImmutableCore_OmittedStaysNil(t *testing.T) {
 		t.Errorf("ImmutableCore = %s, want nil (omitted)", mv.ImmutableCore)
 	}
 }
+
+// -----------------------------------------------------------------------
+// Phase 2 §M3.3 — manifest_version metadata wire decode
+// -----------------------------------------------------------------------
+
+// TestGetManifest_Metadata_Decoded asserts that a response carrying
+// non-empty `reason` / `previous_version_id` / `proposer` projects onto
+// the typed fields of [ManifestVersion]. PreviousVersionID is
+// pointer-typed (so the omitted-key case can be distinguished from the
+// empty-string case); a non-nil pointer + non-empty deref is asserted
+// here to pin the projection.
+func TestGetManifest_Metadata_Decoded(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wantReason            = "lead-approved rollback"
+		wantPreviousVersionID = "22222222-2222-4222-8222-222222222222"
+		wantProposer          = "watchmaster"
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "id":"row-1",
+            "manifest_id":"m",
+            "version_no":2,
+            "system_prompt":"sp",
+            "tools":null,
+            "authority_matrix":null,
+            "knowledge_sources":null,
+            "reason":"`+wantReason+`",
+            "previous_version_id":"`+wantPreviousVersionID+`",
+            "proposer":"`+wantProposer+`",
+            "created_at":"2026-05-17T12:00:00Z"
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	mv, err := c.GetManifest(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if mv.Reason != wantReason {
+		t.Errorf("Reason = %q, want %q", mv.Reason, wantReason)
+	}
+	if mv.PreviousVersionID == nil {
+		t.Fatalf("PreviousVersionID = nil, want non-nil pointer to %q", wantPreviousVersionID)
+	}
+	if *mv.PreviousVersionID != wantPreviousVersionID {
+		t.Errorf("*PreviousVersionID = %q, want %q", *mv.PreviousVersionID, wantPreviousVersionID)
+	}
+	if mv.Proposer != wantProposer {
+		t.Errorf("Proposer = %q, want %q", mv.Proposer, wantProposer)
+	}
+}
+
+// TestGetManifest_Metadata_OmittedStaysZero asserts that a response that
+// omits the three M3.3 metadata fields decodes onto the zero values
+// (empty strings + nil pointer for previous_version_id) — the legacy /
+// root-version case. Mirrors the immutable_core omit-decode posture.
+func TestGetManifest_Metadata_OmittedStaysZero(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "id":"row-1",
+            "manifest_id":"m",
+            "version_no":1,
+            "system_prompt":"sp",
+            "tools":null,
+            "authority_matrix":null,
+            "knowledge_sources":null,
+            "created_at":"2026-05-02T12:00:00Z"
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	mv, err := c.GetManifest(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if mv.Reason != "" {
+		t.Errorf("Reason = %q, want empty", mv.Reason)
+	}
+	if mv.PreviousVersionID != nil {
+		t.Errorf("PreviousVersionID = %v, want nil (omitted)", mv.PreviousVersionID)
+	}
+	if mv.Proposer != "" {
+		t.Errorf("Proposer = %q, want empty", mv.Proposer)
+	}
+}

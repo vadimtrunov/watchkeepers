@@ -219,7 +219,26 @@ type manifestVersionResponse struct {
 	// the server CHECK constraint `manifest_version_immutable_core_shape`
 	// (migration 030) guarantees the payload is a JSON object.
 	ImmutableCore json.RawMessage `json:"immutable_core,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
+	// Reason is the optional free-text rationale the proposer attached to
+	// this manifest_version (Phase 2 §M3.3). SQL NULL coalesces to the
+	// empty string on the SELECT (`coalesce(reason, '')`); `omitempty`
+	// then drops the key from the wire response so legacy callers that
+	// never set it observe no schema change.
+	Reason string `json:"reason,omitempty"`
+	// PreviousVersionID is the optional UUID of the manifest_version this
+	// row is derived from (Phase 2 §M3.3). NULL in the DB scans into a
+	// nil *string via pgx; the read handler promotes the pointer to the
+	// response field only when non-nil so `omitempty` can drop the key
+	// from the wire. Pointer-typed so the SQL NULL case is distinguishable
+	// from the empty-string case (mirrors the immutable_core
+	// pointer-to-RawMessage scan precedent).
+	PreviousVersionID *string `json:"previous_version_id,omitempty"`
+	// Proposer is the optional free-text identifier of the actor that
+	// proposed this version (Phase 2 §M3.3). SQL NULL coalesces to the
+	// empty string on the SELECT (`coalesce(proposer, '')`); `omitempty`
+	// then drops the key from the response.
+	Proposer  string    `json:"proposer,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // handleGetManifest serves GET /v1/manifests/{manifest_id}. It returns
@@ -249,6 +268,13 @@ func handleGetManifest(r scopedRunner) http.Handler {
 		// nullable-jsonb pattern recommended by pgx; pgx writes through
 		// the pointer only on a non-NULL row.
 		var immutableCore *json.RawMessage
+		// M3.3 previous_version_id is scanned as a *string so SQL NULL
+		// projects to a Go nil rather than the empty string. The
+		// handler promotes the pointer onto the response struct only
+		// when non-nil; `omitempty` then drops the key from the wire so
+		// legacy GET callers observe no schema change. Mirrors the
+		// immutable_core pointer-to-RawMessage scan pattern.
+		var previousVersionID *string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `
                 SELECT id, manifest_id, version_no, system_prompt,
@@ -259,6 +285,9 @@ func handleGetManifest(r scopedRunner) http.Handler {
                        coalesce(notebook_top_k, 0),
                        coalesce(notebook_relevance_threshold, 0),
                        immutable_core,
+                       coalesce(reason, ''),
+                       previous_version_id,
+                       coalesce(proposer, ''),
                        created_at
                 FROM watchkeeper.manifest_version
                 WHERE manifest_id = $1
@@ -273,6 +302,9 @@ func handleGetManifest(r scopedRunner) http.Handler {
 				&out.NotebookTopK,
 				&out.NotebookRelevanceThreshold,
 				&immutableCore,
+				&out.Reason,
+				&previousVersionID,
+				&out.Proposer,
 				&out.CreatedAt,
 			)
 		})
@@ -291,6 +323,14 @@ func handleGetManifest(r scopedRunner) http.Handler {
 		// have not set immutable_core yet).
 		if immutableCore != nil {
 			out.ImmutableCore = *immutableCore
+		}
+		// Promote the *string scan target onto the response struct only
+		// when the column was non-NULL; on SQL NULL the pointer stays
+		// nil and `omitempty` drops `previous_version_id` from the wire
+		// (root version of the manifest). Mirrors the immutable_core
+		// promotion above.
+		if previousVersionID != nil {
+			out.PreviousVersionID = previousVersionID
 		}
 
 		writeJSON(w, http.StatusOK, out)

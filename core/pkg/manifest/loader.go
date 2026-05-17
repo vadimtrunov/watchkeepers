@@ -109,6 +109,15 @@ func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (r
 		return runtime.Manifest{}, err
 	}
 
+	// M3.3: project the three metadata fields verbatim. PreviousVersionID
+	// is a *string on the wire (nil ⇒ root version); flatten to "" so
+	// the runtime contract stays string-typed and consumers can
+	// `if mf.PreviousVersionID == "" { /* root */ }`.
+	previousVersionID := ""
+	if mv.PreviousVersionID != nil {
+		previousVersionID = *mv.PreviousVersionID
+	}
+
 	return runtime.Manifest{
 		AgentID:                    mv.ManifestID,
 		SystemPrompt:               composeSystemPrompt(mv.SystemPrompt, mv.Personality, mv.Language),
@@ -121,6 +130,9 @@ func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (r
 		NotebookTopK:               mv.NotebookTopK,
 		NotebookRelevanceThreshold: mv.NotebookRelevanceThreshold,
 		ImmutableCore:              immutableCore,
+		Reason:                     mv.Reason,
+		PreviousVersionID:          previousVersionID,
+		Proposer:                   mv.Proposer,
 	}, nil
 }
 

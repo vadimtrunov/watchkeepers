@@ -66,6 +66,23 @@ const manifestPersonalityMaxRunes = 1024
 // `manifestPersonalityMaxRunes` above.
 const manifestModelMaxRunes = 100
 
+// manifestReasonMaxRunes is the per-row cap on the manifest_version.reason
+// column expressed in Unicode codepoints, mirroring the SQL CHECK
+// `manifest_version_reason_length` (migration 031, Phase 2 §M3.3). Same
+// rune-not-byte rationale as `manifestPersonalityMaxRunes`. Matches the
+// `personality` cap precedent because both columns carry free-text
+// narrative that needs room for a multi-sentence rationale without
+// degenerating into an unbounded text foot-gun.
+const manifestReasonMaxRunes = 1024
+
+// manifestProposerMaxRunes is the per-row cap on the
+// manifest_version.proposer column expressed in Unicode codepoints,
+// mirroring the SQL CHECK `manifest_version_proposer_length`
+// (migration 031, Phase 2 §M3.3). 256 codepoints is enough room for
+// any RFC 4122 UUID (36 chars) + optional tag prefix + Slack handle
+// (typically ≤ 80 chars) without leaving an unbounded-text surface.
+const manifestProposerMaxRunes = 256
+
 // manifestAutonomyAllowed is the closed set of accepted values for the
 // manifest_version.autonomy wire field, mirroring the SQL CHECK
 // `manifest_version_autonomy_enum` from migration 015 and the runtime
@@ -353,6 +370,28 @@ type putManifestVersionRequest struct {
 	// validated at the bucket level here — admin-only editability lands
 	// in M3.2 and the self-tuning validator lands in M3.6.
 	ImmutableCore json.RawMessage `json:"immutable_core"`
+	// Reason is the optional free-text rationale the proposer attached
+	// to this manifest_version (Phase 2 §M3.3). Empty round-trips as
+	// SQL NULL via [stringOrNil]; non-empty values are capped at 1024
+	// Unicode codepoints by the server precheck (matching SQL
+	// `char_length(reason) <= 1024` from migration 031). Reject before
+	// the row reaches Postgres so the caller gets a stable
+	// `reason_too_long` reason rather than an opaque 500.
+	Reason string `json:"reason"`
+	// PreviousVersionID is the optional UUID of the manifest_version
+	// this row is derived from (Phase 2 §M3.3). Empty round-trips as
+	// SQL NULL; non-empty values must match the canonical UUID
+	// regex (`uuidPattern`). Reject malformed UUIDs before the row
+	// reaches Postgres so the caller gets a stable
+	// `invalid_previous_version_id` reason rather than a 22P02
+	// invalid_text_representation 500.
+	PreviousVersionID string `json:"previous_version_id"`
+	// Proposer is the optional free-text identifier of the actor that
+	// proposed this version (Phase 2 §M3.3). Empty round-trips as SQL
+	// NULL; non-empty values are capped at 256 Unicode codepoints by
+	// the server precheck (matching SQL `char_length(proposer) <= 256`
+	// from migration 031).
+	Proposer string `json:"proposer"`
 }
 
 // putManifestVersionResponse is the 201 body returned on successful insert.
@@ -442,7 +481,49 @@ func parsePutManifestVersionRequest(w http.ResponseWriter, req *http.Request) (p
 	if !validateImmutableCoreShape(w, body) {
 		return body, false
 	}
+	if !validateManifestVersionMetadata(w, body) {
+		return body, false
+	}
 	return body, true
+}
+
+// validateManifestVersionMetadata checks the three Phase 2 §M3.3
+// metadata fields (`reason`, `previous_version_id`, `proposer`) before
+// the row hits Postgres. Each branch surfaces a stable 400 reason code
+// matching the SQL CHECK / FK that would otherwise reject the row with
+// an opaque 5xx:
+//
+//   - reason: capped at `manifestReasonMaxRunes` codepoints
+//     (`manifest_version_reason_length` CHECK from migration 031) →
+//     `reason_too_long`.
+//   - previous_version_id: when non-empty, must satisfy the canonical
+//     UUID shape (`uuidPattern`); Postgres would otherwise reject the
+//     cast with `22P02 invalid_text_representation` →
+//     `invalid_previous_version_id`. The FK itself (non-existent target
+//     row) still surfaces as Postgres `23503 foreign_key_violation`
+//     and the handler maps it to a stable `unknown_previous_version_id`
+//     reason at INSERT time so the caller can distinguish "malformed
+//     UUID" from "UUID is well-formed but no such row".
+//   - proposer: capped at `manifestProposerMaxRunes` codepoints
+//     (`manifest_version_proposer_length` CHECK from migration 031) →
+//     `proposer_too_long`.
+//
+// Empty values for all three round-trip as SQL NULL via [stringOrNil];
+// no validation fires on the empty case.
+func validateManifestVersionMetadata(w http.ResponseWriter, body putManifestVersionRequest) bool {
+	if utf8.RuneCountInString(body.Reason) > manifestReasonMaxRunes {
+		writeError(w, http.StatusBadRequest, "reason_too_long")
+		return false
+	}
+	if body.PreviousVersionID != "" && !uuidPattern.MatchString(body.PreviousVersionID) {
+		writeError(w, http.StatusBadRequest, "invalid_previous_version_id")
+		return false
+	}
+	if utf8.RuneCountInString(body.Proposer) > manifestProposerMaxRunes {
+		writeError(w, http.StatusBadRequest, "proposer_too_long")
+		return false
+	}
+	return true
 }
 
 // validateImmutableCoreShape mirrors the SQL CHECK
@@ -580,6 +661,15 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 		notebookTopK := intOrNil(body.NotebookTopK)
 		notebookRelevanceThreshold := floatOrNil(body.NotebookRelevanceThreshold)
 		immutableCore := jsonbOrNil(body.ImmutableCore)
+		// M3.3 metadata columns: empty round-trips as SQL NULL via
+		// [stringOrNil] for `reason` / `proposer`. `previous_version_id`
+		// uses [stringOrNil] too — the empty-string case lands as SQL
+		// NULL (root version), the non-empty case is already preflighted
+		// for canonical UUID shape so Postgres can cast to `uuid`
+		// without surfacing a 22P02 error.
+		reason := stringOrNil(body.Reason)
+		previousVersionID := stringOrNil(body.PreviousVersionID)
+		proposer := stringOrNil(body.Proposer)
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
@@ -599,7 +689,8 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
                     tools, authority_matrix, knowledge_sources,
                     personality, language, model, autonomy,
                     notebook_top_k, notebook_relevance_threshold,
-                    immutable_core
+                    immutable_core,
+                    reason, previous_version_id, proposer
                 )
                 SELECT
                     $1, $2, $3,
@@ -608,10 +699,11 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
                     coalesce($6::jsonb, '[]'::jsonb),
                     $7, $8, $9, $10,
                     $11, $12,
-                    $13::jsonb
+                    $13::jsonb,
+                    $14, $15::uuid, $16
                 WHERE EXISTS (
                     SELECT 1 FROM watchkeeper.manifest
-                    WHERE id = $1 AND organization_id = $14
+                    WHERE id = $1 AND organization_id = $17
                 )
                 RETURNING id
             `, manifestID, body.VersionNo, body.SystemPrompt,
@@ -619,17 +711,12 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 				personality, language, model, autonomy,
 				notebookTopK, notebookRelevanceThreshold,
 				immutableCore,
+				reason, previousVersionID, proposer,
 				claim.OrganizationID,
 			).Scan(&id)
 		})
 		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				writeError(w, http.StatusNotFound, "not_found")
-				return
-			}
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				writeError(w, http.StatusConflict, "version_conflict")
+			if writePutManifestVersionPgError(w, err) {
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "put_manifest_version_failed")
@@ -638,6 +725,74 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 
 		writeJSON(w, http.StatusCreated, putManifestVersionResponse{ID: id})
 	})
+}
+
+// writePutManifestVersionPgError translates pgx / Postgres errors raised
+// by the manifest_version INSERT into stable HTTP envelopes. Returns
+// true when an envelope was written (caller MUST return immediately);
+// returns false when the error does not match any known shape (caller
+// SHOULD surface a generic 500).
+//
+// Mappings (in priority order):
+//
+//   - pgx.ErrNoRows → 404 not_found. The INSERT ... SELECT ... WHERE
+//     EXISTS shape returns no row when the manifest's organization_id
+//     does not match the claim's tenant (cross-tenant rejection per
+//     M3.5.a.3.2).
+//   - 23505 unique_violation → 409 version_conflict. The
+//     `(manifest_id, version_no)` UNIQUE constraint fires when a
+//     caller races on the same version_no.
+//   - 23503 foreign_key_violation on
+//     `manifest_version_previous_version_id_fkey` → 400
+//     `unknown_previous_version_id` (M3.3). A well-formed
+//     previous_version_id whose UUID target row does not exist surfaces
+//     here; the M3.4 tools rely on the distinct reason to surface
+//     "no such version" without parsing a generic 500.
+//   - 23514 check_violation, defense-in-depth for the M3.3 metadata
+//     CHECK constraints (the `validateManifestVersionMetadata`
+//     precheck already surfaces the matching reason before the row
+//     reaches Postgres). Reached only when the precheck was bypassed
+//     (an internal caller skipping `parsePutManifestVersionRequest`):
+//   - `manifest_version_reason_length` → `reason_too_long`
+//   - `manifest_version_proposer_length` → `proposer_too_long`
+//   - `manifest_version_previous_version_self_ref` →
+//     `invalid_previous_version_id`
+//
+// Extracted from [handlePutManifestVersion] to keep that function
+// under the gocyclo budget after the M3.3 column-extension chain
+// landed.
+func writePutManifestVersionPgError(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "not_found")
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case "23505":
+		writeError(w, http.StatusConflict, "version_conflict")
+		return true
+	case "23503":
+		if pgErr.ConstraintName == "manifest_version_previous_version_id_fkey" {
+			writeError(w, http.StatusBadRequest, "unknown_previous_version_id")
+			return true
+		}
+	case "23514":
+		switch pgErr.ConstraintName {
+		case "manifest_version_reason_length":
+			writeError(w, http.StatusBadRequest, "reason_too_long")
+			return true
+		case "manifest_version_proposer_length":
+			writeError(w, http.StatusBadRequest, "proposer_too_long")
+			return true
+		case "manifest_version_previous_version_self_ref":
+			writeError(w, http.StatusBadRequest, "invalid_previous_version_id")
+			return true
+		}
+	}
+	return false
 }
 
 // jsonbOrNil returns nil for an empty / unset json.RawMessage so the SQL

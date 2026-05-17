@@ -13,6 +13,13 @@ import (
 // AuthorityMatrix, KnowledgeSources, ImmutableCore) are kept as
 // [json.RawMessage] so a future schema evolution does not require a
 // client release; callers that need typed access decode them locally.
+//
+// Phase 2 §M3.3 adds three optional metadata fields: [ManifestVersion.Reason]
+// (free-text rationale, capped at 1024 codepoints), [ManifestVersion.PreviousVersionID]
+// (UUID of the manifest_version this row is derived from, NULL for root),
+// and [ManifestVersion.Proposer] (free-text actor identifier, capped at
+// 256 codepoints). All three are `omitempty` so legacy rows that predate
+// M3.3 round-trip as a wire response with no schema change.
 type ManifestVersion struct {
 	// ID is the manifest_version row UUID.
 	ID string `json:"id"`
@@ -73,6 +80,35 @@ type ManifestVersion struct {
 	// [runtime.Manifest.ImmutableCore] lives in the M3.1 manifest loader
 	// extension.
 	ImmutableCore json.RawMessage `json:"immutable_core,omitempty"`
+	// Reason is the optional free-text rationale the proposer attached to
+	// the manifest_version row (Phase 2 §M3.3). Capped at 1024 Unicode
+	// codepoints by the server CHECK constraint
+	// `manifest_version_reason_length` (migration 031). Legacy rows
+	// predating M3.3 round-trip as the empty string (the server uses
+	// `coalesce(reason, '')` so the wire never carries `null`) and
+	// `omitempty` drops the key entirely from the response so legacy
+	// callers observe no schema change.
+	Reason string `json:"reason,omitempty"`
+	// PreviousVersionID is the optional UUID of the manifest_version row
+	// this version is derived from (Phase 2 §M3.3). NULL for the root
+	// version of every manifest (no previous). When non-empty the FK
+	// target lives in the same manifest_version table — cross-manifest
+	// references are impossible by construction once callers respect
+	// `manifest_id`-scoped reads (M3.4 `manifest.history` is the
+	// authoritative consumer). Pointer-typed so the SQL NULL case
+	// projects as a Go nil rather than the empty string; `omitempty`
+	// then drops the key from the wire.
+	PreviousVersionID *string `json:"previous_version_id,omitempty"`
+	// Proposer is the optional free-text identifier of the actor that
+	// proposed this manifest_version row (Phase 2 §M3.3). The M3.4
+	// tools may write a Watchkeeper UUID, a human handle, or the
+	// literal string "watchmaster" for system-initiated rollback
+	// proposals — no FK constraint at this milestone. Capped at 256
+	// Unicode codepoints by the server CHECK constraint
+	// `manifest_version_proposer_length` (migration 031). Legacy rows
+	// round-trip as the empty string; `omitempty` drops the key from
+	// the response.
+	Proposer string `json:"proposer,omitempty"`
 	// CreatedAt is the row's created_at timestamp (RFC3339 on the wire).
 	CreatedAt string `json:"created_at"`
 }
