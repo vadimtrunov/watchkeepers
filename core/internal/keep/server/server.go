@@ -108,6 +108,7 @@ func NewRouterWithMetrics(v auth.Verifier, pool *pgxpool.Pool, reg *publish.Regi
 		mux.Handle("PATCH /v1/watchkeepers/{id}/lead", instrument("/v1/watchkeepers/{id}/lead", authed(handleSetWatchkeeperLead(runner))))
 		mux.Handle("GET /v1/watchkeepers/{id}", instrument("/v1/watchkeepers/{id}", authed(handleGetWatchkeeper(runner))))
 		mux.Handle("GET /v1/watchkeepers", instrument("/v1/watchkeepers", authed(handleListWatchkeepers(runner))))
+		mux.Handle("GET /v1/peers", instrument("/v1/peers", authed(handleListPeers(runner))))
 		mux.Handle("POST /v1/humans", instrument("/v1/humans", authed(handleInsertHuman(runner))))
 		mux.Handle("GET /v1/humans/by-slack/{slack_user_id}", instrument("/v1/humans/by-slack/{slack_user_id}", authed(handleLookupHumanBySlackID(runner))))
 		if reg != nil {
