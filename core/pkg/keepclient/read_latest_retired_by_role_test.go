@@ -251,3 +251,67 @@ func TestClient_LatestRetiredByRole_403_PassesThrough(t *testing.T) {
 		t.Errorf("errors.Is(err, ErrForbidden) = false on 403; err = %v", err)
 	}
 }
+
+// TestClient_LatestRetiredByRole_BareUnstructured404_DoesNotMapToErrNoPredecessor —
+// iter-1 codex P1: a 404 from an older Keep deployment that does NOT
+// have the /v1/watchkeepers/latest-retired-by-role route, or from a
+// misrouted base URL, returns a 404 with NO `{"error":"not_found"}`
+// envelope. Wrapping that as ErrNoPredecessor would silently disable
+// inheritance for the whole deployment instead of surfacing a
+// configuration bug. The client now requires a STRUCTURED 404 (Code
+// == "not_found") before synthesizing the sentinel.
+func TestClient_LatestRetiredByRole_BareUnstructured404_DoesNotMapToErrNoPredecessor(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		// Empty body: stdlib http.NotFound and many proxies emit
+		// this shape. A rolling-deploy Keep on an older sha
+		// returns this when ServeMux finds no matching route.
+		{"empty_body", ""},
+		// HTML body: a reverse proxy / load balancer might emit
+		// HTML on its own 404 page; the keepclient.parseServerError
+		// fallback path leaves Code empty in that case.
+		{"html_body", "<html><body>404 Not Found</body></html>"},
+		// Different `error` code: a future Keep might emit a more
+		// specific code for the lookup endpoint. Until then,
+		// anything other than "not_found" MUST NOT collapse to
+		// ErrNoPredecessor.
+		{"different_code", `{"error":"route_unknown"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := tc.body
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if body != "" {
+					w.Header().Set("Content-Type", "application/json")
+				}
+				w.WriteHeader(http.StatusNotFound)
+				if body != "" {
+					_, _ = io.WriteString(w, body)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+			_, err := c.LatestRetiredByRole(context.Background(), predecessorOrgID, predecessorRoleID)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if errors.Is(err, ErrNoPredecessor) {
+				t.Errorf("errors.Is(err, ErrNoPredecessor) = true on bare 404 (%s); err = %v", tc.name, err)
+			}
+			// The generic ErrNotFound IS still expected via the
+			// *ServerError.Unwrap chain — the keepclient surface
+			// still distinguishes 404 from other statuses; only
+			// the typed M7.1.b sentinel is gated on the structured
+			// envelope.
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("errors.Is(err, ErrNotFound) = false on 404 (%s); err = %v", tc.name, err)
+			}
+		})
+	}
+}

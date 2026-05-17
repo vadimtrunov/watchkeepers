@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -715,11 +716,18 @@ func handleListWatchkeepers(r scopedRunner) http.Handler {
 //
 // Index usage: the SELECT's WHERE clause matches the partial composite
 // index `idx_watchkeeper_role_id_retired` introduced by migration
-// `032_watchkeepers_role_id.sql` (M7.1.a): `(role_id, retired_at DESC)
-// WHERE retired_at IS NOT NULL AND archive_uri IS NOT NULL`. The
-// ORDER BY clause matches the index's DESC sort so the planner can
-// satisfy the LIMIT 1 with an index-only scan against the retired
-// subset.
+// `032_watchkeepers_role_id.sql` (M7.1.a, after the iter-1 follow-up
+// in #164): `(role_id, retired_at DESC) WHERE retired_at IS NOT NULL
+// AND archive_uri IS NOT NULL AND role_id IS NOT NULL`. The query
+// repeats the `role_id IS NOT NULL` predicate explicitly (in
+// addition to the `role_id = $1` equality) so the planner picks the
+// partial index without relying on its implication-detection logic
+// (`a = $1` ⇒ `a IS NOT NULL`) — explicit predicate alignment with
+// `predicate_implied_by` keeps the index usable across PG versions
+// and prepared-statement plan caching. The ORDER BY matches the
+// index's DESC sort so the planner can satisfy the LIMIT 1 with an
+// index-only scan against the retired-with-archive-and-non-null-
+// role subset.
 //
 // Audit / PII discipline: this handler is read-only and emits no
 // `keeperslog.` events. The M1.4 audit subscriber and the M7.1.c
@@ -745,8 +753,16 @@ func handleGetLatestRetiredByRole(r scopedRunner) http.Handler {
 			return
 		}
 
+		// Reject both empty and whitespace-only role_id at the seam
+		// closest to the caller. Whitespace-only would otherwise hit
+		// the SQL filter `w.role_id = $1` with a value no row carries,
+		// return 404 → keepclient.ErrNoPredecessor on the client side,
+		// and silently disable inheritance on the M7.1.c saga step.
+		// Mirrors the same `strings.TrimSpace` gate in
+		// parseInsertWatchkeeperRequest. iter-1 codex finding (P2 /
+		// Major).
 		roleID := req.URL.Query().Get("role_id")
-		if roleID == "" {
+		if roleID == "" || strings.TrimSpace(roleID) == "" {
 			writeError(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
@@ -785,6 +801,7 @@ func handleGetLatestRetiredByRole(r scopedRunner) http.Handler {
                 FROM watchkeeper.watchkeeper AS w
                 JOIN watchkeeper.human AS h ON h.id = w.lead_human_id
                 WHERE w.role_id = $1
+                  AND w.role_id IS NOT NULL
                   AND h.organization_id = $2
                   AND w.retired_at IS NOT NULL
                   AND w.archive_uri IS NOT NULL

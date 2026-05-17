@@ -52,10 +52,12 @@ import (
 // [Client.LatestRetiredByRole] wrapping below, so callers can match
 // both [ErrNoPredecessor] and [ErrNotFound] on the same error value.
 //
-// package (`ErrNotFound`, `ErrConflict`, …); `ErrNoPredecessor` is
-// idiomatic here even though `errname` prefers `…Error` suffixes.
+// The naming convention matches the rest of this package
+// (`ErrNotFound`, `ErrConflict`, …); `errname` prefers `…Error`
+// suffixes but the rest of the package is `Err…`, so the linter is
+// suppressed for this sentinel.
 //
-//nolint:errname // sentinel naming convention matches the rest of this
+//nolint:errname // sentinel naming convention matches the rest of this package.
 var ErrNoPredecessor = errors.New("keepclient: no predecessor")
 
 // LatestRetiredByRole calls
@@ -90,14 +92,26 @@ func (c *Client) LatestRetiredByRole(ctx context.Context, organizationID, roleID
 
 	var out Watchkeeper
 	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
-		// The server returns standard 404 not_found when no row
-		// matches; surface the typed sentinel here so the M7.1.c
-		// saga step can [errors.Is] this exact shape without
-		// conflating it with a generic 404 from a different
-		// /v1/watchkeepers route. Wrap with %w so the underlying
-		// *ServerError's Unwrap chain (ErrNotFound + the underlying
-		// status) remains matchable via errors.As / errors.Is.
-		if errors.Is(err, ErrNotFound) {
+		// Only synthesize ErrNoPredecessor for the endpoint's
+		// STRUCTURED 404 — the server's writeError path emits
+		// `{"error":"not_found"}` and parseServerError sets
+		// se.Code = "not_found". A bare 404 with no JSON envelope
+		// (or with a different `error` code) is treated as a
+		// routing / deployment-skew bug and bubbled through
+		// untouched: the M7.1.c saga step should NOT silently
+		// disable inheritance when the request hit an older Keep
+		// that has no `/v1/watchkeepers/latest-retired-by-role`
+		// route, or when a base-URL misconfiguration routed the
+		// call elsewhere. iter-1 codex finding (P1 / Major).
+		//
+		// "Structured 404" is intentionally narrow: we match
+		// *ServerError with Status=404 AND Code="not_found". Other
+		// 4xx/5xx errors are also returned verbatim so callers can
+		// distinguish auth failures (403), shape failures (400),
+		// and transient backend errors (5xx) from the legitimate
+		// no-row case.
+		var se *ServerError
+		if errors.As(err, &se) && se.Status == http.StatusNotFound && se.Code == "not_found" {
 			return nil, &noPredecessorError{wrapped: err}
 		}
 		return nil, err

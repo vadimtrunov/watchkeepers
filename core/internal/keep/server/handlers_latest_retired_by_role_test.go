@@ -164,6 +164,11 @@ func TestGetLatestRetiredByRole_SQLShape(t *testing.T) {
 		"JOIN watchkeeper.human",
 		"h.id = w.lead_human_id",
 		"w.role_id = $1",
+		// iter-1: the explicit `role_id IS NOT NULL` predicate
+		// pins partial-index alignment for the M7.1.a iter-1
+		// migration which added that predicate to the index's
+		// WHERE clause.
+		"w.role_id IS NOT NULL",
 		"h.organization_id = $2",
 		"w.retired_at IS NOT NULL",
 		"w.archive_uri IS NOT NULL",
@@ -268,6 +273,14 @@ func TestGetLatestRetiredByRole_MissingRoleID_400(t *testing.T) {
 	}{
 		{"absent", "/v1/watchkeepers/latest-retired-by-role"},
 		{"empty", "/v1/watchkeepers/latest-retired-by-role?role_id="},
+		// iter-1 codex P2: whitespace-only role_id MUST be rejected
+		// at the handler seam — otherwise it round-trips to the
+		// SQL filter, returns 404 → ErrNoPredecessor on the
+		// client, and silently disables inheritance for the
+		// caller. Mirrors the insert-path TrimSpace gate.
+		{"whitespace_spaces", "/v1/watchkeepers/latest-retired-by-role?role_id=%20%20%20"},
+		{"whitespace_tab", "/v1/watchkeepers/latest-retired-by-role?role_id=%09"},
+		{"whitespace_newline", "/v1/watchkeepers/latest-retired-by-role?role_id=%0A"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
