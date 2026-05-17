@@ -127,9 +127,19 @@ type ChargeResult struct {
 	// "enforcement disabled for this conversation".
 	TokenBudget int64
 
-	// OverBudget reports whether the charge crossed the budget. True
-	// iff `TokensUsed > TokenBudget && TokenBudget > 0` — a zero
-	// budget never trips OverBudget regardless of TokensUsed.
+	// OverBudget reports whether the conversation is CURRENTLY over its
+	// budget after the charge. True iff
+	// `TokensUsed > TokenBudget && TokenBudget > 0`. A zero budget
+	// never trips OverBudget regardless of TokensUsed.
+	//
+	// Note: this is the post-state — true on every Charge that leaves
+	// the conversation over budget, NOT only the call that transitioned
+	// it. The audit emit + escalation trigger fire only on the FIRST
+	// crossing (the call whose pre-increment value was at-or-below the
+	// budget but whose post-increment value exceeds it); callers that
+	// want to distinguish "currently over" from "just crossed" can
+	// compare `TokensUsed - Delta` against `TokenBudget` themselves
+	// (iter-1 codex P1 Major fix).
 	OverBudget bool
 }
 
@@ -383,13 +393,28 @@ func (w *Writer) Charge(ctx context.Context, params ChargeParams) (ChargeResult,
 		return ChargeResult{}, fmt.Errorf("budget: charge: inc tokens: %w", err)
 	}
 
+	// Compute the over-budget transition: emit + trigger only on the
+	// FIRST crossing (iter-1 codex P1 Major fix). The first iteration
+	// emitted on every post-crossing Charge — every subsequent message
+	// in an already-over-budget conversation would spam another
+	// `k2k_over_budget` audit row and re-page the escalation. The
+	// corrected shape compares the PRE-increment counter
+	// (`tokensUsed - params.Delta`) against the budget; only the call
+	// that transitions the counter from <= budget to > budget fires the
+	// side effects. The exported `OverBudget` field on [ChargeResult]
+	// still reflects the post-increment state (true whenever
+	// `tokensUsed > budget && budget > 0`) so callers branching on the
+	// state can detect "is currently over budget" independent of the
+	// "crossed on this call" semantics.
 	overBudget := params.TokenBudget > 0 && tokensUsed > params.TokenBudget
+	preIncrement := tokensUsed - params.Delta
+	crossedNow := overBudget && preIncrement <= params.TokenBudget
 	result := ChargeResult{
 		TokensUsed:  tokensUsed,
 		TokenBudget: params.TokenBudget,
 		OverBudget:  overBudget,
 	}
-	if !overBudget {
+	if !crossedNow {
 		return result, nil
 	}
 
@@ -540,12 +565,13 @@ func ResolveBudget(defaultBudget, override int64, ok bool) int64 {
 	return override
 }
 
-// assertRepositorySubset is a compile-time check that any value
-// satisfying [k2k.Repository] also satisfies the narrower [Repository]
-// seam this package consumes. A future rename of `IncTokens` on either
-// surface fails the build at this assignment. Hoisted into a private
-// `_` assignment so the production wiring (which passes the concrete
-// `*k2k.PostgresRepository`) does not have to repeat the cast.
-func assertRepositorySubset(r k2k.Repository) Repository { return r }
-
-var _ = assertRepositorySubset
+// Compile-time assertions: both production [k2k.Repository]
+// implementations satisfy the narrower [Repository] seam this package
+// consumes. A future rename of `IncTokens` on either surface fails the
+// build here. Mirrors the
+// `var _ k2k.SlackChannels = (*slack.Client)(nil)` discipline in
+// `core/internal/keep/k2k_wiring/wiring.go`.
+var (
+	_ Repository = (*k2k.MemoryRepository)(nil)
+	_ Repository = (*k2k.PostgresRepository)(nil)
+)

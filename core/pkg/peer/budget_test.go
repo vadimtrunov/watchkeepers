@@ -414,6 +414,121 @@ func TestTool_Reply_ChargeFailure_DoesNotPropagate(t *testing.T) {
 	}
 }
 
+// TestTool_Reply_ChargeForwardsCorrelationID pins the iter-1 codex P2
+// fix: when a reply causes an over-budget crossing, the resulting
+// trigger payload carries the conversation's persisted
+// `CorrelationID` (and not uuid.Nil) so the escalation can correlate
+// back to the originating watch order / saga.
+func TestTool_Reply_ChargeForwardsCorrelationID(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	corrID := uuid.New()
+	target := samplePeer("Lead")
+	enforcer := &recordingBudgetEnforcer{}
+	tool, repo, _, tokens := newToolWithBudget(t, orgID, []keepclient.Peer{target}, enforcer, nil)
+	conv, err := repo.Open(context.Background(), k2k.OpenParams{
+		OrganizationID: orgID,
+		Participants:   []string{"wk-asker", target.WatchkeeperID},
+		Subject:        "test",
+		TokenBudget:    250,
+		CorrelationID:  corrID,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err = tool.Reply(context.Background(), peer.ReplyParams{
+		ActingWatchkeeperID: target.WatchkeeperID,
+		OrganizationID:      orgID,
+		CapabilityToken:     tokens[peer.CapabilityReply],
+		ConversationID:      conv.ID,
+		Body:                []byte("ok"),
+	})
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	calls := enforcer.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("Charge calls = %d, want 1", len(calls))
+	}
+	if calls[0].CorrelationID != corrID {
+		t.Errorf("charge.CorrelationID = %s, want %s (forwarded from conv)", calls[0].CorrelationID, corrID)
+	}
+}
+
+// TestTool_Ask_ChargeRunsDetachedAfterCallerCancel pins the iter-1
+// codex P1 Major fix: peer.Ask calls Charge under a detached ctx so a
+// caller-side cancellation arriving during/after the charge does NOT
+// silently skip the counter advance (the load-bearing observability
+// surface for an already-persisted message).
+func TestTool_Ask_ChargeRunsDetachedAfterCallerCancel(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	target := samplePeer("Lead")
+	enforcer := &cancellingEnforcer{}
+	tool, repo, _, tokens := newToolWithBudget(t, orgID, []keepclient.Peer{target}, enforcer, nil)
+	startReplierAfter(t, repo, orgID, target)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// The enforcer flips the caller's ctx the moment Charge is
+	// entered. If peer.Ask used the caller's ctx for Charge, the
+	// ctx.Err() check inside cancellingEnforcer.Charge would observe
+	// the cancellation. With the detached-ctx fix the Charge runs to
+	// completion regardless.
+	enforcer.cancelOn = cancel
+
+	_, _ = tool.Ask(ctx, peer.AskParams{
+		ActingWatchkeeperID: "wk-asker",
+		OrganizationID:      orgID,
+		CapabilityToken:     tokens[peer.CapabilityAsk],
+		Target:              target.WatchkeeperID,
+		Subject:             "test",
+		Body:                []byte("hi"),
+		Timeout:             500 * time.Millisecond,
+	})
+	if got := enforcer.callCount(); got != 1 {
+		t.Errorf("Charge calls = %d, want 1 (detached ctx must let charge complete)", got)
+	}
+	if enforcer.observedCtxErr() != nil {
+		t.Errorf("Charge observed ctx.Err = %v, want nil (caller ctx was forwarded — detached fix broken)", enforcer.observedCtxErr())
+	}
+}
+
+// cancellingEnforcer cancels the caller's ctx the moment Charge is
+// entered + records whether the ctx passed into Charge was already
+// cancelled by that point. If the peer-tool uses a detached ctx, the
+// passed-in ctx's Err() stays nil after the cancel.
+type cancellingEnforcer struct {
+	mu       sync.Mutex
+	n        int
+	cancelOn context.CancelFunc
+	ctxErr   error
+}
+
+func (c *cancellingEnforcer) Charge(ctx context.Context, _ budget.ChargeParams) (budget.ChargeResult, error) {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	if c.cancelOn != nil {
+		c.cancelOn()
+	}
+	c.mu.Lock()
+	c.ctxErr = ctx.Err()
+	c.mu.Unlock()
+	return budget.ChargeResult{TokensUsed: 1}, nil
+}
+
+func (c *cancellingEnforcer) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+func (c *cancellingEnforcer) observedCtxErr() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ctxErr
+}
+
 // TestTool_Ask_BudgetEnforcerEndToEnd wires a real budget.Writer with a
 // recordingAuditor that records every EmitOverBudget call. Pins the
 // end-to-end M1.5 plumbing — Ask → AppendMessage → IncTokens → emit +

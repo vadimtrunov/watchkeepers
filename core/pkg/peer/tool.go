@@ -42,6 +42,19 @@ const (
 // constant in `core/pkg/k2k/lifecycle.go` (iter-1 codex Major fix).
 const auditEmitTimeout = 5 * time.Second
 
+// budgetChargeTimeout caps the detached-ctx window the M1.5 budget
+// charge runs under from [Tool.Ask] / [Tool.Reply]. The charge happens
+// AFTER `Repository.AppendMessage` has persisted the message, so the
+// load-bearing message write is already durable; the charge advances
+// the running token counter via `Repository.IncTokens` + dispatches
+// over-budget side effects. The detached ctx ensures a client
+// disconnect / timeout arriving between AppendMessage completion and
+// this call does NOT systematically skip the counter advance (iter-1
+// codex P1 Major fix). 5-second cap matches [auditEmitTimeout]: a
+// healthy IncTokens completes well within the cap while a degenerate
+// repository cannot tie up the caller indefinitely.
+const budgetChargeTimeout = 5 * time.Second
+
 // Lister is the narrow seam [Tool.Ask] consumes from
 // [keepclient.Client]. The interface is the unit-test seam:
 // production wiring satisfies it with `*keepclient.Client`; tests

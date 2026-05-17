@@ -474,6 +474,77 @@ func assertOverBudgetTrigger(t *testing.T, tr budget.OverBudgetTrigger, convID, 
 	}
 }
 
+// TestCharge_OnlyFirstCrossingEmitsAndTriggers pins the iter-1 codex
+// P1 Major fix: once a conversation is over budget, subsequent
+// charges that stay over budget must NOT re-emit or re-trigger.
+func TestCharge_OnlyFirstCrossingEmitsAndTriggers(t *testing.T) {
+	t.Parallel()
+	repo := &recordingIncTokensRepo{startVal: 0}
+	emitter := &recordingEmitter{}
+	trigger := &recordingTrigger{}
+	w := budget.NewWriter(
+		repo, emitter,
+		budget.WithEscalationTrigger(trigger),
+		budget.WithNow(func() time.Time { return fixedTime }),
+	)
+	convID := uuid.New()
+	orgID := uuid.New()
+	mkParams := func(delta int64) budget.ChargeParams {
+		return budget.ChargeParams{
+			ConversationID:      convID,
+			OrganizationID:      orgID,
+			ActingWatchkeeperID: "wk",
+			TokenBudget:         100,
+			Delta:               delta,
+		}
+	}
+	// First charge: 0 + 90 = 90 (still under budget).
+	res, err := w.Charge(context.Background(), mkParams(90))
+	if err != nil {
+		t.Fatalf("Charge #1: %v", err)
+	}
+	if res.OverBudget {
+		t.Errorf("OverBudget after 90 = true, want false")
+	}
+	// Second charge: 90 + 20 = 110 (CROSSES the 100 budget). This call
+	// fires the side effects (the only one that should).
+	res, err = w.Charge(context.Background(), mkParams(20))
+	if err != nil {
+		t.Fatalf("Charge #2: %v", err)
+	}
+	if !res.OverBudget {
+		t.Errorf("OverBudget after 110 = false, want true")
+	}
+	if got := len(emitter.overBudgetSnapshot()); got != 1 {
+		t.Errorf("emit count after crossing = %d, want 1", got)
+	}
+	if got := len(trigger.snapshot()); got != 1 {
+		t.Errorf("trigger count after crossing = %d, want 1", got)
+	}
+	// Third + fourth charge: stays over budget. Result.OverBudget stays
+	// true (it's the post-state) but emit + trigger MUST NOT fire again.
+	res, err = w.Charge(context.Background(), mkParams(5))
+	if err != nil {
+		t.Fatalf("Charge #3: %v", err)
+	}
+	if !res.OverBudget {
+		t.Errorf("OverBudget after 115 = false, want true")
+	}
+	res, err = w.Charge(context.Background(), mkParams(5))
+	if err != nil {
+		t.Fatalf("Charge #4: %v", err)
+	}
+	if !res.OverBudget {
+		t.Errorf("OverBudget after 120 = false, want true")
+	}
+	if got := len(emitter.overBudgetSnapshot()); got != 1 {
+		t.Errorf("emit count after 4 charges = %d, want 1 (only first crossing)", got)
+	}
+	if got := len(trigger.snapshot()); got != 1 {
+		t.Errorf("trigger count after 4 charges = %d, want 1 (only first crossing)", got)
+	}
+}
+
 func TestCharge_ZeroBudgetDisablesEnforcement(t *testing.T) {
 	t.Parallel()
 	repo := &recordingIncTokensRepo{startVal: 1_000_000} // huge tokens used
@@ -701,16 +772,17 @@ func TestCharge_ConcurrentChargesComposeCorrectly(t *testing.T) {
 	if final.TokensUsed != wantTotal {
 		t.Errorf("final TokensUsed = %d, want %d (atomic increment broke)", final.TokensUsed, wantTotal)
 	}
-	// At least one charge crossed the 1000 budget — we cannot pin the
-	// exact count because the crossing depends on goroutine scheduling,
-	// but emit_count == trigger_count and both must be >= 1.
+	// Exactly one charge crossed the 1000 budget (iter-1 codex P1 fix:
+	// only the first crossing fires the side effects, never any
+	// subsequent post-budget charges). emit_count == trigger_count
+	// == 1 regardless of how many goroutines stayed over budget.
 	emits := len(emitter.overBudgetSnapshot())
 	trigs := len(trigger.snapshot())
 	if emits != trigs {
 		t.Errorf("emit count = %d, trigger count = %d (want equal)", emits, trigs)
 	}
-	if emits < 1 {
-		t.Errorf("emit count = %d, want >= 1 (every post-budget charge must emit)", emits)
+	if emits != 1 {
+		t.Errorf("emit count = %d, want exactly 1 (only the first crossing fires side effects)", emits)
 	}
 }
 

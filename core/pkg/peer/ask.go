@@ -355,6 +355,16 @@ func (t *Tool) resolveTokenBudget(ctx context.Context, params AskParams) (int64,
 // minimum-1 clamp) is detected before burning an IncTokens round-trip.
 // Hoisted so the orchestrator stays scannable + under the gocyclo
 // budget.
+//
+// The Charge runs under a detached `context.WithoutCancel` ctx with a
+// short cap (iter-1 codex P1 Major fix). The request message has
+// already been persisted via [k2k.Repository.AppendMessage] at this
+// point — using the caller's ctx for the [IncTokens] call would let a
+// client-side disconnect / timeout arriving between AppendMessage
+// completion and this call silently skip the counter advance, leaving
+// `tokens_used` undercounted and preventing later over-budget
+// detection for already-persisted messages. The detached ctx mirrors
+// the M1.4 audit-emit discipline at the load-bearing counter surface.
 func (t *Tool) chargeRequestBody(ctx context.Context, conv k2k.Conversation, reqBody []byte, tokenBudget int64, params AskParams) {
 	if t.deps.Budget == nil {
 		return
@@ -363,7 +373,9 @@ func (t *Tool) chargeRequestBody(ctx context.Context, conv k2k.Conversation, req
 	if delta <= 0 {
 		return
 	}
-	_, _ = t.deps.Budget.Charge(ctx, budget.ChargeParams{
+	chargeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budgetChargeTimeout)
+	defer cancel()
+	_, _ = t.deps.Budget.Charge(chargeCtx, budget.ChargeParams{
 		ConversationID:      conv.ID,
 		OrganizationID:      params.OrganizationID,
 		ActingWatchkeeperID: params.ActingWatchkeeperID,

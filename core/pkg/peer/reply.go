@@ -201,11 +201,19 @@ func (t *Tool) Reply(ctx context.Context, params ReplyParams) error {
 //
 // The `conv` reference is the row read at the Reply entry boundary so
 // the charge forwards the conversation's persisted TokenBudget (which
-// was stamped at the Ask-side k2k.Lifecycle.Open call). The `replyMsg`
-// reference is unused by the charge today; the parameter keeps the
-// helper's signature aligned with the Ask-side helper so a future
-// addition (e.g. an explicit MessageID on ChargeParams) lands as a
-// single-site change.
+// was stamped at the Ask-side k2k.Lifecycle.Open call) AND the
+// persisted CorrelationID (so an over-budget detection on a reply
+// preserves the link back to the originating watch order / saga —
+// iter-1 codex P2 fix). The `replyMsg` reference is unused by the
+// charge today; the parameter keeps the helper's signature aligned
+// with the Ask-side helper so a future addition (e.g. an explicit
+// MessageID on ChargeParams) lands as a single-site change.
+//
+// The Charge runs under a detached `context.WithoutCancel` ctx with a
+// short cap (iter-1 codex P1 Major fix). Same rationale as
+// [Tool.chargeRequestBody]: the reply message is persisted before this
+// call so the load-bearing counter advance must not be silently
+// skipped by a caller-side cancellation.
 func (t *Tool) chargeReplyBody(ctx context.Context, body []byte, conv k2k.Conversation, params ReplyParams, _ k2k.Message) {
 	if t.deps.Budget == nil {
 		return
@@ -214,11 +222,14 @@ func (t *Tool) chargeReplyBody(ctx context.Context, body []byte, conv k2k.Conver
 	if delta <= 0 {
 		return
 	}
-	_, _ = t.deps.Budget.Charge(ctx, budget.ChargeParams{
+	chargeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budgetChargeTimeout)
+	defer cancel()
+	_, _ = t.deps.Budget.Charge(chargeCtx, budget.ChargeParams{
 		ConversationID:      params.ConversationID,
 		OrganizationID:      params.OrganizationID,
 		ActingWatchkeeperID: params.ActingWatchkeeperID,
 		TokenBudget:         conv.TokenBudget,
 		Delta:               delta,
+		CorrelationID:       conv.CorrelationID,
 	})
 }
