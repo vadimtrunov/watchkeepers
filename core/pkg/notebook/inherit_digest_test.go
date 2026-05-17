@@ -621,6 +621,54 @@ func TestRunInheritDigest_RejectsEmptyOrg(t *testing.T) {
 	}
 }
 
+// TestRunInheritDigest_RejectsFutureMarker — iter-1 codex C2: a
+// marker row written with a future `last_run_at` would otherwise
+// hit the `now.Sub(last_run_at) < cadence` idempotency fast path
+// and silently stall the job indefinitely. The validation guard
+// runs BEFORE the idempotency check so the typed sentinel
+// surfaces immediately.
+func TestRunInheritDigest_RejectsFutureMarker(t *testing.T) {
+	t.Parallel()
+
+	now := digestTestNow()
+	scanner := &fakeInheritScanner{}
+	resolver := &fakeLeadResolver{}
+	poster := &fakeInheritPoster{}
+	store := newFakeRunsStore()
+
+	// Seed a marker whose `last_run_at` is 12h in the future
+	// (within the 24h idempotency window relative to `now`).
+	// Without the fix the run would short-circuit silently; with
+	// the fix it returns ErrInvalidDigestWindow.
+	if err := store.SaveRun(context.Background(), InheritDigestRun{
+		OrganizationID:  digestTestOrgID,
+		LastRunAt:       now.Add(12 * time.Hour),
+		LastWindowStart: now.Add(-12 * time.Hour),
+		LastWindowEnd:   now.Add(12 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seed marker: %v", err)
+	}
+
+	deps := InheritDigestDeps{
+		Scanner:   scanner,
+		Resolver:  resolver,
+		Poster:    poster,
+		RunsStore: store,
+	}
+	err := RunInheritDigest(context.Background(), digestTestOrgID, now, deps, nil)
+	if !errors.Is(err, ErrInvalidDigestWindow) {
+		t.Errorf("err = %v, want ErrInvalidDigestWindow", err)
+	}
+	// Scanner / poster MUST NOT be called when the marker is
+	// invalid — the guard precedes any seam dispatch.
+	if got := scanner.callsSnapshot(); len(got) != 0 {
+		t.Errorf("scanner called %d times on invalid marker, want 0", len(got))
+	}
+	if got := poster.postsSnapshot(); len(got) != 0 {
+		t.Errorf("poster called %d times on invalid marker, want 0", len(got))
+	}
+}
+
 // TestRunInheritDigest_RejectsBackwardsWindow — when the prior
 // marker's `last_window_end` is later than `now` (clock skew or
 // manual marker bump in the wrong direction), the run returns

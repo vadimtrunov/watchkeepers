@@ -234,10 +234,6 @@ type InheritDigestDeps struct {
 	Resolver  LeadResolver
 	Poster    InheritDigestPoster
 	RunsStore InheritDigestRunsStore
-	// Logger is an optional diagnostic sink. When nil, the job
-	// emits no diagnostic logs (per-lead failures still surface
-	// via [LeadCallback] when wired).
-	Logger Logger
 }
 
 // LeadCallback is invoked once per resolved lead within a single
@@ -337,6 +333,17 @@ func RunInheritDigest(
 	priorRun, hasPrior, err := deps.RunsStore.LoadLastRun(ctx, organizationID)
 	if err != nil {
 		return fmt.Errorf("notebook: inherit digest: load last run: %w", err)
+	}
+
+	// Future-marker defence (iter-1 codex C2): a marker row whose
+	// `LastRunAt` or `LastWindowEnd` is later than `now` (clock
+	// skew, manual edit, replication lag) would otherwise pass
+	// the idempotency `now.Sub(LastRunAt) < cadence` predicate
+	// and silently stall the job indefinitely. Reject it BEFORE
+	// the idempotency guard so the operator sees the typed
+	// sentinel rather than a quiet no-op every tick.
+	if hasPrior && (priorRun.LastRunAt.After(now) || priorRun.LastWindowEnd.After(now)) {
+		return fmt.Errorf("notebook: inherit digest: %w", ErrInvalidDigestWindow)
 	}
 
 	if hasPrior && now.Sub(priorRun.LastRunAt) < digestCadence {
