@@ -513,7 +513,10 @@ func TestGetManifest_ModelProjection(t *testing.T) {
 			*dest[10].(*string) = ""
 			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
 			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
-			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			// immutable_core column (M3.1 addition) is scanned via
+			// **json.RawMessage so SQL NULL leaves the pointer nil; the
+			// fake row mirrors that by leaving dest[13] untouched.
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -570,7 +573,10 @@ func TestGetManifest_AutonomyProjection(t *testing.T) {
 			*dest[10].(*string) = wantAutonomy
 			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
 			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
-			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			// immutable_core column (M3.1 addition) is scanned via
+			// **json.RawMessage so SQL NULL leaves the pointer nil; the
+			// fake row mirrors that by leaving dest[13] untouched.
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -631,7 +637,10 @@ func TestGetManifest_NotebookRecallProjection(t *testing.T) {
 			*dest[10].(*string) = ""
 			*dest[11].(*int) = wantTopK
 			*dest[12].(*float64) = wantThreshold
-			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			// immutable_core column (M3.1 addition) — dest[13] is
+			// **json.RawMessage; SQL NULL leaves the pointer nil so the
+			// fake leaves dest[13] untouched.
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}

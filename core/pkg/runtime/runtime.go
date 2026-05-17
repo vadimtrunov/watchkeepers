@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 )
 
 // ID is the opaque handle the [AgentRuntime] assigns when
@@ -132,11 +133,98 @@ type Manifest struct {
 	// consumed by the M5.5.c.d recall layer.
 	NotebookRelevanceThreshold float64
 
+	// ImmutableCore is the optional projection of the manifest's
+	// immutable_core jsonb column — the five mechanical-immutability
+	// buckets that govern what the agent, self-tuning, or lead may NOT
+	// override regardless of any other field on this manifest. Populated
+	// by the M3.1 manifest loader from
+	// [github.com/vadimtrunov/watchkeepers/core/pkg/keepclient.ManifestVersion.ImmutableCore];
+	// consumed by the M3.2 admin-only enforcement gate and the M3.6
+	// self-tuning validator.
+	//
+	// A nil pointer means "no immutable core declared yet" (legacy row
+	// predating M3.1). The runtime SHOULD treat that as fail-secure —
+	// no governance overrides — and ship a warning rather than silently
+	// allow blanket access. A non-nil pointer projects the M3.1 buckets
+	// verbatim; forward-compatible bucket extensions (Phase 2 §M3.4
+	// `merge_fields` / `rollback`) ride in [ImmutableCore.Extra] until
+	// a typed field lands.
+	ImmutableCore *ImmutableCore
+
 	// Metadata carries runtime-specific extensions (TS-harness module
 	// path, Claude Code subprocess flags, isolate options, …). The
 	// runtime consumes only the keys it recognises and ignores the
 	// rest. Nil is fine.
 	Metadata map[string]string
+}
+
+// ImmutableCore captures the five mechanical-immutability buckets the
+// Phase 2 §M3.1 schema attaches to every Manifest. The shape is portable
+// string-keyed maps / scalars so the runtime package never depends on
+// the manifest jsonb encoding; the M3.1 manifest loader is the
+// projection's owner.
+//
+// M3.1 is schema-only — every bucket field is intentionally permissive
+// at this milestone: admin-only editability gating lives in M3.2
+// (handler-layer) and the self-tuning validator lives in M3.6. The
+// shape here only fixes the canonical key names so downstream consumers
+// can target stable fields without re-parsing the raw jsonb at every
+// read site.
+//
+// Forward compatibility: unknown wire keys decode into [Extra] verbatim
+// so a Phase 2 §M3.4 `merge_fields` payload that adds a sixth bucket is
+// not silently dropped by the M3.1 loader. Consumers that do not
+// recognise an Extra key MUST tolerate it (mirrors the [Manifest.Metadata]
+// precedent).
+type ImmutableCore struct {
+	// RoleBoundaries is the explicit list of capability names the
+	// Watchkeeper is NOT allowed to have, regardless of what
+	// self-tuning proposes. Nil / empty means "no role boundaries
+	// declared" — the runtime treats that as fail-secure (no
+	// overrides allowed).
+	RoleBoundaries []string `json:"role_boundaries,omitempty"`
+
+	// SecurityConstraints is a free-form map of data-handling rules,
+	// forbidden data destinations, and classification floors. Keys are
+	// constraint names; values are the rule payload. The M3.6
+	// validator is the authoritative consumer; the M3.1 schema layer
+	// treats the map as opaque.
+	SecurityConstraints map[string]any `json:"security_constraints,omitempty"`
+
+	// EscalationProtocols declares when and to whom to escalate;
+	// cannot be disabled. Keys are protocol names (e.g. `pii_leak`,
+	// `cost_breach`); values are the route payload (target channel,
+	// SLA window, …). The runtime consults this map at every
+	// approval-gated tool invocation; M3.1 stores the projection only.
+	EscalationProtocols map[string]any `json:"escalation_protocols,omitempty"`
+
+	// CostLimits declares the max token spend caps (per task, per
+	// day, per week). Keys are the cap window names; values are the
+	// cap payload (typically a numeric token / dollar threshold). The
+	// runtime cost ledger enforces these in M2; M3.1 ships the
+	// projection so the ledger can resolve them by name.
+	CostLimits map[string]any `json:"cost_limits,omitempty"`
+
+	// AuditRequirements declares what MUST be logged; cannot be
+	// reduced. Keys are audit categories (e.g. `manifest_changes`,
+	// `tool_invocations`); values are the requirement payload
+	// (retention window, redaction policy, …). The Keeper's Log
+	// writer consults this map; M3.1 stores the projection only.
+	AuditRequirements map[string]any `json:"audit_requirements,omitempty"`
+
+	// Extra carries any additional buckets the wire payload declared
+	// beyond the five canonical M3.1 buckets above. Forward-compatible
+	// projection — a Phase 2 §M3.4 `merge_fields` payload that adds a
+	// sixth bucket flows through Extra rather than getting silently
+	// dropped. Consumers that do not recognise an Extra key MUST
+	// tolerate it (mirrors the [Manifest.Metadata] precedent). The
+	// field is excluded from JSON round-trips (`json:"-"`) because the
+	// M3.1 loader populates it manually from the raw jsonb after
+	// decoding the canonical buckets — re-marshalling the runtime
+	// ImmutableCore back onto the wire is NOT a supported round-trip
+	// at this milestone (the wire shape is owned by keepclient's
+	// [json.RawMessage] surface).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // StartOptions is the value supplied to [AgentRuntime.Start] alongside

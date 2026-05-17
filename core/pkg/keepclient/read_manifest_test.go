@@ -525,3 +525,91 @@ func TestReadManifestVersion_NotebookRecallFields_Omitted(t *testing.T) {
 		t.Errorf("NotebookRelevanceThreshold = %v, want 0 (omitted)", mv.NotebookRelevanceThreshold)
 	}
 }
+
+// -----------------------------------------------------------------------
+// M3.1 — immutable_core wire decode + omitempty
+// -----------------------------------------------------------------------
+
+// TestGetManifest_ImmutableCore_DecodesVerbatim asserts the M3.1 GET
+// round-trip: a response carrying `immutable_core` projects the jsonb
+// bytes onto [ManifestVersion.ImmutableCore] verbatim (mirrors the
+// Tools / AuthorityMatrix raw-jsonb passthrough). Substring assertion
+// over the captured RawMessage so re-encoding by the keepclient is
+// caught immediately.
+func TestGetManifest_ImmutableCore_DecodesVerbatim(t *testing.T) {
+	t.Parallel()
+
+	const wantPayload = `{"role_boundaries":["x"],"audit_requirements":{"manifest_changes":"retain_forever"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "id":"row-1",
+            "manifest_id":"m",
+            "version_no":1,
+            "system_prompt":"sp",
+            "tools":null,
+            "authority_matrix":null,
+            "knowledge_sources":null,
+            "immutable_core":`+wantPayload+`,
+            "created_at":"2026-05-02T12:00:00Z"
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	mv, err := c.GetManifest(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if len(mv.ImmutableCore) == 0 {
+		t.Fatalf("ImmutableCore is empty; want %s", wantPayload)
+	}
+	// Structural compare — Go re-decodes the inner object via
+	// json.Unmarshal so any byte-level normalisation by the HTTP layer
+	// stays invisible to consumers. The keepclient promises bucket-
+	// level fidelity, not byte-level.
+	var gotObj, wantObj map[string]any
+	if err := json.Unmarshal(mv.ImmutableCore, &gotObj); err != nil {
+		t.Fatalf("ImmutableCore decode: %v", err)
+	}
+	if err := json.Unmarshal([]byte(wantPayload), &wantObj); err != nil {
+		t.Fatalf("wantPayload decode: %v", err)
+	}
+	for k := range wantObj {
+		if _, ok := gotObj[k]; !ok {
+			t.Errorf("ImmutableCore missing bucket %q; got=%v", k, gotObj)
+		}
+	}
+}
+
+// TestGetManifest_ImmutableCore_OmittedStaysNil asserts that a response
+// without `immutable_core` decodes onto a nil [json.RawMessage] (the
+// `omitempty` round-trip case). Legacy callers predating M3.1 observe
+// no schema change.
+func TestGetManifest_ImmutableCore_OmittedStaysNil(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+            "id":"row-1",
+            "manifest_id":"m",
+            "version_no":1,
+            "system_prompt":"sp",
+            "tools":null,
+            "authority_matrix":null,
+            "knowledge_sources":null,
+            "created_at":"2026-05-02T12:00:00Z"
+        }`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	mv, err := c.GetManifest(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if mv.ImmutableCore != nil {
+		t.Errorf("ImmutableCore = %s, want nil (omitted)", mv.ImmutableCore)
+	}
+}

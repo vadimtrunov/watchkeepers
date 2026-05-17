@@ -1,6 +1,7 @@
 package keepclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -105,6 +106,25 @@ type PutManifestVersionRequest struct {
 	// NULL (treated as "unset"; omitempty drops it from the wire). Server
 	// and DB CHECK constraint (migration 016) enforce the same range.
 	NotebookRelevanceThreshold float64 `json:"notebook_relevance_threshold,omitempty"`
+	// ImmutableCore is the optional manifest immutable_core jsonb column,
+	// kept as raw JSON (matches the Tools / AuthorityMatrix /
+	// KnowledgeSources precedent). When non-empty, the JSON document MUST
+	// be a top-level object — the server CHECK constraint
+	// `manifest_version_immutable_core_shape` (migration 030) and the
+	// server-side `parsePutManifestVersionRequest` both enforce object
+	// shape and surface the stable 400 reason `invalid_immutable_core`
+	// on a non-object payload. The client mirrors the same precheck so
+	// the malformed shape (array / scalar / JSON `null` literal)
+	// short-circuits before the network hit.
+	//
+	// The five buckets carried by the object (see Phase 2 §M3.1 in
+	// `docs/ROADMAP-phase2.md`) are `role_boundaries`,
+	// `security_constraints`, `escalation_protocols`, `cost_limits`, and
+	// `audit_requirements`. M3.1 is schema-only — admin-only editability
+	// enforcement lands in M3.2 and the self-tuning validator lands in
+	// M3.6, so the client does NOT presume to validate bucket contents
+	// here.
+	ImmutableCore json.RawMessage `json:"immutable_core,omitempty"`
 }
 
 // PutManifestVersionResponse mirrors the server's
@@ -168,10 +188,45 @@ func (c *Client) PutManifestVersion(ctx context.Context, manifestID string, req 
 	if req.NotebookRelevanceThreshold < 0 || req.NotebookRelevanceThreshold > 1 {
 		return nil, ErrInvalidRequest
 	}
+	// ImmutableCore mirrors the server's CHECK shape (migration 030) +
+	// the `parsePutManifestVersionRequest` precheck: an empty / nil
+	// RawMessage round-trips as SQL NULL via `omitempty`; any non-empty
+	// payload MUST be a JSON object. Reject arrays / scalars / the JSON
+	// `null` literal client-side so the caller sees ErrInvalidRequest
+	// rather than a 400 from the server. The bucket contents themselves
+	// are NOT validated here — admin-only enforcement lands in M3.2 and
+	// the self-tuning validator lands in M3.6.
+	if !isJSONObjectOrEmpty(req.ImmutableCore) {
+		return nil, ErrInvalidRequest
+	}
 	var out PutManifestVersionResponse
 	path := "/v1/manifests/" + url.PathEscape(manifestID) + "/versions"
 	if err := c.do(ctx, http.MethodPut, path, req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// isJSONObjectOrEmpty returns true when raw is empty / nil (the
+// `omitempty` round-trip case) OR carries a JSON object literal
+// (`{...}`). Arrays, scalars, and the JSON `null` literal return
+// false — mirrors the server-side `manifest_version_immutable_core_shape`
+// CHECK from migration 030 plus the `parsePutManifestVersionRequest`
+// precheck on the server.
+//
+// The check is structural: it strips JSON whitespace via
+// [json.Valid] + a single-byte open-brace probe through
+// [bytes.TrimLeft] (whitespace set per JSON RFC 8259 §2 — space, tab,
+// LF, CR). Validation of the payload's bucket contents is intentionally
+// out of scope for M3.1 (admin-only editability lands in M3.2; the
+// self-tuning validator lands in M3.6).
+func isJSONObjectOrEmpty(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	if !json.Valid(raw) {
+		return false
+	}
+	trimmed := bytes.TrimLeft(raw, " \t\r\n")
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
