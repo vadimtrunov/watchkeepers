@@ -148,3 +148,27 @@ var ErrInvalidEventTypes = errors.New("peer: invalid event types")
 // nil-guard catches this at wiring time; the runtime guard exists for
 // defensive belt-and-braces during partial migrations.
 var ErrPeerEventBusUnavailable = errors.New("peer: event bus unavailable")
+
+// ErrPeerRoleFilterEmpty is returned by [Tool.Broadcast] when the
+// supplied [RoleFilter] has neither [RoleFilter.Roles] nor
+// [RoleFilter.Languages] nor [RoleFilter.Capabilities] set. An empty
+// filter would degenerate into "broadcast to every active peer in the
+// tenant" which is almost always a caller bug (a wildcard fan-out
+// risks a token-budget runaway + a stampede on every peer's Slack DM
+// surface). The fail-fast surfaces this sentinel BEFORE any
+// `keepclient.ListPeers` round-trip. Callers that genuinely intend a
+// wildcard must opt in by setting any non-empty filter field
+// (`Roles: []string{"*"}` is reserved as the explicit wildcard
+// convention should a future leaf land it).
+var ErrPeerRoleFilterEmpty = errors.New("peer: role filter empty")
+
+// ErrPeerNoTargets is returned by [Tool.Broadcast] when the filter
+// resolves to zero targets after applying every [RoleFilter] field +
+// the `ExcludeSelf` rule. The empty-result case is distinct from an
+// empty filter ([ErrPeerRoleFilterEmpty]): the filter itself is
+// well-formed but no active peer satisfies it. Callers can branch on
+// this sentinel to decide between a fail-loud retry vs a no-op success
+// — for example the M1.6 escalation auto-archive treats "no target"
+// as a no-op while an operator-driven `wk peer broadcast` surfaces a
+// human-readable "nobody matched" message.
+var ErrPeerNoTargets = errors.New("peer: no targets")
