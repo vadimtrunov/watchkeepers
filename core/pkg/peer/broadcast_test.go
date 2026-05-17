@@ -137,11 +137,9 @@ func TestTool_Broadcast_HappyPath_AllTargetsReceive(t *testing.T) {
 		ActingWatchkeeperID: "wk-self",
 		OrganizationID:      orgID,
 		CapabilityToken:     tokens[peer.CapabilityBroadcast],
-		AskCapabilityToken:  tokens[peer.CapabilityAsk],
 		Filter:              peer.RoleFilter{Roles: []string{"Lead"}},
 		Subject:             "ping all leads",
 		Body:                []byte("status?"),
-		PerTargetTimeout:    2 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("Broadcast: %v", err)
@@ -169,11 +167,9 @@ func TestTool_Broadcast_EmptyFilterSurfacesErrPeerRoleFilterEmpty(t *testing.T) 
 		ActingWatchkeeperID: "wk-self",
 		OrganizationID:      orgID,
 		CapabilityToken:     tokens[peer.CapabilityBroadcast],
-		AskCapabilityToken:  tokens[peer.CapabilityAsk],
 		Filter:              peer.RoleFilter{}, // empty
 		Subject:             "ping",
 		Body:                []byte("status?"),
-		PerTargetTimeout:    time.Second,
 	})
 	if !errors.Is(err, peer.ErrPeerRoleFilterEmpty) {
 		t.Errorf("err = %v, want errors.Is ErrPeerRoleFilterEmpty", err)
@@ -193,15 +189,37 @@ func TestTool_Broadcast_NoMatchSurfacesErrPeerNoTargets(t *testing.T) {
 		ActingWatchkeeperID: "wk-self",
 		OrganizationID:      orgID,
 		CapabilityToken:     tokens[peer.CapabilityBroadcast],
-		AskCapabilityToken:  tokens[peer.CapabilityAsk],
 		Filter:              peer.RoleFilter{Roles: []string{"Lead"}},
 		Subject:             "ping",
 		Body:                []byte("status?"),
-		PerTargetTimeout:    time.Second,
 	})
 	if !errors.Is(err, peer.ErrPeerNoTargets) {
 		t.Errorf("err = %v, want errors.Is ErrPeerNoTargets", err)
 	}
+}
+
+// partialFailureLifecycle drives one target's Lifecycle.Open to a
+// configurable error so the broadcast layer's partial-failure
+// observability can be pinned without relying on Ask timeouts.
+type partialFailureLifecycle struct {
+	inner      *fakeLifecycle
+	failPeerID string
+	failErr    error
+}
+
+func (p *partialFailureLifecycle) Open(ctx context.Context, params k2k.OpenParams) (k2k.Conversation, error) {
+	// Drive the matching peer to the configured error; everything
+	// else routes through the underlying fakeLifecycle.
+	for _, pid := range params.Participants {
+		if pid == p.failPeerID {
+			return k2k.Conversation{}, p.failErr
+		}
+	}
+	return p.inner.Open(ctx, params)
+}
+
+func (p *partialFailureLifecycle) Close(ctx context.Context, id uuid.UUID, reason string) error {
+	return p.inner.Close(ctx, id, reason)
 }
 
 func TestTool_Broadcast_PartialFailuresCollected(t *testing.T) {
@@ -212,18 +230,33 @@ func TestTool_Broadcast_PartialFailuresCollected(t *testing.T) {
 		{WatchkeeperID: "wk-a", Role: "Lead", Availability: keepclient.PeerAvailabilityAvailable},
 		{WatchkeeperID: "wk-b", Role: "Lead", Availability: keepclient.PeerAvailabilityAvailable},
 	}
-	// No auto-replier — every per-target Ask will time out.
-	tool, _, _, tokens := newToolWithBroadcast(t, orgID, peers)
+	repo := k2k.NewMemoryRepository(time.Now, nil)
+	pl := &fakePeerLister{peers: peers}
+	innerLC := &fakeLifecycle{repo: repo}
+	sentinel := errors.New("lifecycle: simulated open failure for wk-b")
+	lc := &partialFailureLifecycle{inner: innerLC, failPeerID: "wk-b", failErr: sentinel}
+
+	broker := capability.New()
+	t.Cleanup(func() { _ = broker.Close() })
+	bcastTok, err := broker.IssueForOrg(peer.CapabilityBroadcast, orgID.String(), time.Hour)
+	if err != nil {
+		t.Fatalf("IssueForOrg: %v", err)
+	}
+
+	tool := peer.NewTool(peer.Deps{
+		PeerLister: pl,
+		Lifecycle:  lc,
+		Repository: repo,
+		Capability: broker,
+	})
 
 	res, err := tool.Broadcast(context.Background(), peer.BroadcastParams{
 		ActingWatchkeeperID: "wk-self",
 		OrganizationID:      orgID,
-		CapabilityToken:     tokens[peer.CapabilityBroadcast],
-		AskCapabilityToken:  tokens[peer.CapabilityAsk],
+		CapabilityToken:     bcastTok,
 		Filter:              peer.RoleFilter{Roles: []string{"Lead"}},
 		Subject:             "ping",
 		Body:                []byte("status?"),
-		PerTargetTimeout:    40 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("Broadcast err = %v, want nil (partial failures must not abort the fan-out)", err)
@@ -231,10 +264,15 @@ func TestTool_Broadcast_PartialFailuresCollected(t *testing.T) {
 	if len(res.Targets) != 2 {
 		t.Fatalf("len(Targets) = %d, want 2", len(res.Targets))
 	}
+	got := map[string]error{}
 	for _, target := range res.Targets {
-		if !errors.Is(target.Err, peer.ErrPeerTimeout) {
-			t.Errorf("target %s err = %v, want errors.Is ErrPeerTimeout", target.WatchkeeperID, target.Err)
-		}
+		got[target.WatchkeeperID] = target.Err
+	}
+	if got["wk-a"] != nil {
+		t.Errorf("wk-a err = %v, want nil", got["wk-a"])
+	}
+	if !errors.Is(got["wk-b"], sentinel) {
+		t.Errorf("wk-b err = %v, want errors.Is sentinel", got["wk-b"])
 	}
 }
 
@@ -253,11 +291,9 @@ func TestTool_Broadcast_ExcludeSelfHonoured(t *testing.T) {
 		ActingWatchkeeperID: "wk-self",
 		OrganizationID:      orgID,
 		CapabilityToken:     tokens[peer.CapabilityBroadcast],
-		AskCapabilityToken:  tokens[peer.CapabilityAsk],
 		Filter:              peer.RoleFilter{Roles: []string{"Lead"}, ExcludeSelf: true},
 		Subject:             "ping",
 		Body:                []byte("status?"),
-		PerTargetTimeout:    2 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("Broadcast: %v", err)
@@ -277,17 +313,15 @@ func TestTool_Broadcast_CapabilityBrokerEnforced(t *testing.T) {
 	peers := []keepclient.Peer{
 		{WatchkeeperID: "wk-a", Role: "Lead", Availability: keepclient.PeerAvailabilityAvailable},
 	}
-	tool, _, lc, tokens := newToolWithBroadcast(t, orgID, peers)
+	tool, _, lc, _ := newToolWithBroadcast(t, orgID, peers)
 
 	_, err := tool.Broadcast(context.Background(), peer.BroadcastParams{
 		ActingWatchkeeperID: "wk-self",
 		OrganizationID:      orgID,
 		CapabilityToken:     "not-an-issued-token",
-		AskCapabilityToken:  tokens[peer.CapabilityAsk],
 		Filter:              peer.RoleFilter{Roles: []string{"Lead"}},
 		Subject:             "ping",
 		Body:                []byte("status?"),
-		PerTargetTimeout:    time.Second,
 	})
 	if !errors.Is(err, peer.ErrPeerCapabilityDenied) {
 		t.Fatalf("err = %v, want errors.Is ErrPeerCapabilityDenied", err)
@@ -311,11 +345,9 @@ func TestTool_Broadcast_ValidationFailures(t *testing.T) {
 			ActingWatchkeeperID: "wk-self",
 			OrganizationID:      orgID,
 			CapabilityToken:     tokens[peer.CapabilityBroadcast],
-			AskCapabilityToken:  tokens[peer.CapabilityAsk],
 			Filter:              peer.RoleFilter{Roles: []string{"Lead"}},
 			Subject:             "ping",
 			Body:                []byte("status?"),
-			PerTargetTimeout:    time.Second,
 		}
 	}
 	cases := []struct {
@@ -330,8 +362,6 @@ func TestTool_Broadcast_ValidationFailures(t *testing.T) {
 		{name: "whitespace subject", mutate: func(p *peer.BroadcastParams) { p.Subject = "  " }, want: peer.ErrInvalidSubject},
 		{name: "empty body", mutate: func(p *peer.BroadcastParams) { p.Body = nil }, want: peer.ErrInvalidBody},
 		{name: "zero body", mutate: func(p *peer.BroadcastParams) { p.Body = []byte{} }, want: peer.ErrInvalidBody},
-		{name: "non-positive timeout", mutate: func(p *peer.BroadcastParams) { p.PerTargetTimeout = 0 }, want: peer.ErrInvalidTimeout},
-		{name: "negative timeout", mutate: func(p *peer.BroadcastParams) { p.PerTargetTimeout = -time.Second }, want: peer.ErrInvalidTimeout},
 		{name: "negative concurrency", mutate: func(p *peer.BroadcastParams) { p.Concurrency = -1 }, want: peer.ErrInvalidBroadcastConcurrency},
 		{name: "empty filter", mutate: func(p *peer.BroadcastParams) { p.Filter = peer.RoleFilter{} }, want: peer.ErrPeerRoleFilterEmpty},
 	}
@@ -361,11 +391,9 @@ func TestTool_Broadcast_CtxCancelBeforeResolveSurfacesCtxErr(t *testing.T) {
 		ActingWatchkeeperID: "wk-self",
 		OrganizationID:      orgID,
 		CapabilityToken:     tokens[peer.CapabilityBroadcast],
-		AskCapabilityToken:  tokens[peer.CapabilityAsk],
 		Filter:              peer.RoleFilter{Roles: []string{"Lead"}},
 		Subject:             "ping",
 		Body:                []byte("status?"),
-		PerTargetTimeout:    time.Second,
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
@@ -391,19 +419,20 @@ func (c *countingFilterResolver) Resolve(_ context.Context, _ peer.RoleFilter, _
 	return out, nil
 }
 
-// blockingLister is a Lister fake whose ListPeers Ask-resolver hits.
-// Used INDIRECTLY by Tool.Ask via Tool.resolvePeer; we make every Ask
-// block on a shared `gate` channel so the test can pin the in-flight
-// worker count.
-type blockingLister struct {
-	peers []keepclient.Peer
-	gate  chan struct{}
+// blockingLifecycle is a Lifecycle fake whose Open blocks on a shared
+// gate channel so the worker-pool bound test can pin the in-flight
+// worker count. Each Open call increments `inflight` (recording the
+// peak) and then waits for a token on the gate before returning a
+// fresh conversation via the underlying repo.
+type blockingLifecycle struct {
+	repo *k2k.MemoryRepository
+	gate chan struct{}
 
 	inflight atomic.Int32
 	peak     atomic.Int32
 }
 
-func (b *blockingLister) ListPeers(ctx context.Context, _ keepclient.ListPeersRequest) (*keepclient.ListPeersResponse, error) {
+func (b *blockingLifecycle) Open(ctx context.Context, params k2k.OpenParams) (k2k.Conversation, error) {
 	cur := b.inflight.Add(1)
 	defer b.inflight.Add(-1)
 	for {
@@ -412,20 +441,16 @@ func (b *blockingLister) ListPeers(ctx context.Context, _ keepclient.ListPeersRe
 			break
 		}
 	}
-	// Block until the gate channel sends or ctx cancels.
 	select {
 	case <-b.gate:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return k2k.Conversation{}, ctx.Err()
 	}
-	items := make([]keepclient.Peer, len(b.peers))
-	copy(items, b.peers)
-	for i := range items {
-		caps := make([]string, len(items[i].Capabilities))
-		copy(caps, items[i].Capabilities)
-		items[i].Capabilities = caps
-	}
-	return &keepclient.ListPeersResponse{Items: items}, nil
+	return b.repo.Open(ctx, params)
+}
+
+func (b *blockingLifecycle) Close(ctx context.Context, id uuid.UUID, reason string) error {
+	return b.repo.Close(ctx, id, reason)
 }
 
 func TestTool_Broadcast_WorkerPoolBoundEnforced(t *testing.T) {
@@ -447,24 +472,23 @@ func TestTool_Broadcast_WorkerPoolBoundEnforced(t *testing.T) {
 	}
 
 	// The countingFilterResolver bypasses ListPeers for the broadcast
-	// target-resolution step. The blockingLister handles the per-Ask
-	// resolvePeer round-trip — every Ask routes through it. Its
-	// `inflight` counter therefore tracks the per-Ask in-flight worker
-	// count, which is what the worker-pool bound caps.
+	// target-resolution step. The blockingLifecycle gates every
+	// per-target Lifecycle.Open on a shared channel; its `inflight`
+	// counter therefore tracks the in-flight worker count, which is
+	// what the worker-pool bound caps. A noop fakePeerLister wires
+	// the constructor's non-nil requirement.
 	cfr := &countingFilterResolver{targets: targets}
 	gate := make(chan struct{}, total)
-	bl := &blockingLister{peers: targets, gate: gate}
-
 	repo := k2k.NewMemoryRepository(time.Now, nil)
-	lc := &fakeLifecycle{repo: repo}
+	blc := &blockingLifecycle{repo: repo, gate: gate}
+
 	broker := capability.New()
 	t.Cleanup(func() { _ = broker.Close() })
 	bcastTok, _ := broker.IssueForOrg(peer.CapabilityBroadcast, orgID.String(), time.Hour)
-	askTok, _ := broker.IssueForOrg(peer.CapabilityAsk, orgID.String(), time.Hour)
 
 	tool := peer.NewTool(peer.Deps{
-		PeerLister:     bl,
-		Lifecycle:      lc,
+		PeerLister:     &fakePeerLister{peers: targets},
+		Lifecycle:      blc,
 		Repository:     repo,
 		Capability:     broker,
 		FilterResolver: cfr,
@@ -481,11 +505,9 @@ func TestTool_Broadcast_WorkerPoolBoundEnforced(t *testing.T) {
 			ActingWatchkeeperID: "wk-self",
 			OrganizationID:      orgID,
 			CapabilityToken:     bcastTok,
-			AskCapabilityToken:  askTok,
 			Filter:              peer.RoleFilter{Roles: []string{"Lead"}},
 			Subject:             "ping",
 			Body:                []byte("status?"),
-			PerTargetTimeout:    50 * time.Millisecond, // Ask will time out after lister returns
 			Concurrency:         bound,
 		})
 		done <- struct {
@@ -498,20 +520,20 @@ func TestTool_Broadcast_WorkerPoolBoundEnforced(t *testing.T) {
 	// then start releasing the gate.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if bl.inflight.Load() >= int32(bound) {
+		if blc.inflight.Load() >= int32(bound) {
 			break
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 	// Observe the bound at this point.
-	peakDuringRamp := bl.peak.Load()
+	peakDuringRamp := blc.peak.Load()
 	if peakDuringRamp > int32(bound) {
 		t.Errorf("observed peak in-flight = %d, want ≤ %d", peakDuringRamp, bound)
 	}
 
-	// Release the gate `total` times so every worker proceeds; Ask will
-	// then time out on WaitForReply (no replier) and the next worker
-	// can grab a semaphore slot.
+	// Release the gate `total` times so every Lifecycle.Open
+	// completes; the worker returns immediately after AppendMessage
+	// (no WaitForReply) and the next worker can grab a semaphore slot.
 	go func() {
 		for i := 0; i < total; i++ {
 			select {
@@ -534,7 +556,7 @@ func TestTool_Broadcast_WorkerPoolBoundEnforced(t *testing.T) {
 		t.Fatal("Broadcast did not return")
 	}
 
-	peakFinal := bl.peak.Load()
+	peakFinal := blc.peak.Load()
 	if peakFinal > int32(bound) {
 		t.Errorf("final peak in-flight = %d, want ≤ %d", peakFinal, bound)
 	}
@@ -556,11 +578,9 @@ func TestTool_Broadcast_DefaultConcurrencyApplied(t *testing.T) {
 		ActingWatchkeeperID: "wk-self",
 		OrganizationID:      orgID,
 		CapabilityToken:     tokens[peer.CapabilityBroadcast],
-		AskCapabilityToken:  tokens[peer.CapabilityAsk],
 		Filter:              peer.RoleFilter{Roles: []string{"Lead"}},
 		Subject:             "ping",
 		Body:                []byte("status?"),
-		PerTargetTimeout:    2 * time.Second,
 		Concurrency:         0,
 	})
 	if err != nil {
@@ -618,10 +638,6 @@ func TestTool_Broadcast_DefensiveCopyOfBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueForOrg broadcast: %v", err)
 	}
-	askTok, err := broker.IssueForOrg(peer.CapabilityAsk, orgID.String(), time.Hour)
-	if err != nil {
-		t.Fatalf("IssueForOrg ask: %v", err)
-	}
 
 	tool := peer.NewTool(peer.Deps{
 		PeerLister: pl,
@@ -629,18 +645,15 @@ func TestTool_Broadcast_DefensiveCopyOfBody(t *testing.T) {
 		Repository: rec,
 		Capability: broker,
 	})
-	t.Cleanup(autoReplier(t, repo, orgID))
 
 	body := []byte("original")
 	res, err := tool.Broadcast(context.Background(), peer.BroadcastParams{
 		ActingWatchkeeperID: "wk-self",
 		OrganizationID:      orgID,
 		CapabilityToken:     bcastTok,
-		AskCapabilityToken:  askTok,
 		Filter:              peer.RoleFilter{Roles: []string{"Lead"}},
 		Subject:             "ping",
 		Body:                body,
-		PerTargetTimeout:    2 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("Broadcast: %v", err)
@@ -689,11 +702,9 @@ func TestTool_Broadcast_Concurrent16GoroutinesRace(t *testing.T) {
 				ActingWatchkeeperID: "wk-self",
 				OrganizationID:      orgID,
 				CapabilityToken:     tokens[peer.CapabilityBroadcast],
-				AskCapabilityToken:  tokens[peer.CapabilityAsk],
 				Filter:              peer.RoleFilter{Roles: []string{"Lead"}},
 				Subject:             "ping",
 				Body:                []byte("status?"),
-				PerTargetTimeout:    2 * time.Second,
 			})
 			if err != nil {
 				t.Errorf("Broadcast: %v", err)

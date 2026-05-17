@@ -90,7 +90,6 @@ var peerBroadcastSchema = json.RawMessage(`{
   "properties": {
     "subject": { "type": "string", "description": "operator-facing free-text label" },
     "body": { "type": "string", "description": "request payload broadcast verbatim to every target" },
-    "per_target_timeout_ms": { "type": "integer", "minimum": 1, "description": "per-target wait timeout in milliseconds" },
     "concurrency": { "type": "integer", "minimum": 0, "description": "worker-pool bound; 0 = default" },
     "filter": {
       "type": "object",
@@ -102,7 +101,7 @@ var peerBroadcastSchema = json.RawMessage(`{
       }
     }
   },
-  "required": ["subject", "body", "per_target_timeout_ms", "filter"]
+  "required": ["subject", "body", "filter"]
 }`)
 
 // peerSubscribeSchema is the zod-compatible JSON-schema fragment

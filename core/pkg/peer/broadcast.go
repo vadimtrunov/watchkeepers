@@ -1,7 +1,8 @@
 // broadcast.go ships the M1.3.d `peer.Broadcast` fan-out primitive.
 // Composes the M1.3.d [RoleFilter] resolver (over M1.2
-// `keepclient.ListPeers`) with M1.3.a [Tool.Ask] in fire-and-forget
-// mode. Every target receives an independent ask under a bounded
+// `keepclient.ListPeers`) with the M1.1.c [Lifecycle.Open] +
+// M1.3.a [Repository.AppendMessage] seams in fire-and-forget mode.
+// Every target receives an independent request under a bounded
 // worker pool; partial failures land in the returned
 // [BroadcastResult.Targets] slice without aborting siblings.
 //
@@ -12,25 +13,35 @@
 //	         [FilterResolver.Resolve] (apply RoleFilter +
 //	         ExcludeSelf) → empty result surfaces [ErrPeerNoTargets]
 //	         → fan out per-target via bounded worker pool (default
-//	         [DefaultBroadcastConcurrency]) calling [Tool.Ask] with
-//	         the supplied body and a non-zero per-target timeout
-//	         (fire-and-forget at the broadcast layer — Ask's reply
-//	         is collected into [BroadcastResultTarget.ConversationID]
-//	         but the reply payload is discarded; a future M1.3.e may
-//	         surface them) → collect per-target outcomes and return
-//	         the aggregate [BroadcastResult].
+//	         [DefaultBroadcastConcurrency]) calling
+//	         [Lifecycle.Open] + [Repository.AppendMessage] directly
+//	         (NO WaitForReply, NO ListPeers re-resolve — the
+//	         resolver already returned concrete targets) → collect
+//	         per-target outcomes and return the aggregate
+//	         [BroadcastResult].
 //
-// Fire-and-forget semantics: the roadmap AC names "timeout=0
-// (fire-and-forget; no reply collection)". The peer-tool layer's
-// M1.3.a `Ask` rejects a non-positive timeout via [ErrInvalidTimeout]
-// because a blocking primitive without a bound is a caller bug; the
-// broadcast layer therefore demands an explicit
-// [BroadcastParams.PerTargetTimeout] and forwards it verbatim. The
-// caller is responsible for sizing the bound — a typical operator
-// broadcast uses 30s so a slow Slack adapter does not wedge the fan-
-// out. The reply value from [Tool.Ask] is captured into the per-
-// target outcome but the reply BODY is dropped (the broadcast layer
-// is not a reply aggregator; a future M1.3.e may add one).
+// Fire-and-forget semantics: the roadmap AC names "fire-and-forget;
+// no reply collection". The broadcast layer DELIBERATELY does NOT
+// call [Tool.Ask] — Ask's M1.3.a contract blocks on WaitForReply,
+// which would (a) defeat the one-way fan-out semantic and (b) waste
+// `PerTargetTimeout` on each leg even when the recipient never
+// replies. Instead, the broadcast layer mints the conversation +
+// appends the request message inline and returns the minted
+// conversation id on [BroadcastResultTarget.ConversationID] without
+// blocking. The recipient may still emit a `peer.Reply` later; an
+// operator can later open the conversation to inspect any reply via
+// [k2k.Repository.Get] / [k2k.Repository.WaitForReply]. A future
+// M1.3.e reply-aggregator leaf can add an optional collector
+// without breaking the M1.3.d return shape.
+//
+// Single-snapshot fan-out: the per-target worker takes the already-
+// resolved [keepclient.Peer] from [FilterResolver.Resolve] and
+// drives [Lifecycle.Open] directly. Routing through [Tool.Ask] would
+// trigger one extra [Lister.ListPeers] round-trip PER target (Ask's
+// internal `resolvePeer`), turning a single-snapshot fan-out into
+// N+1 remote lookups and exposing the fan-out to active-set churn
+// mid-broadcast. The direct seam keeps the fan-out atomic in
+// snapshot semantics.
 //
 // Bounded concurrency: the worker pool is implemented with a buffered
 // semaphore channel of capacity [BroadcastParams.Concurrency]
@@ -62,11 +73,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/keepclient"
 )
 
 // CapabilityBroadcast is the capability scope [Tool.Broadcast] gates
@@ -111,16 +122,11 @@ type BroadcastParams struct {
 	// CapabilityToken is the per-call capability token bound to scope
 	// [CapabilityBroadcast] + [OrganizationID]. Required (non-empty);
 	// the tool fail-fasts via [ErrPeerCapabilityDenied] when the
-	// broker rejects the token. Note: the broadcast layer's capability
-	// gate is INDEPENDENT of the per-target Ask's [CapabilityAsk]
-	// gate; production wiring issues a separate token for each scope.
+	// broker rejects the token. The broadcast layer's capability gate
+	// is the ONLY capability check on the fan-out path; per-target
+	// Asks are not routed through [Tool.Ask] (see file-level
+	// doc-block) so no per-target [CapabilityAsk] token is required.
 	CapabilityToken string
-
-	// AskCapabilityToken is the per-call capability token forwarded to
-	// every per-target [Tool.Ask]. Required (non-empty); a fan-out
-	// without an Ask token would fail-fast inside Ask anyway, but
-	// surfacing it as a separate field makes the wiring obvious.
-	AskCapabilityToken string
 
 	// Filter selects the target set over the [Lister.ListPeers] active
 	// snapshot. Required (non-empty per [RoleFilter.validate]); the
@@ -133,25 +139,17 @@ type BroadcastParams struct {
 	// [ErrInvalidSubject] otherwise.
 	Subject string
 
-	// Body is the opaque request payload forwarded verbatim to every
-	// per-target [AskParams.Body]. Required (non-empty); the tool
-	// fail-fasts via [ErrInvalidBody] otherwise. Defensively deep-
-	// copied ONCE before the fan-out; the inner [Tool.Ask] performs
-	// its own deep-copy so each target sees an independent slice.
+	// Body is the opaque request payload appended verbatim to every
+	// minted conversation as a `request`-direction [k2k.Message].
+	// Required (non-empty); the tool fail-fasts via [ErrInvalidBody]
+	// otherwise. Defensively deep-copied ONCE before the fan-out; each
+	// per-target worker copies again so each persisted message body
+	// has its own slice.
 	Body []byte
 
-	// PerTargetTimeout caps each per-target Ask's WaitForReply
-	// blocking window. Required (positive). The roadmap describes
-	// the layer as "fire-and-forget; no reply collection" — the
-	// reply payload is dropped at the broadcast layer but the
-	// underlying Ask still needs a positive timeout because Ask
-	// itself blocks. Callers driving the M1.6 escalation auto-broadcast
-	// typically pass 30s.
-	PerTargetTimeout time.Duration
-
-	// Concurrency caps the worker-pool's in-flight Ask count. Zero
-	// means "use [DefaultBroadcastConcurrency]". Negative values are
-	// rejected via [ErrInvalidBroadcastConcurrency].
+	// Concurrency caps the worker-pool's in-flight per-target count.
+	// Zero means "use [DefaultBroadcastConcurrency]". Negative values
+	// are rejected via [ErrInvalidBroadcastConcurrency].
 	Concurrency int
 
 	// CorrelationID is an optional id linking every minted
@@ -205,30 +203,31 @@ var ErrInvalidBroadcastConcurrency = errors.New("peer: invalid broadcast concurr
 //
 //   - Validation failures surface their typed sentinel
 //     ([ErrInvalidActingWatchkeeperID], [k2k.ErrEmptyOrganization],
-//     [ErrInvalidSubject], [ErrInvalidBody], [ErrInvalidTimeout],
+//     [ErrInvalidSubject], [ErrInvalidBody],
 //     [ErrInvalidBroadcastConcurrency], [ErrPeerRoleFilterEmpty]).
 //   - Capability-broker rejection (broadcast scope) →
 //     [ErrPeerCapabilityDenied] chained with the underlying
-//     [capability.Err*] sentinel. The per-target Ask's capability
-//     check runs INSIDE Ask; its rejection lands in the matching
-//     [BroadcastResultTarget.Err] without aborting siblings.
+//     [capability.Err*] sentinel. The fan-out is gated solely by the
+//     [CapabilityBroadcast] scope; there is no per-target
+//     [CapabilityAsk] check because the broadcast layer does NOT
+//     route through [Tool.Ask].
 //   - [FilterResolver.Resolve] non-empty error → wrapped through as
 //     a top-level error (a resolver failure aborts the fan-out
 //     because there is no target set to fall back on).
 //   - Empty resolved set → [ErrPeerNoTargets] top-level.
 //   - ctx cancellation BEFORE the fan-out starts → ctx.Err().
-//   - ctx cancellation DURING the fan-out: in-flight Ask calls
-//     observe the cancel via their own ctx; their results land in
-//     the matching target's [Err] as `context.Canceled` /
-//     `context.DeadlineExceeded`. The aggregate [Broadcast] return is
-//     NOT a top-level error so the caller can inspect which targets
-//     completed before the cancel.
+//   - ctx cancellation DURING the fan-out: the dispatcher stops
+//     spawning new workers and surfaces `ctx.Err()` on every
+//     not-yet-dispatched target's [Err]; in-flight workers observe
+//     the cancel via their own ctx (their result lands as
+//     `context.Canceled` / `context.DeadlineExceeded`). The
+//     aggregate [Broadcast] return is `(result, nil)` so the caller
+//     can inspect which targets completed before the cancel.
 //
-// Per-target failures (Ask timeout, Ask capability deny, target
-// resolution miss inside Ask) are observable on
-// [BroadcastResultTarget.Err]. Callers walking the result set may
-// branch on `errors.Is(target.Err, peer.ErrPeerTimeout)`,
-// `errors.Is(target.Err, peer.ErrPeerCapabilityDenied)`, etc.
+// Per-target failures ([k2k.Lifecycle.Open] error,
+// [k2k.Repository.AppendMessage] error) are observable on
+// [BroadcastResultTarget.Err] with the underlying sentinel preserved
+// for `errors.Is` branching.
 func (t *Tool) Broadcast(ctx context.Context, params BroadcastParams) (BroadcastResult, error) {
 	if err := validateBroadcastParams(ctx, params); err != nil {
 		return BroadcastResult{}, err
@@ -291,27 +290,73 @@ func (t *Tool) Broadcast(ctx context.Context, params BroadcastParams) (Broadcast
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			res, askErr := t.Ask(ctx, AskParams{
-				ActingWatchkeeperID: params.ActingWatchkeeperID,
-				OrganizationID:      params.OrganizationID,
-				CapabilityToken:     params.AskCapabilityToken,
-				Target:              target.WatchkeeperID,
-				Subject:             params.Subject,
-				Body:                bodyCopy,
-				Timeout:             params.PerTargetTimeout,
-				CorrelationID:       params.CorrelationID,
-			})
-			if askErr != nil {
-				results[i].Err = askErr
+			convID, err := t.broadcastSendOne(
+				ctx,
+				params.ActingWatchkeeperID,
+				params.OrganizationID,
+				params.Subject,
+				bodyCopy,
+				target,
+				params.CorrelationID,
+			)
+			if err != nil {
+				results[i].Err = err
 				return
 			}
-			results[i].ConversationID = res.ConversationID
-			// reply body intentionally discarded — fire-and-forget
-			// semantics at the broadcast layer.
+			results[i].ConversationID = convID
 		}()
 	}
 	wg.Wait()
 	return BroadcastResult{Targets: results}, nil
+}
+
+// broadcastSendOne mints one per-target K2K conversation + appends
+// the request message. Mirrors [Tool.Ask]'s mint+append pair MINUS
+// the [Repository.WaitForReply] block — the broadcast layer is
+// fire-and-forget at the request-side, NOT reply-side. The
+// per-target body deep-copy is done here so each persisted message
+// owns its own slice (the caller's `bodyCopy` is the broadcast-
+// layer-wide copy; this per-target copy isolates the message
+// payload from any sibling worker holding the same slice).
+//
+// The function is intentionally kept narrow: no capability gate (the
+// outer [CapabilityBroadcast] gate already authorized the fan-out),
+// no resolver round-trip (the caller supplies the resolved
+// [keepclient.Peer]), no [Lifecycle.Close] on partial failure (the
+// caller is responsible for the cleanup decision — a minted
+// conversation that lost its AppendMessage is still observable via
+// [k2k.Repository.Get] and can be archived via `peer.Close` if the
+// operator wants).
+func (t *Tool) broadcastSendOne(
+	ctx context.Context,
+	actingID string,
+	orgID uuid.UUID,
+	subject string,
+	body []byte,
+	target keepclient.Peer,
+	correlationID uuid.UUID,
+) (uuid.UUID, error) {
+	conv, err := t.deps.Lifecycle.Open(ctx, k2k.OpenParams{
+		OrganizationID: orgID,
+		Participants:   []string{actingID, target.WatchkeeperID},
+		Subject:        subject,
+		CorrelationID:  correlationID,
+	})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("peer: broadcast: open conversation: %w", err)
+	}
+	reqBody := make([]byte, len(body))
+	copy(reqBody, body)
+	if _, err := t.deps.Repository.AppendMessage(ctx, k2k.AppendMessageParams{
+		ConversationID:      conv.ID,
+		OrganizationID:      orgID,
+		SenderWatchkeeperID: actingID,
+		Body:                reqBody,
+		Direction:           k2k.MessageDirectionRequest,
+	}); err != nil {
+		return uuid.Nil, fmt.Errorf("peer: broadcast: append request: %w", err)
+	}
+	return conv.ID, nil
 }
 
 // validateBroadcastParams runs every fast-fail check on a
@@ -334,9 +379,6 @@ func validateBroadcastParams(ctx context.Context, params BroadcastParams) error 
 	}
 	if len(params.Body) == 0 {
 		return ErrInvalidBody
-	}
-	if params.PerTargetTimeout <= 0 {
-		return ErrInvalidTimeout
 	}
 	if params.Concurrency < 0 {
 		return ErrInvalidBroadcastConcurrency
