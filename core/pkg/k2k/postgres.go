@@ -87,10 +87,25 @@ type Querier interface {
 // [NewPostgresRepository]; the zero value is NOT usable — callers
 // must always go through the constructor so the underlying querier
 // reference is non-nil.
+//
+// `pollInterval` controls the [WaitForReply] polling cadence. The M1.3.a
+// AC pins "Postgres uses LISTEN/NOTIFY on a per-conversation channel,
+// with a polling fallback" — this adapter ships the polling fallback
+// only; a future iteration may layer LISTEN/NOTIFY behind the same
+// [Repository.WaitForReply] signature without a wire-shape break.
 type PostgresRepository struct {
-	q   Querier
-	now func() time.Time
+	q            Querier
+	now          func() time.Time
+	pollInterval time.Duration
 }
+
+// defaultWaitForReplyPollInterval is the polling cadence used by
+// [PostgresRepository.WaitForReply] when [NewPostgresRepository]'s
+// `pollInterval` argument is zero. 100ms balances responsiveness with
+// query load — a request-reply round-trip on the M1.3.a peer.* family
+// has a human-perceptible latency budget of 1-5s in practice, so a
+// 100ms poll loop adds at most one tick of jitter.
+const defaultWaitForReplyPollInterval = 100 * time.Millisecond
 
 // Compile-time assertion: [*PostgresRepository] satisfies
 // [Repository]. Pins the integration shape so a future change to the
@@ -112,7 +127,18 @@ func NewPostgresRepository(q Querier, now func() time.Time) *PostgresRepository 
 	if now == nil {
 		now = time.Now
 	}
-	return &PostgresRepository{q: q, now: now}
+	return &PostgresRepository{q: q, now: now, pollInterval: defaultWaitForReplyPollInterval}
+}
+
+// WithPollInterval overrides the [WaitForReply] polling cadence on the
+// adapter. Test wiring uses a short interval (e.g. 1ms) so the
+// integration tests do not pay the default 100ms tick; production
+// wiring leaves the default. Non-positive `d` is a no-op.
+func (r *PostgresRepository) WithPollInterval(d time.Duration) *PostgresRepository {
+	if d > 0 {
+		r.pollInterval = d
+	}
+	return r
 }
 
 // Open implements [Repository.Open]. Validation order matches the
@@ -462,4 +488,196 @@ RETURNING tokens_used`
 		return 0, fmt.Errorf("k2k: inc tokens: %w", err)
 	}
 	return tokensUsed, nil
+}
+
+// AppendMessage implements [Repository.AppendMessage]. Validation order
+// matches the in-memory adapter so the two impls fail-fast on the same
+// inputs with the same sentinels. The INSERT uses `RETURNING created_at`
+// so the caller observes the server-stamped timestamp (which may differ
+// from `r.now()` if the SQL DEFAULT fires).
+//
+// The append guards on conversation status via a single
+// `INSERT ... SELECT FROM k2k_conversations WHERE status='open'`
+// subquery so a concurrent `Lifecycle.Close` between the caller's
+// `Get` and the append can NOT slip a write into an archived row.
+// When the subquery returns zero rows, the INSERT inserts zero rows
+// and the caller observes [ErrConversationNotOpen] (distinguishing
+// "open conversation that lost the race" from "FK violation /
+// unknown id"). FK violations on `conversation_id` still surface as
+// pgx 23503.
+//
+// `body` is bound as raw `[]byte`; pgx encodes the parameter as
+// `bytea` against the binary-safe column from migration 030. The
+// peer-tool API documents `Body` as opaque bytes — a future M1.3.c
+// subscription delivery may legitimately carry a serialised
+// protobuf with non-UTF-8 bytes that a `text` column would corrupt.
+func (r *PostgresRepository) AppendMessage(ctx context.Context, params AppendMessageParams) (Message, error) {
+	if err := ctx.Err(); err != nil {
+		return Message{}, err
+	}
+	if params.ConversationID == uuid.Nil {
+		return Message{}, ErrEmptyConversationID
+	}
+	if params.OrganizationID == uuid.Nil {
+		return Message{}, ErrEmptyOrganization
+	}
+	if strings.TrimSpace(params.SenderWatchkeeperID) == "" {
+		return Message{}, ErrEmptySenderWatchkeeperID
+	}
+	if len(params.Body) == 0 {
+		return Message{}, ErrEmptyMessageBody
+	}
+	if err := params.Direction.Validate(); err != nil {
+		return Message{}, err
+	}
+
+	// Defensive deep-copy before handing to pgx so a caller-side
+	// mutation between AppendMessage returning and pgx serializing the
+	// param cannot bleed.
+	body := make([]byte, len(params.Body))
+	copy(body, params.Body)
+
+	id := uuid.New()
+	now := r.now().UTC()
+
+	// INSERT ... SELECT FROM k2k_conversations WHERE status='open'
+	// short-circuits when the parent conversation is archived; the
+	// RETURNING column count drives a 0-row return that we detect via
+	// pgx.ErrNoRows. The conversation_id + organization_id filter is
+	// redundant with the FK but keeps the planner from short-circuiting
+	// to a planner constant.
+	const insertSQL = `
+INSERT INTO watchkeeper.k2k_messages (
+  id, conversation_id, organization_id, sender_watchkeeper_id,
+  body, direction, created_at
+)
+SELECT $1, $2, $3, $4, $5, $6, $7
+FROM watchkeeper.k2k_conversations
+WHERE id = $2
+  AND organization_id = $3
+  AND status = 'open'
+RETURNING created_at`
+
+	var createdAt time.Time
+	err := r.q.QueryRow(
+		ctx, insertSQL,
+		id, params.ConversationID, params.OrganizationID,
+		params.SenderWatchkeeperID, body, string(params.Direction),
+		now,
+	).Scan(&createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Either the conversation does not exist (under RLS / for this
+		// org) OR it exists but is not open. The peer-tool layer's
+		// preceding `Get` distinguishes the two — at this layer we
+		// surface `ErrAlreadyArchived` (the canonical "lifecycle
+		// terminal" sentinel) and trust the caller stack to translate
+		// "no such row" via the `Get` it already ran. Chaining the
+		// sentinel with the conversation id keeps the diagnostic
+		// readable in logs.
+		return Message{}, fmt.Errorf("%w: %s", ErrAlreadyArchived, params.ConversationID)
+	}
+	if err != nil {
+		return Message{}, fmt.Errorf("k2k: append message: %w", err)
+	}
+
+	return Message{
+		ID:                  id,
+		ConversationID:      params.ConversationID,
+		OrganizationID:      params.OrganizationID,
+		SenderWatchkeeperID: params.SenderWatchkeeperID,
+		Body:                body,
+		Direction:           params.Direction,
+		CreatedAt:           createdAt,
+	}, nil
+}
+
+// WaitForReply implements [Repository.WaitForReply] via a polling
+// loop. The poll interval is configurable via [WithPollInterval]; the
+// default is documented on [defaultWaitForReplyPollInterval]. M1.3.a's
+// AC pins a LISTEN/NOTIFY follow-up; this adapter ships the polling
+// fallback only and the seam remains unchanged for the
+// LISTEN/NOTIFY layer.
+//
+// Expiry is driven by a real [time.NewTimer] rather than comparing
+// `r.now()` against a deadline so a fixed-clock test fixture (or a
+// production wiring that injects a deterministic `now` for replay
+// debugging) cannot pin the wait indefinitely. The repository's
+// stamping clock and the wait timeout are intentionally decoupled —
+// the stamping clock drives `created_at` only.
+func (r *PostgresRepository) WaitForReply(ctx context.Context, conversationID uuid.UUID, since time.Time, timeout time.Duration) (Message, error) {
+	if err := ctx.Err(); err != nil {
+		return Message{}, err
+	}
+	if conversationID == uuid.Nil {
+		return Message{}, ErrEmptyConversationID
+	}
+	if timeout <= 0 {
+		return Message{}, fmt.Errorf("%w: %s", ErrInvalidWaitTimeout, timeout)
+	}
+
+	interval := r.pollInterval
+	if interval <= 0 {
+		interval = defaultWaitForReplyPollInterval
+	}
+
+	pollOnce := func() (Message, bool, error) {
+		const selectSQL = `
+SELECT id, conversation_id, organization_id, sender_watchkeeper_id,
+       body, direction, created_at
+FROM watchkeeper.k2k_messages
+WHERE conversation_id = $1
+  AND direction = 'reply'
+  AND created_at > $2
+ORDER BY created_at ASC
+LIMIT 1`
+		var (
+			m            Message
+			directionStr string
+		)
+		err := r.q.QueryRow(ctx, selectSQL, conversationID, since.UTC()).Scan(
+			&m.ID, &m.ConversationID, &m.OrganizationID, &m.SenderWatchkeeperID,
+			&m.Body, &directionStr, &m.CreatedAt,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Message{}, false, nil
+		}
+		if err != nil {
+			return Message{}, false, fmt.Errorf("k2k: wait for reply poll: %w", err)
+		}
+		m.Direction = MessageDirection(directionStr)
+		return m, true, nil
+	}
+
+	// First poll: a reply may already be present (race won by the
+	// `peer.Reply` writer).
+	msg, ok, err := pollOnce()
+	if err != nil {
+		return Message{}, err
+	}
+	if ok {
+		return msg, nil
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return Message{}, ctx.Err()
+		case <-timer.C:
+			return Message{}, fmt.Errorf("%w: %s", ErrWaitForReplyTimeout, conversationID)
+		case <-ticker.C:
+			msg, ok, err := pollOnce()
+			if err != nil {
+				return Message{}, err
+			}
+			if ok {
+				return msg, nil
+			}
+		}
+	}
 }

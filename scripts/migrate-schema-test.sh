@@ -50,6 +50,7 @@ cleanup_sql=$(cat <<'SQL'
 -- trigger on `keepers_log` fires on DELETE but not TRUNCATE, so the
 -- TRUNCATE chain continues to clear it cleanly.
 TRUNCATE TABLE
+  watchkeeper.k2k_messages,
   watchkeeper.k2k_conversations,
   watchkeeper.outbox,
   watchkeeper.knowledge_chunk,
@@ -788,5 +789,140 @@ if ! printf '%s' "${chk_status}" | grep -qi 'check constraint'; then
   fail "expected CHECK violation on invalid status enum; got: ${chk_status}"
 fi
 echo "OK: invalid status enum rejected by CHECK"
+
+# ---------------------------------------------------------------------------
+# M1.3.a — k2k_messages RLS assertions (migration 030).
+#
+# Seeds one K2K conversation per org (re-using the org_a_id / org_b_id
+# fixtures from block (l-prep)), inserts one request-direction message
+# per org, and asserts:
+#   (w) cross-tenant SELECT invisibility on k2k_messages;
+#   (x) cross-tenant INSERT rejected by WITH CHECK;
+#   (y) unset GUC visibility fails closed on k2k_messages;
+#   (z) CHECK rejects invalid direction enum and empty sender id.
+# ---------------------------------------------------------------------------
+echo ">> migrate-schema-test: (w-prep) seed one k2k_messages row per org"
+"${PSQL[@]}" >/dev/null <<SQL
+BEGIN;
+DELETE FROM watchkeeper.k2k_messages
+WHERE encode(body, 'escape') LIKE 'rls-k2k-msg-%';
+DELETE FROM watchkeeper.k2k_conversations
+WHERE subject LIKE 'rls-k2k-msg-%';
+WITH ca AS (
+  INSERT INTO watchkeeper.k2k_conversations (
+    id, organization_id, participants, subject, status
+  ) VALUES (
+    gen_random_uuid(), '${org_a_id}', ARRAY['bot-a','bot-b'],
+    'rls-k2k-msg-a', 'open'
+  ) RETURNING id
+), cb AS (
+  INSERT INTO watchkeeper.k2k_conversations (
+    id, organization_id, participants, subject, status
+  ) VALUES (
+    gen_random_uuid(), '${org_b_id}', ARRAY['bot-c','bot-d'],
+    'rls-k2k-msg-b', 'open'
+  ) RETURNING id
+)
+INSERT INTO watchkeeper.k2k_messages (
+  id, conversation_id, organization_id, sender_watchkeeper_id, body, direction
+)
+SELECT gen_random_uuid(), ca.id, '${org_a_id}', 'bot-a', convert_to('rls-k2k-msg-a-body', 'UTF8'), 'request'
+FROM ca
+UNION ALL
+SELECT gen_random_uuid(), cb.id, '${org_b_id}', 'bot-c', convert_to('rls-k2k-msg-b-body', 'UTF8'), 'request'
+FROM cb;
+COMMIT;
+SQL
+echo "OK: seeded one k2k_messages row per org"
+
+echo ">> migrate-schema-test: (w) RLS cross-tenant SELECT invisibility on k2k_messages"
+k2k_msg_visible=$("${PSQL[@]}" -tA <<SQL
+BEGIN;
+SET ROLE wk_org_role;
+SET LOCAL watchkeeper.org = '${org_a_id}';
+SELECT count(*) FROM watchkeeper.k2k_messages WHERE encode(body, 'escape') LIKE 'rls-k2k-msg-%';
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+if [[ "${k2k_msg_visible}" != "1" ]]; then
+  fail "RLS cross-tenant SELECT on k2k_messages expected 1 (orgA-only); got '${k2k_msg_visible}'"
+fi
+echo "OK: under orgA GUC, only orgA's k2k_messages row visible (count=${k2k_msg_visible})"
+
+echo ">> migrate-schema-test: (x) RLS WITH CHECK rejects cross-tenant k2k_messages INSERT"
+# Find any orgA conversation to attach the cross-tenant message to so the
+# FK survives and only RLS is exercised.
+orgA_conv_id=$("${PSQL[@]}" -tA <<SQL
+SELECT id FROM watchkeeper.k2k_conversations WHERE organization_id = '${org_a_id}' LIMIT 1;
+SQL
+)
+k2k_msg_insert_output=$("${PSQL[@]}" <<SQL 2>&1 || true
+BEGIN;
+SET ROLE wk_org_role;
+SET LOCAL watchkeeper.org = '${org_a_id}';
+INSERT INTO watchkeeper.k2k_messages (
+  id, conversation_id, organization_id, sender_watchkeeper_id, body, direction
+) VALUES (
+  gen_random_uuid(), '${orgA_conv_id}', '${org_b_id}', 'bot-x', convert_to('rls-k2k-msg-cross', 'UTF8'), 'request'
+);
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${k2k_msg_insert_output}" | grep -Eq 'row-level security|42501'; then
+  fail "expected RLS INSERT on k2k_messages to be rejected; got: ${k2k_msg_insert_output}"
+fi
+echo "OK: cross-tenant k2k_messages INSERT rejected by WITH CHECK"
+
+echo ">> migrate-schema-test: (y) RLS empty GUC fails closed on k2k_messages"
+k2k_msg_empty=$("${PSQL[@]}" -tA <<'SQL'
+BEGIN;
+SET ROLE wk_org_role;
+-- No SET LOCAL watchkeeper.org. Policy evaluates against NULL → zero rows.
+SELECT count(*) FROM watchkeeper.k2k_messages;
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+if [[ "${k2k_msg_empty}" != "0" ]]; then
+  fail "RLS empty-GUC k2k_messages visibility expected 0 (fail-closed); got '${k2k_msg_empty}'"
+fi
+echo "OK: unset watchkeeper.org GUC sees zero k2k_messages rows (fail-closed)"
+
+echo ">> migrate-schema-test: (z) CHECK rejects invalid direction and empty sender"
+chk_dir=$("${PSQL[@]}" <<SQL 2>&1 || true
+BEGIN;
+SAVEPOINT before_chk;
+INSERT INTO watchkeeper.k2k_messages (
+  id, conversation_id, organization_id, sender_watchkeeper_id, body, direction
+) VALUES (
+  gen_random_uuid(), '${orgA_conv_id}', '${org_a_id}', 'bot-x', convert_to('b', 'UTF8'), 'bogus'
+);
+ROLLBACK TO SAVEPOINT before_chk;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${chk_dir}" | grep -qi 'check constraint'; then
+  fail "expected CHECK violation on invalid direction; got: ${chk_dir}"
+fi
+echo "OK: invalid direction enum rejected by CHECK"
+
+chk_sender=$("${PSQL[@]}" <<SQL 2>&1 || true
+BEGIN;
+SAVEPOINT before_chk;
+INSERT INTO watchkeeper.k2k_messages (
+  id, conversation_id, organization_id, sender_watchkeeper_id, body, direction
+) VALUES (
+  gen_random_uuid(), '${orgA_conv_id}', '${org_a_id}', '   ', convert_to('b', 'UTF8'), 'request'
+);
+ROLLBACK TO SAVEPOINT before_chk;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${chk_sender}" | grep -qi 'check constraint'; then
+  fail "expected CHECK violation on whitespace-only sender_watchkeeper_id; got: ${chk_sender}"
+fi
+echo "OK: whitespace-only sender_watchkeeper_id rejected by CHECK"
 
 echo "ALL schema assertions passed"

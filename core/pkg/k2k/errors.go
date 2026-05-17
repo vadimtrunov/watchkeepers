@@ -92,3 +92,53 @@ var ErrEmptySlackChannelID = errors.New("k2k: empty slack channel id")
 // consumer can branch on "wrong lifecycle state" vs "stale
 // post-create idempotent replay" without parsing the error chain.
 var ErrSlackChannelAlreadyBound = errors.New("k2k: slack channel already bound")
+
+// ErrInvalidMessageDirection is returned by [MessageDirection.Validate]
+// when the value is outside the closed [MessageDirectionRequest] /
+// [MessageDirectionReply] set. The set is closed by design — `peer.Ask`
+// emits exactly one of the two values; a typo in a future caller
+// surfaces at the validator boundary rather than as a silent default.
+// Mirrors [ErrInvalidStatus]'s discipline.
+var ErrInvalidMessageDirection = errors.New("k2k: invalid message direction")
+
+// ErrEmptyConversationID is returned by [Repository.AppendMessage] and
+// [Repository.WaitForReply] when the supplied conversation id is the
+// zero UUID. A zero value would smuggle past the FK at the SQL layer
+// (every uuid serialises) but produce an orphan message visible to no
+// consumer; fail-fast at the entry boundary mirrors the
+// [ErrEmptyOrganization] discipline.
+var ErrEmptyConversationID = errors.New("k2k: empty conversation id")
+
+// ErrEmptySenderWatchkeeperID is returned by [Repository.AppendMessage]
+// when the supplied sender id is empty / whitespace-only. The acting
+// watchkeeper id is load-bearing for the M1.4 audit emission
+// (`k2k_message_sent.sender_watchkeeper_id`) and for the M1.3.b
+// participant-membership gate; an empty sender would produce an
+// unattributable message. Fail fast at the entry boundary, same
+// discipline as [ErrEmptyParticipants].
+var ErrEmptySenderWatchkeeperID = errors.New("k2k: empty sender watchkeeper id")
+
+// ErrEmptyMessageBody is returned by [Repository.AppendMessage] when
+// the supplied body slice is empty (nil or zero-length). A zero-byte
+// payload is a degenerate state — `peer.Ask` always carries a request
+// body; `peer.Reply` always carries a response body. The
+// [Repository.AppendMessage] doc-block forbids smuggling an empty
+// payload past the validator to mark a conversation closed; M1.3.b's
+// `peer.Close` is the canonical path for that.
+var ErrEmptyMessageBody = errors.New("k2k: empty message body")
+
+// ErrInvalidWaitTimeout is returned by [Repository.WaitForReply] when
+// the supplied timeout is non-positive. A non-positive timeout would
+// either be a no-op (zero) or a logic bug (negative); both are caller
+// bugs. The peer-tool layer's `peer.Ask(timeout=0)` semantic for fire-
+// and-forget broadcasts is resolved BEFORE the WaitForReply call (no
+// wait happens at all), so the repository never sees a 0 timeout.
+var ErrInvalidWaitTimeout = errors.New("k2k: invalid wait timeout")
+
+// ErrWaitForReplyTimeout is returned by [Repository.WaitForReply] when
+// no `reply`-direction row appears in the requested conversation
+// before the timeout elapses. The peer-tool layer translates this
+// sentinel into `peer.ErrPeerTimeout`; the repository sentinel exists
+// so callers driving the seam directly (e.g. an M1.6 escalation saga
+// step) can branch on errors.Is without depending on the peer package.
+var ErrWaitForReplyTimeout = errors.New("k2k: wait for reply timeout")

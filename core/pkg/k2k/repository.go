@@ -2,6 +2,7 @@ package k2k
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -190,4 +191,74 @@ type Repository interface {
 	// On success the row reflects the supplied channel id and a
 	// subsequent [Get] / [List] returns the bound value.
 	BindSlackChannel(ctx context.Context, id uuid.UUID, slackChannelID string) error
+
+	// AppendMessage persists a new row in the `k2k_messages` table
+	// keyed off `params.ConversationID`, stamps `CreatedAt`, and
+	// returns the resulting [Message]. The id is minted by the
+	// repository (not the caller) so two concurrent Appends never race
+	// on a caller-supplied UUID.
+	//
+	// Validation order (fail-fast precedes persistence):
+	//   1. ctx.Err — refuses a pre-cancelled ctx.
+	//   2. params.ConversationID != uuid.Nil — [ErrEmptyConversationID].
+	//   3. params.OrganizationID != uuid.Nil — [ErrEmptyOrganization].
+	//   4. trimmed params.SenderWatchkeeperID != "" —
+	//      [ErrEmptySenderWatchkeeperID].
+	//   5. len(params.Body) > 0 — [ErrEmptyMessageBody].
+	//   6. params.Direction.Validate() — [ErrInvalidMessageDirection].
+	//
+	// The in-memory adapter additionally checks that the conversation
+	// exists and is in [StatusOpen] (returns [ErrConversationNotFound]
+	// or [ErrAlreadyArchived] respectively); the Postgres adapter
+	// relies on the FK constraint to reject an unknown conversation
+	// id and accepts appends to archived conversations (the M1.3.b
+	// `peer.Close` flow is responsible for rejecting writes to
+	// archived rows at the call-site, not at the storage layer).
+	//
+	// The returned [Message.Body] is a defensive copy; mutating it
+	// does not affect the persisted row, and a caller mutating the
+	// input `params.Body` after AppendMessage returns does not bleed
+	// either. Mirrors the M1.1.a participants defensive-copy contract.
+	//
+	// Implementations MUST notify any waiting [WaitForReply] caller on
+	// the same conversation when the appended message carries
+	// [MessageDirectionReply] — the M1.3.a `peer.Ask` flow blocks on
+	// this notification.
+	AppendMessage(ctx context.Context, params AppendMessageParams) (Message, error)
+
+	// WaitForReply blocks until a `reply`-direction [Message] is
+	// appended to `conversationID` whose `CreatedAt` strictly exceeds
+	// `since`, or until `timeout` elapses. The cursor anchor `since` is
+	// exclusive: a reply stamped at exactly `since` does NOT satisfy
+	// the wait (mirrors the M9.4.b proposal-store "strictly after"
+	// boundary).
+	//
+	// `since` is interpreted in the same wall-clock space the
+	// repository uses to stamp `CreatedAt` (UTC). Callers that
+	// captured a wall-clock value via `time.Now()` BEFORE the request
+	// message was appended can safely pass it here — any reply
+	// appended after the request is necessarily after `since`.
+	//
+	// Resolution order:
+	//   1. ctx.Err — refuses a pre-cancelled ctx.
+	//   2. conversationID != uuid.Nil — [ErrEmptyConversationID].
+	//   3. timeout > 0 — [ErrInvalidWaitTimeout] otherwise.
+	//   4. Synchronous scan of messages stamped after `since` — if a
+	//      matching reply already exists, return it without blocking.
+	//   5. Block on the per-conversation cond-var (in-memory adapter)
+	//      OR poll on a short interval (Postgres adapter) until either
+	//      a reply arrives, `ctx` cancels, or `timeout` elapses.
+	//
+	// Failure modes:
+	//   - `ctx` cancellation → ctx.Err().
+	//   - timeout expiry → [ErrWaitForReplyTimeout].
+	//   - unknown `conversationID` is NOT a fail-fast at this surface
+	//     — the wait runs to timeout because a future Append on an
+	//     unknown id is impossible to distinguish from a slow caller.
+	//     The peer-tool layer is responsible for the existence check
+	//     BEFORE driving WaitForReply.
+	//
+	// The returned [Message.Body] is a defensive copy; mutating it
+	// does not affect the persisted row.
+	WaitForReply(ctx context.Context, conversationID uuid.UUID, since time.Time, timeout time.Duration) (Message, error)
 }
