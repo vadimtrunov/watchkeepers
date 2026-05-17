@@ -77,6 +77,33 @@ var peerCloseSchema = json.RawMessage(`{
   "required": ["conversation_id"]
 }`)
 
+// peerBroadcastSchema is the zod-compatible JSON-schema fragment
+// describing [Tool.Broadcast]'s argument shape. Same minimum-viable-
+// surface posture as the other peer.* schemas. `roles` / `languages` /
+// `capabilities` are optional individually but at least one MUST be
+// non-empty for the call to admit (enforced inside
+// [Tool.Broadcast] via [ErrPeerRoleFilterEmpty]); the JSON schema
+// surface keeps them all optional and lets the Go validator do the
+// cross-field check (M9.3's schema linter will tighten this).
+var peerBroadcastSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "subject": { "type": "string", "description": "operator-facing free-text label" },
+    "body": { "type": "string", "description": "request payload broadcast verbatim to every target" },
+    "concurrency": { "type": "integer", "minimum": 0, "description": "worker-pool bound; 0 = default" },
+    "filter": {
+      "type": "object",
+      "properties": {
+        "roles": { "type": "array", "items": { "type": "string" }, "description": "closed-set role filter" },
+        "languages": { "type": "array", "items": { "type": "string" }, "description": "closed-set language filter" },
+        "capabilities": { "type": "array", "items": { "type": "string" }, "description": "set-superset capability filter" },
+        "exclude_self": { "type": "boolean", "description": "drop the acting watchkeeper from the resolved set" }
+      }
+    }
+  },
+  "required": ["subject", "body", "filter"]
+}`)
+
 // peerSubscribeSchema is the zod-compatible JSON-schema fragment
 // describing [Tool.Subscribe]'s argument shape. Same minimum-viable-
 // surface posture as [peerAskSchema] / [peerReplySchema] /
@@ -161,6 +188,26 @@ func BuiltinSubscribeManifest() toolregistry.Manifest {
 		Version:      "1.0.0",
 		Capabilities: []string{CapabilitySubscribe},
 		Schema:       cloneBytes(peerSubscribeSchema),
+		Source:       BuiltinSourceName,
+		DryRunMode:   toolregistry.DryRunModeScoped,
+	}
+}
+
+// BuiltinBroadcastManifest returns the [toolregistry.Manifest] entry
+// for `peer.broadcast`. Same shape as [BuiltinAskManifest] /
+// [BuiltinReplyManifest] / [BuiltinCloseManifest] /
+// [BuiltinSubscribeManifest] but with the [CapabilityBroadcast]
+// capability id and the `peer.broadcast` name. Dry-run mode is
+// [toolregistry.DryRunModeScoped] — a dry-run broadcast reroutes the
+// fan-out to the lead's DM under M9.4.c. The returned value is a
+// fresh struct per call; defensive deep-copy of the schema RawMessage
+// protects callers that mutate the returned value.
+func BuiltinBroadcastManifest() toolregistry.Manifest {
+	return toolregistry.Manifest{
+		Name:         "peer.broadcast",
+		Version:      "1.0.0",
+		Capabilities: []string{CapabilityBroadcast},
+		Schema:       cloneBytes(peerBroadcastSchema),
 		Source:       BuiltinSourceName,
 		DryRunMode:   toolregistry.DryRunModeScoped,
 	}

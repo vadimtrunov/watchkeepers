@@ -154,6 +154,15 @@ type Deps struct {
 	// when invoked against a nil EventBus.
 	EventBus EventBus
 
+	// FilterResolver is the M1.3.d target-resolution seam [Tool.Broadcast]
+	// consumes — typically a [defaultFilterResolver] wrapping
+	// [PeerLister] in production, or a hand-rolled fake in tests.
+	// OPTIONAL: nil falls back to [NewFilterResolver]([PeerLister]) so
+	// callers that wire only [PeerLister] still get a working broadcast
+	// surface. A nil [PeerLister] + nil [FilterResolver] combination is
+	// caught by the [PeerLister] panic, not a separate one.
+	FilterResolver FilterResolver
+
 	// Now overrides the wall-clock used to compute the `since` cursor
 	// passed to [Repository.WaitForReply]. Defaults to [time.Now]; a
 	// test fixture may pass a deterministic clock. Optional.
@@ -188,6 +197,12 @@ func NewTool(deps Deps) *Tool {
 	}
 	if deps.Capability == nil {
 		panic("peer: NewTool: deps.Capability must not be nil")
+	}
+	if deps.FilterResolver == nil {
+		// Fall back to a default-mode resolver wrapping the supplied
+		// [PeerLister]. The panic at the top of [NewTool] catches a nil
+		// PeerLister, so the wrapper here is always non-nil.
+		deps.FilterResolver = resolverFromLister(deps.PeerLister)
 	}
 	now := deps.Now
 	if now == nil {
