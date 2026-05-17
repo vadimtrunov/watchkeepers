@@ -533,8 +533,10 @@ OR a local `claude` CLI Pro/Max subscription — the SDK auto-detects
 whichever credential is present. `FakeProvider` is synchronous,
 deterministic, and has no network dependency; the full test suite uses
 it exclusively. Adding a fourth provider means implementing the four
-`LLMProvider` methods and passing the relevant `ProviderCase` into the
-conformance suite — no other file needs to change.
+`LLMProvider` methods, registering an entry in `ProviderCase[]` in the
+conformance suite, and wiring the new provider into the boot-time
+selection path (`harness/src/index.ts` `buildProviderFromSecrets`).
+Documentation and any provider-specific test fixtures usually follow.
 
 ### Selecting a provider
 

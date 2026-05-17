@@ -36,7 +36,7 @@
 - **Lint:** `pnpm -C harness lint` must be green. Any new `eslint-disable` line carries an inline `--` justification (matches house style).
 - **Grep invariant:** never reference `ANTHROPIC_API_KEY` literal outside `harness/src/secrets/env.ts`. None of these tasks touch credentials, so the invariant should stay satisfied automatically.
 - **Repo language:** all code, comments, commit messages — English only.
-- **Commits:** Conventional Commits, no `--no-verify`, no `--no-gpg-sign`. Bodies in prose paragraphs (lefthook commitlint is picky about parenthesised bullet lists in footers).
+- **Commits:** Conventional Commits, no `--no-verify`, no `--no-gpg-sign`. Bodies in prose paragraphs (lefthook commitlint is picky about parenthesised bullet lists in footers). Note: `-c commit.gpgsign=false` (the per-command override used in the bash examples below) is a deliberate per-command opt-out for development worktrees where GPG is not configured locally; it is NOT the `--no-gpg-sign` per-commit anti-pattern that the rule forbids. The examples use it because the harness's plan-execution shell may run without GPG.
 - **Cross-reference comment:** every new piece of code that *skips* `role === "tool"` carries `// M5.3.c.c.c — inbound tool-result folding lives there` (mirrors the existing comment in `claude-code-provider.ts:337`).
 
 ---

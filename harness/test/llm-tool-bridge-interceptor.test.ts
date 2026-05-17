@@ -191,30 +191,28 @@ describe("interceptComplete", () => {
       },
     ]);
     await expect(interceptComplete(iter, codec, REQUESTED_MODEL)).rejects.toBeInstanceOf(LLMError);
-    try {
-      await interceptComplete(
-        fakeIter([
-          {
-            type: "user",
-            message: {
-              content: [
-                {
-                  type: "tool_result",
-                  tool_use_id: "tu_1",
-                  is_error: true,
-                  content: `${MCP_STUB_SENTINEL}: notebook.remember`,
-                },
-              ],
-            },
+    const escapePromise = interceptComplete(
+      fakeIter([
+        {
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "tu_1",
+                is_error: true,
+                content: `${MCP_STUB_SENTINEL}: notebook.remember`,
+              },
+            ],
           },
-        ]).iter,
-        codec,
-        REQUESTED_MODEL,
-      );
-    } catch (e) {
-      expect((e as LLMError).code).toBe("provider_unavailable");
-      expect((e as LLMError).message).toMatch(/escaped tool intercept/);
-    }
+        },
+      ]).iter,
+      codec,
+      REQUESTED_MODEL,
+    );
+    await expect(escapePromise).rejects.toBeInstanceOf(LLMError);
+    await expect(escapePromise).rejects.toMatchObject({ code: "provider_unavailable" });
+    await expect(escapePromise).rejects.toThrow(/escaped tool intercept/);
   });
 });
 

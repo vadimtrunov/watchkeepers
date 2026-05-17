@@ -112,11 +112,21 @@ module so the interceptor and the stub-server share a single source of truth.
 Constructs an in-process MCP server via the SDK's `createSdkMcpServer` API:
 
 ```ts
+export interface StubMcpServerConfig {
+  readonly name: string;
+  readonly tools: readonly StubToolEntry[];
+  readonly sdkConfig: McpSdkServerConfigWithInstance;
+}
+
 export function buildStubMcpServer(
   tools: readonly ToolDefinition[],
   codec: ToolNameCodec,
-): McpSdkServerConfigWithInstance;
+): StubMcpServerConfig;
 ```
+
+The `tools` field exposes the stub handlers so unit tests can invoke them
+directly (asserting the sentinel-tagged throw); `sdkConfig` is what the
+provider hands to `query({ options: { mcpServers } })`.
 
 - Each tool is registered with its **encoded** name, the runtime
   `description`, and a Zod schema derived from `inputSchema`.
@@ -271,7 +281,7 @@ diagnostic safety net, not a happy path.
 | Unknown JSON-Schema shape | Warn once, fall back to `z.any()`. Non-fatal. |
 | Model emits unknown MCP name | `codec.decode` throws `LLMError.providerUnavailable(...)`. Invariant violation. |
 | Stub handler invoked (race) | Sentinel detected → `LLMError.providerUnavailable("agent SDK escaped tool intercept: ...")`. |
-| `iter.interrupt()` throws | Swallowed; warn. Best-effort, mirrors slice-3 stop semantics. |
+| `iter.interrupt()` throws | Silently swallowed (best-effort). Mirrors slice-3 stop semantics. |
 | `usage === undefined` after interrupt | Fallback to `{ model, inputTokens: 0, outputTokens: 0, costCents: 0 }`; warn. Slice 5 will refine. |
 | Stream handler throws during interception | Latches cause; first `stop()` rejects with `LLMError.streamClosed(cause)`. Re-uses slice-3 latching. |
 
