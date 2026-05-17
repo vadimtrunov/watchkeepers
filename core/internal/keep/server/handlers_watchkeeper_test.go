@@ -683,7 +683,7 @@ func TestGetWatchkeeper_ReturnsFullRow(t *testing.T) {
 			// Order matches handleGetWatchkeeper's Scan list:
 			//   id, manifest_id, lead_human_id,
 			//   active_manifest_version_id, status,
-			//   spawned_at, retired_at, archive_uri, created_at
+			//   spawned_at, retired_at, archive_uri, role_id, created_at
 			*dest[0].(*string) = wkFakeID
 			*dest[1].(*string) = wkManifestID
 			*dest[2].(*string) = wkLeadHumanID
@@ -694,7 +694,9 @@ func TestGetWatchkeeper_ReturnsFullRow(t *testing.T) {
 			*dest[6].(**time.Time) = nil
 			// archive_uri NULL on this active-status row.
 			*dest[7].(**string) = nil
-			*dest[8].(*time.Time) = time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+			// role_id NULL on this row (M7.1.a happy path: legacy row).
+			*dest[8].(**string) = nil
+			*dest[9].(*time.Time) = time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -776,12 +778,16 @@ func makeListScans(t *testing.T, statuses []string) []func(dest ...any) error {
 			// archive_uri NULL on every staged row — list test does not
 			// exercise the M7.2.c retire-with-archive path.
 			*dest[7].(**string) = nil
+			// role_id NULL on every staged row — M7.1.a list test does
+			// not exercise the role_id projection (covered by its own
+			// dedicated test below).
+			*dest[8].(**string) = nil
 			// Stagger created_at by row index so the DESC order is
 			// observable end-to-end (the fake does not actually sort —
 			// it just returns rows in the order the test stages them).
 			// Row 0 is the newest (largest created_at); row N is oldest.
 			base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-			*dest[8].(*time.Time) = base.Add(-time.Duration(i) * time.Hour)
+			*dest[9].(*time.Time) = base.Add(-time.Duration(i) * time.Hour)
 			return nil
 		})
 	}

@@ -34,6 +34,19 @@ type InsertWatchkeeperRequest struct {
 	// server stores SQL NULL when omitted (omitempty so the empty value is
 	// not transmitted at all).
 	ActiveManifestVersionID string `json:"active_manifest_version_id,omitempty"`
+	// RoleID is the optional M7.1.a opaque role-identity string. The server
+	// stores SQL NULL when omitted (omitempty so the empty value is not
+	// transmitted at all) and an existing legacy caller that never sets
+	// the field continues to insert rows with a NULL role_id. Free-form
+	// text: no client-side shape validation beyond non-empty (an empty
+	// string is folded into the absent shape via omitempty, matching the
+	// `ActiveManifestVersionID` pattern). Validation of the role-identity
+	// string itself — uniqueness across active rows, catalogue membership,
+	// etc. — is deferred to the upstream M7.1 writer (Manifest template
+	// slug + Watchmaster spawn flow). The M7.1.b predecessor-lookup
+	// endpoint reads this column server-side via the M7.1.a migration's
+	// partial index `idx_watchkeeper_role_id_retired`.
+	RoleID string `json:"role_id,omitempty"`
 }
 
 // InsertWatchkeeperResponse mirrors the server's `insertWatchkeeperResponse`

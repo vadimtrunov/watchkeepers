@@ -41,6 +41,16 @@ type Watchkeeper struct {
 	// step runs). The server-side column is `archive_uri text NULL` —
 	// migration `022_watchkeepers_archive_uri.sql`.
 	ArchiveURI *string `json:"archive_uri"`
+	// RoleID is the M7.1.a opaque role-identity string used by the M7.1
+	// inheritance saga to correlate a freshly spawned Watchkeeper with the
+	// most recent retired peer carrying the same role. Nil when the column
+	// was NULL in Postgres (every row predating M7.1.a writers + every
+	// legacy insert that omits the optional `role_id` body field). The
+	// server-side column is `role_id text NULL` — migration
+	// `032_watchkeepers_role_id.sql`. The M7.1.b predecessor-lookup
+	// endpoint + M7.1.c NotebookInheritStep saga step land in subsequent
+	// leaves; this projection is the read-side foundation they consume.
+	RoleID *string `json:"role_id"`
 	// CreatedAt is the row's created_at timestamp.
 	CreatedAt time.Time `json:"created_at"`
 }

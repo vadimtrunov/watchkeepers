@@ -877,6 +877,15 @@ type insertWatchkeeperRequest struct {
 	ManifestID              string `json:"manifest_id"`
 	LeadHumanID             string `json:"lead_human_id"`
 	ActiveManifestVersionID string `json:"active_manifest_version_id,omitempty"`
+	// RoleID is the optional M7.1.a opaque role-identity string. Free-form
+	// text — see migration `032_watchkeepers_role_id.sql` for the column
+	// rationale. Empty string is folded into SQL NULL via [stringOrNil] so
+	// a legacy caller that omits the field continues to insert rows with
+	// a NULL role_id. No client-side shape validation beyond non-blank
+	// (a whitespace-only value would round-trip to a non-NULL row that
+	// matches nothing in the M7.1.b predecessor-lookup query); the
+	// non-blank gate lives in [parseInsertWatchkeeperRequest].
+	RoleID string `json:"role_id,omitempty"`
 }
 
 // insertWatchkeeperResponse is the 201 body returned by POST /v1/watchkeepers.
@@ -917,6 +926,17 @@ func parseInsertWatchkeeperRequest(w http.ResponseWriter, req *http.Request) (in
 		return body, false
 	}
 	if body.ActiveManifestVersionID != "" && !uuidPattern.MatchString(body.ActiveManifestVersionID) {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return body, false
+	}
+	// M7.1.a: role_id is optional free-form text. The only pre-tx
+	// validation is non-blank when supplied — a whitespace-only string
+	// would round-trip to a non-NULL row that matches nothing in the
+	// M7.1.b predecessor-lookup query, which is a wiring bug rejected
+	// at the seam closest to the caller. Mirrors the `optionalArchiveURI`
+	// non-blank gate the M7.2.c PATCH /v1/watchkeepers/{id}/status path
+	// applies for the same reason.
+	if body.RoleID != "" && strings.TrimSpace(body.RoleID) == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return body, false
 	}
@@ -968,6 +988,7 @@ func handleInsertWatchkeeper(r scopedRunner) http.Handler {
 		// so the FK-typed column holds NULL rather than an empty-string
 		// value that would fail the uuid cast.
 		activeManifestVersionID := stringOrNil(body.ActiveManifestVersionID)
+		roleID := stringOrNil(body.RoleID)
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
@@ -978,18 +999,26 @@ func handleInsertWatchkeeper(r scopedRunner) http.Handler {
 			// statement when the lead human's org does not match the
 			// claim, returning no row through RETURNING. The handler
 			// surfaces that as 404 not_found.
+			//
+			// M7.1.a (role_id, $5): an optional free-form role-identity
+			// string the M7.1 inheritance saga uses to correlate a fresh
+			// Watchkeeper with the most recent retired peer carrying the
+			// same role. Empty body field → SQL NULL via [stringOrNil];
+			// legacy callers that never set the field continue to insert
+			// rows with a NULL role_id (the partial index defined in
+			// migration 032 stays untouched for those rows).
 			return tx.QueryRow(ctx, `
                 INSERT INTO watchkeeper.watchkeeper (
                     manifest_id, lead_human_id, active_manifest_version_id,
-                    status, spawned_at, retired_at
+                    status, spawned_at, retired_at, role_id
                 )
-                SELECT $1, $2, $3, 'pending', NULL, NULL
+                SELECT $1, $2, $3, 'pending', NULL, NULL, $5
                 WHERE EXISTS (
                     SELECT 1 FROM watchkeeper.human
                     WHERE id = $2 AND organization_id = $4
                 )
                 RETURNING id
-            `, body.ManifestID, body.LeadHumanID, activeManifestVersionID, claim.OrganizationID).Scan(&id)
+            `, body.ManifestID, body.LeadHumanID, activeManifestVersionID, claim.OrganizationID, roleID).Scan(&id)
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {

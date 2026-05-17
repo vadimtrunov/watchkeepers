@@ -46,7 +46,7 @@
 //   - [EventBus] interface: Publish + Subscribe seam. In-memory
 //     implementation [MemoryEventBus] for tests + dev loops; Postgres
 //     LISTEN/NOTIFY implementation [PostgresEventBus] for production
-//     wiring. The Postgres adapter uses migration `032_peer_events.sql`
+//     wiring. The Postgres adapter uses migration `033_peer_events.sql`
 //     (`peer_events` table + `peer_event_published` trigger).
 //   - [BuiltinSubscribeManifest]: tool-registry manifest entry stamped
 //     with `Source: "built-in"` and the `peer:subscribe` capability.

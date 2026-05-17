@@ -985,7 +985,9 @@ if [[ "${close_summary_write}" != "integration-test summary" ]]; then
 fi
 echo "OK: close_summary write on archived row persists under wk_org_role"
 
-# M1.3.c — peer_events table assertions (migration 032).
+# M1.3.c — peer_events table assertions (migration 033 — number bumped
+# from 032 because M7.1.a's `032_watchkeepers_role_id.sql` landed in
+# parallel).
 #
 # Block (ab) pins:
 #   * the table exists with the expected column shape (id, org id,
@@ -1088,5 +1090,91 @@ if ! printf '%s' "${peer_events_check_empty}" | grep -qi 'check constraint'; the
   fail "expected CHECK violation on whitespace-only watchkeeper_id; got: ${peer_events_check_empty}"
 fi
 echo "OK: whitespace-only watchkeeper_id rejected by CHECK"
+
+echo ">> migrate-schema-test: (bb) M7.1.a role_id column + partial index"
+# Verify the migration applied: the role_id column exists with the right
+# nullability and the partial index is present on the documented
+# (retired_at IS NOT NULL AND archive_uri IS NOT NULL) subset.
+role_id_column=$("${PSQL[@]}" -tA <<'SQL'
+SELECT data_type || ',' || is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'watchkeeper'
+  AND table_name = 'watchkeeper'
+  AND column_name = 'role_id';
+SQL
+)
+if [[ "${role_id_column}" != "text,YES" ]]; then
+  fail "expected role_id column 'text,YES' (text NULL); got '${role_id_column}'"
+fi
+echo "OK: watchkeeper.role_id column shape = ${role_id_column}"
+
+role_id_index=$("${PSQL[@]}" -tA <<'SQL'
+SELECT pg_get_indexdef(c.oid)
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'watchkeeper'
+  AND c.relname = 'idx_watchkeeper_role_id_retired';
+SQL
+)
+if [[ -z "${role_id_index}" ]]; then
+  fail "expected partial index idx_watchkeeper_role_id_retired to exist; got empty"
+fi
+# Defense-in-depth: the partial WHERE clause MUST filter the
+# retired-with-archive subset; a regression that drops the predicate
+# would silently bloat the index across every pending/active row.
+if ! printf '%s' "${role_id_index}" | grep -q 'retired_at IS NOT NULL'; then
+  fail "partial index missing 'retired_at IS NOT NULL' predicate; got: ${role_id_index}"
+fi
+if ! printf '%s' "${role_id_index}" | grep -q 'archive_uri IS NOT NULL'; then
+  fail "partial index missing 'archive_uri IS NOT NULL' predicate; got: ${role_id_index}"
+fi
+# Iter-1 codex finding (Major): the partial index must ALSO exclude
+# NULL-valued role_id rows so equality-probes on `WHERE role_id = $1`
+# never scan dead entries (equality on NULL is undefined and can never
+# match, so including those rows bloats the index without serving the
+# query). A regression that drops the role_id IS NOT NULL clause
+# surfaces here.
+if ! printf '%s' "${role_id_index}" | grep -q 'role_id IS NOT NULL'; then
+  fail "partial index missing 'role_id IS NOT NULL' predicate (iter-1 finding); got: ${role_id_index}"
+fi
+echo "OK: idx_watchkeeper_role_id_retired present with documented partial WHERE clause"
+
+# Round-trip insert: an explicit role_id persists; a NULL role_id is
+# accepted (legacy callers stay valid).
+"${PSQL[@]}" >/dev/null <<'SQL'
+BEGIN;
+
+INSERT INTO watchkeeper.watchkeeper (
+  manifest_id, lead_human_id, status, role_id
+)
+SELECT
+  (SELECT id FROM watchkeeper.manifest LIMIT 1),
+  (SELECT id FROM watchkeeper.human LIMIT 1),
+  'pending',
+  'frontline-watchkeeper';
+
+INSERT INTO watchkeeper.watchkeeper (
+  manifest_id, lead_human_id, status
+)
+SELECT
+  (SELECT id FROM watchkeeper.manifest LIMIT 1),
+  (SELECT id FROM watchkeeper.human LIMIT 1),
+  'pending';
+
+COMMIT;
+SQL
+
+role_id_counts=$("${PSQL[@]}" -tA <<'SQL'
+SELECT
+  (SELECT count(*) FROM watchkeeper.watchkeeper WHERE role_id = 'frontline-watchkeeper') || ',' ||
+  (SELECT count(*) FROM watchkeeper.watchkeeper WHERE role_id IS NULL);
+SQL
+)
+# happy-path row + null-active row (from section d) + new null row = 3 NULL rows;
+# +1 non-NULL row carrying 'frontline-watchkeeper'.
+if [[ "${role_id_counts}" != "1,3" ]]; then
+  fail "expected role_id round-trip counts (non-null=1, null=3); got '${role_id_counts}'"
+fi
+echo "OK: role_id round-trip persists explicit value and accepts NULL (counts = ${role_id_counts})"
 
 echo "ALL schema assertions passed"
