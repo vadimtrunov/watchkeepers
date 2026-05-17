@@ -21,7 +21,7 @@ package notebook
 
 import (
 	"context"
-	"fmt"
+	"log/slog"
 )
 
 // InheritFromArchive is the M7.1.c saga-layer composition wrapper.
@@ -38,25 +38,32 @@ import (
 //  3. Closes the DB.
 //
 // Returns the count + nil on success, or `(0, err)` with a
-// wrapped underlying error chain on any failure. Validation
-// failures from [ImportFromArchive] (invalid agentID / empty URI
-// / nil fetcher) surface as [ErrInvalidEntry] through the wrap.
+// wrapped underlying error chain on the IMPORT-failure paths.
+// Validation failures from [ImportFromArchive] (invalid agentID /
+// empty URI / nil fetcher) surface as [ErrInvalidEntry] through
+// the wrap.
 //
 // # Partial-failure contract
 //
 //   - Import failure → `(0, err)` matching [ImportFromArchive]'s
 //     wrap chain (e.g. `errors.Is(err, ErrCorruptArchive)`,
-//     `errors.Is(err, ErrTargetNotEmpty)`).
-//   - Post-import Open failure → `(0, err)` wrapped
-//     `fmt.Errorf("inherit count: open: %w", err)`. The import
-//     itself succeeded; the inherited data IS in the DB. The
-//     caller (saga step) returns an error so the saga rolls back,
-//     and the M7.1.c compensator delegation (the downstream
-//     [NotebookProvisionStep.Compensate] archives the file) runs
-//     on the next saga.compensate walk.
-//   - Stats failure → `(0, err)` wrapped
-//     `fmt.Errorf("inherit count: stats: %w", err)`. Same
-//     partial-failure contract.
+//     `errors.Is(err, ErrTargetNotEmpty)`). The destination DB
+//     is untouched on this branch.
+//   - Post-import Open / Stats failure → `(0, nil)` AFTER the
+//     import has succeeded. The inherited data IS in the DB;
+//     only the count read failed. Rolling the saga back on a
+//     count-read miss would discard a successful inheritance and
+//     trigger a downstream rollback walk over a step that has no
+//     compensator yet — the alternative is far worse than emitting
+//     a `notebook_inherited` row with `entries_imported=0`. An
+//     operator can re-read the count via a follow-up Stats call;
+//     the audit row's `entries_imported=0` is the documented
+//     "count unknown / sentinel" value. Iter-1 codex+critic P1
+//     fix.
+//
+// The post-import-failure path logs the underlying error via
+// [log/slog] so an operator can correlate a count-zero audit row
+// to a notebook-side incident.
 //
 // # Concurrency
 //
@@ -75,15 +82,34 @@ func InheritFromArchive(
 		return 0, err
 	}
 
+	// Post-import path: the import succeeded and the inherited
+	// data is in the DB. Open/Stats failures here are degraded to
+	// `(0, nil)` so a transient sqlite OS-level error or a brief
+	// FD-table pressure does NOT undo a successful inheritance.
+	// The slog.Warn record carries the underlying error chain.
 	db, err := Open(ctx, agentID)
 	if err != nil {
-		return 0, fmt.Errorf("inherit count: open: %w", err)
+		slog.WarnContext(
+			ctx,
+			"notebook: inherit count: post-import Open failed; count degraded to 0",
+			"agent_id", agentID,
+			"err_class", "inherit_count_open_failed",
+			"err", err.Error(),
+		)
+		return 0, nil
 	}
 	defer func() { _ = db.Close() }()
 
 	stats, err := db.Stats(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("inherit count: stats: %w", err)
+		slog.WarnContext(
+			ctx,
+			"notebook: inherit count: post-import Stats failed; count degraded to 0",
+			"agent_id", agentID,
+			"err_class", "inherit_count_stats_failed",
+			"err", err.Error(),
+		)
+		return 0, nil
 	}
 	return stats.TotalEntries, nil
 }

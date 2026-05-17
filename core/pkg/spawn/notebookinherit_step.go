@@ -99,12 +99,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/keepclient"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/keeperslog"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/spawn/saga"
+)
+
+// Compile-time assertions: the production wiring substitutes
+// [*keepclient.Client] for [PredecessorLookup] and [*keeperslog.Writer]
+// for [InheritAuditAppender]. The assertions pin the interface
+// contract so a future signature drift on either side surfaces here
+// (iter-1 critic P2 — interface drift was previously catchable only
+// at late integration).
+//
+//nolint:gochecknoglobals // package-level compile-time assertion; idiomatic Go pattern.
+var (
+	_ PredecessorLookup    = (*keepclient.Client)(nil)
+	_ InheritAuditAppender = (*keeperslog.Writer)(nil)
 )
 
 // NotebookInheritStepName is the stable closed-set identifier for
@@ -157,6 +171,51 @@ const (
 //
 //nolint:unused // sentinel reserved for a future strict-mode variant.
 var ErrMissingClaimOrganization = errors.New("spawn: notebook_inherit step: missing claim organization_id")
+
+// ErrPredecessorLookupFailed is the typed error
+// [NotebookInheritStep.Execute] returns when the
+// [PredecessorLookup.LatestRetiredByRole] seam returns a non-404
+// transport / auth error. The step does NOT %w-wrap the underlying
+// error onto this sentinel — the seam's error message can echo the
+// request URL (which contains the `role_id` query parameter the
+// M7.1.b client encodes), violating the docblock's PII guarantee
+// that error strings never leak the role identity. Wrapping the
+// sentinel directly lets `errors.Is(err, ErrPredecessorLookupFailed)`
+// match without surfacing the underlying string. Iter-1 codex P1
+// finding (PII boundary).
+//
+// The underlying error chain IS logged via [slog.WarnContext] inside
+// the step so an operator can correlate the audit failure to a
+// transport-side incident without parsing the saga's wrapped error.
+var ErrPredecessorLookupFailed = errors.New("spawn: notebook_inherit step: predecessor lookup failed")
+
+// ErrInvalidPredecessorEnvelope is the typed error
+// [NotebookInheritStep.Execute] returns when the
+// [PredecessorLookup.LatestRetiredByRole] seam returns a non-nil
+// error AND a nil envelope, OR returns nil error but the envelope
+// carries an empty `archive_uri` (which the M7.1.b server-side
+// query filter forbids). Surfacing these as a typed sentinel
+// rather than dereferencing nil keeps the saga's reverse-rollback
+// safe. Iter-1 codex P1 finding (PII boundary): the sentinel
+// carries NO substrings from the envelope.
+var ErrInvalidPredecessorEnvelope = errors.New("spawn: notebook_inherit step: invalid predecessor envelope")
+
+// ErrInheritFailed is the typed error
+// [NotebookInheritStep.Execute] returns when the
+// [NotebookInheritor.Inherit] seam fails (fetch / open / import /
+// count). The step does NOT %w-wrap the underlying error onto this
+// sentinel — the seam's error message can echo the archive URI
+// substring, violating the docblock's PII guarantee that error
+// strings never leak the archive URI. Wrapping the sentinel
+// directly lets `errors.Is(err, ErrInheritFailed)` match without
+// surfacing the underlying string. Iter-1 codex P1 finding (PII
+// boundary).
+//
+// The underlying error chain IS logged via [slog.WarnContext]
+// inside the step so an operator can correlate the saga failure
+// to a notebook-side incident without parsing the saga's wrapped
+// error.
+var ErrInheritFailed = errors.New("spawn: notebook_inherit step: inherit failed")
 
 // PredecessorLookup is the seam the [NotebookInheritStep] dispatches
 // through to resolve the most-recently-retired peer for the new
@@ -360,35 +419,75 @@ func (s *NotebookInheritStep) Execute(ctx context.Context) error {
 			// acceptance contract.
 			return nil
 		}
-		return fmt.Errorf("spawn: notebook_inherit step: lookup: %w", err)
+		// PII boundary (iter-1 codex P1): the underlying error
+		// from [keepclient.Client.LatestRetiredByRole] can echo
+		// the request URL with the `role_id` query parameter.
+		// Log the underlying chain via slog (operator-visible)
+		// and return a scrubbed typed sentinel that carries no
+		// substring from the seam's error.
+		slog.WarnContext(
+			ctx,
+			"spawn: notebook_inherit step: predecessor lookup failed",
+			"err_class", "predecessor_lookup_failed",
+			"err", err.Error(),
+		)
+		return ErrPredecessorLookupFailed
 	}
 	if predecessor == nil {
 		// Defensive: a non-nil error AND a nil envelope is a
-		// caller-contract violation. Surface it as a wrapped
-		// error so the saga rolls back rather than dereferencing
-		// nil.
-		return fmt.Errorf("spawn: notebook_inherit step: lookup: nil predecessor envelope")
+		// caller-contract violation. Surface a scrubbed sentinel
+		// (no envelope substrings) so the saga rolls back without
+		// dereferencing nil.
+		return ErrInvalidPredecessorEnvelope
 	}
 	if predecessor.ArchiveURI == nil || *predecessor.ArchiveURI == "" {
 		// Defensive: the M7.1.b server-side query filters
 		// `archive_uri IS NOT NULL` so an empty URI here is a
-		// schema-skew bug. Surface it rather than passing an
-		// empty URI into the Inheritor seam (which would
-		// validate it and return a different error class).
-		return fmt.Errorf("spawn: notebook_inherit step: lookup: predecessor archive_uri empty")
+		// schema-skew bug. Same scrubbed sentinel.
+		return ErrInvalidPredecessorEnvelope
 	}
 
 	archiveURI := *predecessor.ArchiveURI
 	entriesImported, err := s.inheritor.Inherit(ctx, sc.AgentID, archiveURI)
 	if err != nil {
-		return fmt.Errorf("spawn: notebook_inherit step: inherit: %w", err)
+		// PII boundary (iter-1 codex P1): the underlying error
+		// from [notebook.InheritFromArchive] can echo the archive
+		// URI substring (the fetcher's GET error includes the
+		// URI). Log the chain and return a scrubbed sentinel.
+		slog.WarnContext(
+			ctx,
+			"spawn: notebook_inherit step: inherit failed",
+			"err_class", "inherit_failed",
+			"err", err.Error(),
+		)
+		return ErrInheritFailed
 	}
 
 	if _, err := s.audit.Append(ctx, keeperslog.Event{
 		EventType: EventTypeNotebookInherited,
 		Payload:   inheritPayload(predecessor.ID, archiveURI, entriesImported),
 	}); err != nil {
-		return fmt.Errorf("spawn: notebook_inherit step: audit emit: %w", err)
+		// Best-effort audit emit (iter-1 codex+critic P1): the
+		// inherited data is already in the DB; the saga.Runner's
+		// `saga_step_completed` row records the step's success
+		// regardless. A transient audit-sink outage MUST NOT
+		// poison a successful inheritance — the alternative is
+		// either (a) rolling back the saga (the file would need a
+		// compensator on this step; the M7.3.b delegation model
+		// pushes that to NotebookProvisionStep.Compensate but
+		// that step has NOT executed yet on this path) or (b)
+		// leaving a seeded file with no audit trail (the worse
+		// failure mode). The slog.Warn below alerts ops to the
+		// dropped row; an audit-chain reconciler can replay it
+		// from the saga's persisted state. Mirrors the kickoffer's
+		// `EventTypeManifestRejectedAfterSpawnFailure` best-effort
+		// pattern.
+		slog.WarnContext(
+			ctx,
+			"spawn: notebook_inherit step: notebook_inherited audit emit failed",
+			"err_class", "notebook_inherited_emit_dropped",
+			"err", err.Error(),
+		)
 	}
 	return nil
 }

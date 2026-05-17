@@ -61,6 +61,12 @@ func TestInheritFromArchive_HappyPath(t *testing.T) {
 // ImportFromArchive wrap chain verbatim; no DB is opened on the
 // failure path (the post-import Open + Stats are guarded behind the
 // import success branch).
+//
+// Note: iter-1 codex+critic P1 changed the post-import-failure
+// contract — Open/Stats failures degrade to `(0, nil)` so a
+// successful import is never undone by a transient count-read
+// miss. This test pins the import-failure half of the contract
+// (still returns the wrapped error).
 func TestInheritFromArchive_FetcherError(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv(envDataDir, t.TempDir())

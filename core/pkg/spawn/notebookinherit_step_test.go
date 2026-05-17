@@ -421,12 +421,18 @@ func TestNotebookInheritStep_Execute_NoPredecessor_NoInheritCall_NoAudit(t *test
 // Error paths.
 // ────────────────────────────────────────────────────────────────────────
 
-func TestNotebookInheritStep_Execute_LookupTransportError_WrapsAndReturns(t *testing.T) {
+func TestNotebookInheritStep_Execute_LookupTransportError_ScrubsToSentinel(t *testing.T) {
 	t.Parallel()
 
-	sentinel := errors.New("upstream-503")
+	// Iter-1 codex P1 fix (PII boundary): the underlying transport
+	// error string carries the request URL with the role_id query
+	// parameter; the step MUST surface a scrubbed sentinel
+	// ([ErrPredecessorLookupFailed]) rather than %w-wrapping the
+	// underlying chain. The sentinel-only contract makes the
+	// returned error's string content predictable and bounded.
+	pii := "GET /v1/watchkeepers/latest-retired-by-role?role_id=frontline-watchkeeper: 503"
 	wkID := uuid.New()
-	lookup := &fakePredecessorLookup{returnErr: sentinel}
+	lookup := &fakePredecessorLookup{returnErr: errors.New(pii)}
 	inheritor := &fakeNotebookInheritor{}
 	appender := &fakeInheritAuditAppender{}
 	step := newInheritStep(t, lookup, inheritor, appender)
@@ -434,13 +440,18 @@ func TestNotebookInheritStep_Execute_LookupTransportError_WrapsAndReturns(t *tes
 
 	err := step.Execute(ctx)
 	if err == nil {
-		t.Fatalf("Execute: nil err, want wrapped %v", sentinel)
+		t.Fatalf("Execute: nil err, want ErrPredecessorLookupFailed")
 	}
-	if !errors.Is(err, sentinel) {
-		t.Errorf("errors.Is(err, sentinel) = false; err = %v", err)
+	if !errors.Is(err, spawn.ErrPredecessorLookupFailed) {
+		t.Errorf("errors.Is(err, ErrPredecessorLookupFailed) = false; err = %v", err)
 	}
-	if !strings.Contains(err.Error(), "spawn: notebook_inherit step") {
-		t.Errorf("err prefix missing; err = %q", err.Error())
+	// PII guard: the returned error string MUST NOT carry the
+	// upstream error substring (which carries the role_id).
+	if strings.Contains(err.Error(), "frontline-watchkeeper") {
+		t.Errorf("err string leaks role_id substring: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "/v1/watchkeepers") {
+		t.Errorf("err string leaks request URL substring: %q", err.Error())
 	}
 	if got := inheritor.callCount.Load(); got != 0 {
 		t.Errorf("inherit callCount = %d, want 0 (lookup failed)", got)
@@ -450,7 +461,7 @@ func TestNotebookInheritStep_Execute_LookupTransportError_WrapsAndReturns(t *tes
 	}
 }
 
-func TestNotebookInheritStep_Execute_PredecessorEmptyArchiveURI_ReturnsWrappedError(t *testing.T) {
+func TestNotebookInheritStep_Execute_PredecessorEmptyArchiveURI_ReturnsScrubbedSentinel(t *testing.T) {
 	t.Parallel()
 
 	wkID := uuid.New()
@@ -464,10 +475,10 @@ func TestNotebookInheritStep_Execute_PredecessorEmptyArchiveURI_ReturnsWrappedEr
 
 	err := step.Execute(ctx)
 	if err == nil {
-		t.Fatalf("Execute: nil err, want wrapped archive_uri-empty error")
+		t.Fatalf("Execute: nil err, want ErrInvalidPredecessorEnvelope")
 	}
-	if !strings.Contains(err.Error(), "archive_uri") {
-		t.Errorf("err missing archive_uri context; err = %q", err.Error())
+	if !errors.Is(err, spawn.ErrInvalidPredecessorEnvelope) {
+		t.Errorf("errors.Is(err, ErrInvalidPredecessorEnvelope) = false; err = %v", err)
 	}
 	if got := inheritor.callCount.Load(); got != 0 {
 		t.Errorf("inherit callCount = %d, want 0", got)
@@ -477,32 +488,50 @@ func TestNotebookInheritStep_Execute_PredecessorEmptyArchiveURI_ReturnsWrappedEr
 	}
 }
 
-func TestNotebookInheritStep_Execute_InheritorError_WrapsAndReturns_NoAudit(t *testing.T) {
+func TestNotebookInheritStep_Execute_InheritorError_ScrubsToSentinel_NoAudit(t *testing.T) {
 	t.Parallel()
 
-	sentinel := errors.New("notebook-import-corrupt")
+	// Iter-1 codex P1 fix (PII boundary): the underlying inherit
+	// error string carries the archive URI substring; the step
+	// MUST surface a scrubbed sentinel ([ErrInheritFailed]) rather
+	// than %w-wrapping the underlying chain.
+	pii := "fetch: GET s3://watchkeepers-archive/agent-pred-001.sqlite: connection refused"
 	wkID := uuid.New()
 	lookup := &fakePredecessorLookup{returnWk: newPredecessorWatchkeeper()}
-	inheritor := &fakeNotebookInheritor{returnErr: sentinel}
+	inheritor := &fakeNotebookInheritor{returnErr: errors.New(pii)}
 	appender := &fakeInheritAuditAppender{}
 	step := newInheritStep(t, lookup, inheritor, appender)
 	ctx := saga.WithSpawnContext(context.Background(), newInheritSpawnContext(t, wkID))
 
 	err := step.Execute(ctx)
 	if err == nil {
-		t.Fatalf("Execute: nil err, want wrapped %v", sentinel)
+		t.Fatalf("Execute: nil err, want ErrInheritFailed")
 	}
-	if !errors.Is(err, sentinel) {
-		t.Errorf("errors.Is(err, sentinel) = false; err = %v", err)
+	if !errors.Is(err, spawn.ErrInheritFailed) {
+		t.Errorf("errors.Is(err, ErrInheritFailed) = false; err = %v", err)
+	}
+	// PII guard: the returned error string MUST NOT carry the
+	// archive URI substring.
+	if strings.Contains(err.Error(), "s3://watchkeepers-archive") {
+		t.Errorf("err string leaks archive URI substring: %q", err.Error())
 	}
 	if got := appender.callCount.Load(); got != 0 {
 		t.Errorf("audit callCount = %d, want 0 (inherit failed)", got)
 	}
 }
 
-func TestNotebookInheritStep_Execute_AuditError_WrapsAndReturns(t *testing.T) {
+func TestNotebookInheritStep_Execute_AuditError_BestEffort_StepSucceeds(t *testing.T) {
 	t.Parallel()
 
+	// Iter-1 codex+critic P1 fix (best-effort audit emit): the
+	// inherited data is already in the destination DB when the
+	// audit emit dispatches. A transient audit-sink outage MUST
+	// NOT poison a successful inheritance — the saga.Runner's
+	// `saga_step_completed` row provides the minimum trail; the
+	// `notebook_inherited` row is the rich-payload supplement.
+	// The step returns nil on this path; ops are alerted via
+	// slog.Warn (which this test does not capture; the contract
+	// is that Execute returns nil and the inherit was preserved).
 	sentinel := errors.New("audit-down")
 	wkID := uuid.New()
 	lookup := &fakePredecessorLookup{returnWk: newPredecessorWatchkeeper()}
@@ -512,14 +541,14 @@ func TestNotebookInheritStep_Execute_AuditError_WrapsAndReturns(t *testing.T) {
 	ctx := saga.WithSpawnContext(context.Background(), newInheritSpawnContext(t, wkID))
 
 	err := step.Execute(ctx)
-	if err == nil {
-		t.Fatalf("Execute: nil err, want wrapped audit error")
-	}
-	if !errors.Is(err, sentinel) {
-		t.Errorf("errors.Is(err, sentinel) = false; err = %v", err)
+	if err != nil {
+		t.Fatalf("Execute: %v, want nil (audit emit failure must be best-effort)", err)
 	}
 	if got := inheritor.callCount.Load(); got != 1 {
-		t.Errorf("inherit callCount = %d, want 1 (data was already imported before audit failed)", got)
+		t.Errorf("inherit callCount = %d, want 1 (data was imported before audit failed)", got)
+	}
+	if got := appender.callCount.Load(); got != 1 {
+		t.Errorf("audit callCount = %d, want 1 (the emit was attempted before degrading)", got)
 	}
 }
 
@@ -625,5 +654,71 @@ func TestNotebookInheritStep_DoesNotImplementCompensator(t *testing.T) {
 	var x any = step
 	if _, ok := x.(saga.Compensator); ok {
 		t.Errorf("NotebookInheritStep implements saga.Compensator; want it to NOT implement (the inherited file is owned by NotebookProvisionStep.Compensate)")
+	}
+}
+
+// TestNotebookInheritStep_Execute_ConcurrentSagas_SharedInstance pins
+// the cross-saga concurrency invariant (iter-1 critic P2): one shared
+// [NotebookInheritStep] instance MUST handle concurrent Execute calls
+// with distinct [saga.SpawnContext] values without cross-talk. The
+// step holds only immutable configuration; per-call state lives on
+// the goroutine stack and on the per-call context. A future
+// regression that stashes per-saga state on the receiver would
+// surface here as a lookup callCount lower than the goroutine count
+// or as a wrong-wkID Inherit call.
+func TestNotebookInheritStep_Execute_ConcurrentSagas_SharedInstance(t *testing.T) {
+	t.Parallel()
+
+	lookup := &fakePredecessorLookup{returnWk: newPredecessorWatchkeeper()}
+	inheritor := &fakeNotebookInheritor{returnCount: 1}
+	appender := &fakeInheritAuditAppender{returnID: "evt"}
+	step := newInheritStep(t, lookup, inheritor, appender)
+
+	const goroutines = 16
+	wkIDs := make([]uuid.UUID, goroutines)
+	for i := range wkIDs {
+		wkIDs[i] = uuid.New()
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			ctx := saga.WithSpawnContext(context.Background(), newInheritSpawnContext(t, wkIDs[i]))
+			errs[i] = step.Execute(ctx)
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine[%d]: %v", i, err)
+		}
+	}
+	if got := lookup.callCount.Load(); int(got) != goroutines {
+		t.Errorf("lookup callCount = %d, want %d (one per goroutine)", got, goroutines)
+	}
+	if got := inheritor.callCount.Load(); int(got) != goroutines {
+		t.Errorf("inherit callCount = %d, want %d (one per goroutine)", got, goroutines)
+	}
+	if got := appender.callCount.Load(); int(got) != goroutines {
+		t.Errorf("audit callCount = %d, want %d (one per goroutine)", got, goroutines)
+	}
+
+	// Verify each goroutine saw its own wkID on the Inherit
+	// dispatch. The fake records the wkID per call; we assert the
+	// set matches the per-goroutine wkID slice (order-insensitive
+	// since goroutines race).
+	seen := make(map[uuid.UUID]bool, goroutines)
+	for _, c := range inheritor.recordedCalls() {
+		seen[c.watchkeeperID] = true
+	}
+	for i, want := range wkIDs {
+		if !seen[want] {
+			t.Errorf("inheritor missed wkID for goroutine[%d] = %v", i, want)
+		}
 	}
 }
