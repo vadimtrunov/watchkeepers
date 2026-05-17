@@ -63,6 +63,20 @@ var peerReplySchema = json.RawMessage(`{
   "required": ["conversation_id", "body"]
 }`)
 
+// peerCloseSchema is the zod-compatible JSON-schema fragment describing
+// [Tool.Close]'s argument shape. Same minimum-viable-surface posture as
+// [peerAskSchema] / [peerReplySchema]. `summary` is optional (an empty
+// or omitted summary records an empty close_summary column) so the
+// schema does not list it under `required`.
+var peerCloseSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "conversation_id": { "type": "string", "format": "uuid", "description": "k2k conversation id" },
+    "summary": { "type": "string", "description": "one-line operator-facing close summary" }
+  },
+  "required": ["conversation_id"]
+}`)
+
 // BuiltinAskManifest returns the [toolregistry.Manifest] entry for
 // `peer.ask`. Stamped with [BuiltinSourceName], capability
 // [CapabilityAsk], and the [toolregistry.DryRunModeScoped] mode (a
@@ -92,6 +106,24 @@ func BuiltinReplyManifest() toolregistry.Manifest {
 		Version:      "1.0.0",
 		Capabilities: []string{CapabilityReply},
 		Schema:       cloneBytes(peerReplySchema),
+		Source:       BuiltinSourceName,
+		DryRunMode:   toolregistry.DryRunModeScoped,
+	}
+}
+
+// BuiltinCloseManifest returns the [toolregistry.Manifest] entry for
+// `peer.close`. Same shape as [BuiltinAskManifest] / [BuiltinReplyManifest]
+// but with the [CapabilityClose] capability id and the `peer.close`
+// name. Dry-run mode is [toolregistry.DryRunModeScoped] — a dry-run
+// close reroutes the close notification to the lead's DM under M9.4.c.
+// The returned value is a fresh struct per call; defensive deep-copy of
+// the schema RawMessage protects callers that mutate the returned value.
+func BuiltinCloseManifest() toolregistry.Manifest {
+	return toolregistry.Manifest{
+		Name:         "peer.close",
+		Version:      "1.0.0",
+		Capabilities: []string{CapabilityClose},
+		Schema:       cloneBytes(peerCloseSchema),
 		Source:       BuiltinSourceName,
 		DryRunMode:   toolregistry.DryRunModeScoped,
 	}

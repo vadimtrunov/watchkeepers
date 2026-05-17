@@ -124,6 +124,17 @@ type Conversation struct {
 	// archive event. Empty while the conversation is still open;
 	// populated by [Repository.Close].
 	CloseReason string
+
+	// CloseSummary is the operator-supplied free-text one-line summary
+	// the M1.3.b `peer.Close` writes onto the row alongside the lifecycle
+	// archive transition. Distinct from [CloseReason]: the reason is a
+	// stable (often closed-set) code, the summary is a human-readable
+	// one-liner the M1.7 archive-on-summary writer will later cross-link
+	// into the Keep knowledge chunk. Empty while the conversation is
+	// still open AND on auto-archive paths that do not pass a summary
+	// (e.g. an M1.6 escalation timeout). Populated by
+	// [Repository.SetCloseSummary].
+	CloseSummary string
 }
 
 // cloneConversation defensively deep-copies the reference-typed fields

@@ -925,4 +925,64 @@ if ! printf '%s' "${chk_sender}" | grep -qi 'check constraint'; then
 fi
 echo "OK: whitespace-only sender_watchkeeper_id rejected by CHECK"
 
+# M1.3.b — k2k_conversations.close_summary column assertions (migration 031).
+#
+# Block (aa) pins:
+#   * column exists with the expected NOT NULL + default '' shape;
+#   * an open row defaults to '' (matches the in-memory adapter);
+#   * an UPDATE writing a non-empty summary onto an archived row is
+#     accepted under the same per-tenant scope used for the existing
+#     k2k_conversations writes (RLS WITH CHECK preserves the org match).
+
+echo ">> migrate-schema-test: (aa) close_summary column shape + default + write"
+close_summary_shape=$("${PSQL[@]}" -tA <<'SQL'
+SELECT format(
+  '%s|%s|%s',
+  column_name,
+  is_nullable,
+  column_default
+)
+FROM information_schema.columns
+WHERE table_schema = 'watchkeeper'
+  AND table_name = 'k2k_conversations'
+  AND column_name = 'close_summary';
+SQL
+)
+if [[ "${close_summary_shape}" != "close_summary|NO|''::text" ]]; then
+  fail "expected close_summary NOT NULL with default ''; got '${close_summary_shape}'"
+fi
+echo "OK: k2k_conversations.close_summary column has NOT NULL + default ''"
+
+close_summary_default=$("${PSQL[@]}" -tA <<SQL
+BEGIN;
+SET LOCAL ROLE wk_org_role;
+SET LOCAL watchkeeper.org TO '${org_a_id}';
+SELECT close_summary FROM watchkeeper.k2k_conversations WHERE id = '${orgA_conv_id}';
+ROLLBACK;
+SQL
+)
+if [[ "${close_summary_default}" != "" ]]; then
+  fail "expected fresh open row close_summary to default to '' (got '${close_summary_default}')"
+fi
+echo "OK: open row's close_summary defaults to '' on insert"
+
+close_summary_write=$("${PSQL[@]}" -tA <<SQL
+BEGIN;
+SET LOCAL ROLE wk_org_role;
+SET LOCAL watchkeeper.org TO '${org_a_id}';
+UPDATE watchkeeper.k2k_conversations
+SET status = 'archived', closed_at = now()
+WHERE id = '${orgA_conv_id}';
+UPDATE watchkeeper.k2k_conversations
+SET close_summary = 'integration-test summary'
+WHERE id = '${orgA_conv_id}' AND status = 'archived';
+SELECT close_summary FROM watchkeeper.k2k_conversations WHERE id = '${orgA_conv_id}';
+ROLLBACK;
+SQL
+)
+if [[ "${close_summary_write}" != "integration-test summary" ]]; then
+  fail "expected close_summary write to persist 'integration-test summary'; got '${close_summary_write}'"
+fi
+echo "OK: close_summary write on archived row persists under wk_org_role"
+
 echo "ALL schema assertions passed"
