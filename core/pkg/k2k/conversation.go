@@ -112,12 +112,13 @@ type Conversation struct {
 	// Stamped by [Repository.Close].
 	ClosedAt time.Time
 
-	// CorrelationID is the optional opaque id linking this
-	// conversation to an upstream saga / Watch Order. Empty when the
-	// caller did not supply one. Mirrors the
+	// CorrelationID is the optional id linking this conversation to an
+	// upstream saga / Watch Order. `uuid.Nil` when the caller did not
+	// supply one. Type matches the matching SQL column
+	// (`correlation_id uuid NULL`); mirrors the
 	// `keepers_log.correlation_id` partial-index pattern from
 	// `deploy/migrations/003_keepers_log.sql`.
-	CorrelationID string
+	CorrelationID uuid.UUID
 
 	// CloseReason is the operator-supplied free-text rationale for the
 	// archive event. Empty while the conversation is still open;

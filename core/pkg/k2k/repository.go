@@ -58,10 +58,11 @@ type OpenParams struct {
 	// fail-fasts via [ErrInvalidTokenBudget] on a negative value.
 	TokenBudget int64
 
-	// CorrelationID is an optional opaque id linking the conversation
-	// to an upstream saga / Watch Order. Empty string when the caller
-	// has nothing to correlate.
-	CorrelationID string
+	// CorrelationID is an optional id linking the conversation to an
+	// upstream saga / Watch Order. `uuid.Nil` when the caller has
+	// nothing to correlate; type matches the matching SQL column
+	// (`correlation_id uuid NULL`).
+	CorrelationID uuid.UUID
 }
 
 // Repository is the persistence seam for the K2K conversation domain.

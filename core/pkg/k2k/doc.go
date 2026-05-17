@@ -38,22 +38,28 @@
 //     the budget + the running counter and exposes a goroutine-safe
 //     [Repository.IncTokens] for the M1.5 enforcement layer to drive.
 //
-// Concurrency: every [Repository] method is safe for concurrent use
-// across goroutines. The in-memory implementation guards the underlying
-// map with a [sync.RWMutex]; the Postgres implementation relies on the
-// underlying [github.com/jackc/pgx/v5/pgxpool.Pool] for connection
-// safety and on row-level locking via `UPDATE ... RETURNING` for the
-// [Repository.IncTokens] race.
+// Concurrency: every [Repository] method on [MemoryRepository] is
+// safe for concurrent use across goroutines (a [sync.RWMutex] guards
+// the underlying map). [PostgresRepository] is safe for concurrent
+// use IFF its underlying [Querier] is — a [pgx.Tx] is NOT (one
+// goroutine per tx); a [pgxpool.Pool] is. Production wiring is
+// per-request (one tx per inbound HTTP request via
+// [core/internal/keep/db.WithScope]), so the per-tx-not-safe
+// constraint is satisfied implicitly. Row-level locking via
+// `UPDATE ... RETURNING` handles the [Repository.IncTokens] race.
 //
 // Per-org RLS: the matching `029_k2k_conversations.sql` migration
 // installs the M2.1.d FORCE-RLS pattern keyed off the
 // `watchkeeper.org` session GUC (the same GUC the manifest RLS from
-// M3.5.a.3.1 consults). The Postgres impl assumes its caller has
-// already issued `SET LOCAL ROLE` + `SET LOCAL watchkeeper.org`
-// (typically via [core/internal/keep/db.WithScope]) before invoking
-// the repository methods; an unset GUC is fail-closed (zero rows
-// visible, no INSERT permitted) per the migration's `nullif(..., ”)`
-// cast.
+// M3.5.a.3.1 consults). The Postgres impl takes a [Querier]
+// (typically the [pgx.Tx] from
+// [core/internal/keep/db.WithScope]) so its statements run under the
+// caller's `SET LOCAL ROLE` + `SET LOCAL watchkeeper.org` session
+// state. Wiring the adapter over a raw [pgxpool.Pool] would defeat
+// RLS — the pool checks out an arbitrary backend connection per
+// statement and `SET LOCAL` does not survive across connections. An
+// unset GUC is fail-closed (zero rows visible, no INSERT permitted)
+// per the migration's `nullif(..., ”)::uuid` cast.
 //
 // See `docs/ROADMAP-phase2.md` §M1 → M1.1 → M1.1.a for the AC and
 // `docs/lessons/M1.md` for the patterns settled in this PR.

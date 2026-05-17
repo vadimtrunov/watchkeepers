@@ -3,6 +3,7 @@ package k2k_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +33,7 @@ func validParams() k2k.OpenParams {
 		Participants:   []string{"bot-a", "bot-b"},
 		Subject:        "review #42",
 		TokenBudget:    1000,
-		CorrelationID:  "saga-7",
+		CorrelationID:  uuid.New(),
 	}
 }
 
@@ -71,7 +72,7 @@ func TestMemoryRepository_Open_HappyPath(t *testing.T) {
 		t.Errorf("ClosedAt = %v, want zero on fresh open", got.ClosedAt)
 	}
 	if got.CorrelationID != params.CorrelationID {
-		t.Errorf("CorrelationID = %q, want %q", got.CorrelationID, params.CorrelationID)
+		t.Errorf("CorrelationID = %v, want %v", got.CorrelationID, params.CorrelationID)
 	}
 	if len(got.Participants) != 2 {
 		t.Errorf("Participants len = %d, want 2", len(got.Participants))
@@ -455,7 +456,7 @@ func TestMemoryRepository_IncTokens_RejectsNonPositiveDelta(t *testing.T) {
 
 	for _, delta := range []int64{0, -1, -1000} {
 		delta := delta
-		t.Run(strings.TrimSpace(time.Now().String()), func(t *testing.T) {
+		t.Run(fmt.Sprintf("delta=%d", delta), func(t *testing.T) {
 			t.Parallel()
 			r := newRepo(t)
 			row, err := r.Open(context.Background(), validParams())
@@ -614,12 +615,12 @@ func TestStatus_Validate(t *testing.T) {
 	}
 }
 
-// TestNewPostgresRepository_PanicsOnNilPool pins the
+// TestNewPostgresRepository_PanicsOnNilQuerier pins the
 // panic-on-nil-deps discipline established by the saga step
-// constructors (see `core/pkg/spawn/*_step.go`). A nil pool is a
+// constructors (see `core/pkg/spawn/*_step.go`). A nil querier is a
 // programmer bug at wiring time, not a runtime error to thread through
 // error returns.
-func TestNewPostgresRepository_PanicsOnNilPool(t *testing.T) {
+func TestNewPostgresRepository_PanicsOnNilQuerier(t *testing.T) {
 	t.Parallel()
 
 	defer func() {
@@ -631,8 +632,8 @@ func TestNewPostgresRepository_PanicsOnNilPool(t *testing.T) {
 		if !ok {
 			t.Fatalf("panic value = %T, want string", r)
 		}
-		if !strings.Contains(msg, "pool must not be nil") {
-			t.Errorf("panic message = %q, want substring 'pool must not be nil'", msg)
+		if !strings.Contains(msg, "querier must not be nil") {
+			t.Errorf("panic message = %q, want substring 'querier must not be nil'", msg)
 		}
 	}()
 	k2k.NewPostgresRepository(nil, nil)
