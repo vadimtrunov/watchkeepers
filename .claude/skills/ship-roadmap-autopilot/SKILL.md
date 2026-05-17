@@ -173,8 +173,11 @@ If the scan finishes without finding a leaf:
   `phase-complete` (terminal success for this phase; operator retargets
   the next phase via `reset phase<N+1>`).
 - Otherwise the only remaining `[ ]` items are parents without leaf
-  decomposition (no AC bullets, no numbered children) → halt
-  `aggregate-needs-decomposition` with `halt_detail="<first such M-id> at <file>:<line>"`.
+  decomposition (no AC bullets, no numbered children) → jump to **Step 8
+  (Auto-decompose)** with `aggregate_id=<first such M-id>` and
+  `aggregate_detail="picker: <M-id> at docs/ROADMAP-<state.phase>.md:<line>"`.
+  Do NOT halt directly — Step 8 decides whether the decompose succeeds
+  (tick exits non-halting) or fails (tick halts `decompose-failed`).
 
 ### Step 6 — Dispatch ship-Agent
 
@@ -202,22 +205,75 @@ Wait foreground for the JSON return.
    failure → set `halted=true`, `halt_reason="unknown"`,
    `halt_detail="<first 200 chars of dirty answer>"`, append a log
    line, exit.
-2. Append a record to `state.history`:
+2. **Aggregate-needs-decomposition shortcut.** If
+   `status="halted"` AND `halt_reason="aggregate-needs-decomposition"` →
+   jump straight to **Step 8 (Auto-decompose)** with
+   `aggregate_id=<M-id from agent JSON>` and `aggregate_detail=<halt_detail
+   from agent JSON>`. Do NOT yet append history, do NOT yet increment
+   counters, do NOT yet set `state.halted`. Step 8 owns persistence
+   and exit for this branch.
+3. Append a record to `state.history`:
    `{ts: <now ISO8601>, id, status, pr, sha}`.
-3. Update `state.last_item` from the JSON return.
-4. Increment `state.iterations_total`. If `status="shipped"` increment
+4. Update `state.last_item` from the JSON return.
+5. Increment `state.iterations_total`. If `status="shipped"` increment
    `state.iterations_shipped`; if `status="halted"` increment
    `state.iterations_halted`.
-5. Write `.omc/state/ship-autopilot.json` back.
-6. Append one line to `.omc/state/ship-autopilot.log`:
+6. Write `.omc/state/ship-autopilot.json` back.
+7. Append one line to `.omc/state/ship-autopilot.log`:
    - On ship: `<ts>  <id>  shipped   pr=<pr>  sha=<sha>  dur=<duration_sec>s`
    - On halt: `<ts>  <id>  halted    reason=<halt_reason>  detail="<halt_detail>"`
-7. If `status="halted"`:
+8. If `status="halted"`:
    - Set `state.halted=true`, `halt_reason`, `halt_detail`.
    - Print `🛑 ship-autopilot HALTED: <halt_reason> — <halt_detail>`.
    - Exit tick.
-8. Else print `✅ M<id> shipped — PR #<pr> merged as <sha>. Tick done.`
+9. Else print `✅ M<id> shipped — PR #<pr> merged as <sha>. Tick done.`
    and exit. `/loop` will produce another tick.
+
+### Step 8 — Auto-decompose
+
+Entered from Step 5 (picker found only aggregate parents) or Step 7.2
+(ship-Agent returned `aggregate-needs-decomposition`). Inputs:
+`aggregate_id` (M-id WITH leading `M`) and `aggregate_detail` (free-text
+reason).
+
+1. Compute `{id}` (aggregate_id without the leading `M`, e.g. `1.1`),
+   `{family}` (leading M-family token, e.g. `M1`), and
+   `{target_branch}` (= `state.phase`).
+2. Read `references/agent-prompt.md`. Substitute `{id}`, `{family}`,
+   `{target_branch}`, and `{halt_detail}=<aggregate_detail>` into the
+   **auto-decompose writer-Agent prompt** template.
+3. Dispatch the writer-Agent:
+   ```
+   Agent({
+     description: "decompose aggregate <aggregate_id> in ROADMAP-<state.phase>",
+     subagent_type: "general-purpose",
+     model: "opus",
+     prompt: <substituted prompt>
+   })
+   ```
+4. Wait foreground for the JSON return.
+5. Parse JSON. On parse failure or `status="failed"`:
+   - Set `state.halted=true`, `halt_reason="decompose-failed"`,
+     `halt_detail="<decompose-Agent detail OR 'parse failure'>"`.
+   - Increment `state.iterations_total` and `state.iterations_halted`.
+   - Append history: `{ts, id: aggregate_id, status: "halted", pr: null, sha: null}`.
+   - Log line: `<ts>  <aggregate_id>  halted    reason=decompose-failed  detail="<halt_detail>"`.
+   - Write state.
+   - Print `🛑 ship-autopilot HALTED: decompose-failed — <halt_detail>`.
+   - Exit tick.
+6. On `status="ok"`:
+   - Append history: `{ts: <now ISO8601>, id: aggregate_id, status: "decomposed", parts: <parts>, sha: <commit_sha>, leaf_ids: <leaf_ids>}`.
+   - Update `state.last_item`: `{id: aggregate_id, status: "decomposed", pr: null, sha: <commit_sha>, parts: <parts>, leaf_ids: <leaf_ids>}`.
+   - Increment `state.iterations_total` and `state.iterations_decomposed`.
+     Do NOT increment `iterations_halted` (decompose is a successful
+     non-halting outcome).
+   - Keep `state.halted=false`, `halt_reason=null`, `halt_detail=null`
+     (no carry-over from Step 7.2's halted-status JSON; Step 8 success
+     converts it to a decompose outcome).
+   - Write `.omc/state/ship-autopilot.json` back.
+   - Log line: `<ts>  <aggregate_id>  decomposed parts=<n>  sha=<sha>  leaves=<comma-sep leaf_ids>`.
+   - Print `🔀 <aggregate_id> decomposed into <parts> sub-leaves (sha <sha>). Tick done — next tick picks up the new leaves.`
+   - Exit tick.
 
 ## Hard rules
 
@@ -226,9 +282,10 @@ Wait foreground for the JSON return.
 2. **No code authoring in the orchestrator.** Files in `core/`, `harness/`,
    `keep/`, `tools-builtin/`, `bin/`, `scripts/` are touched only inside
    the ship-Agent. The orchestrator only edits `.omc/state/*.json|.log`.
-   The cascade-pass writer-Agent is the only place where the orchestrator's
-   tick edits ROADMAP files — and it does so via a delegated Agent, not
-   directly.
+   ROADMAP edits are delegated to writer-Agents: the cascade-pass
+   writer-Agent (parent flip on all-children-`[x]`) and the auto-decompose
+   writer-Agent (aggregate → letter-suffixed sub-leaves). The orchestrator
+   never edits ROADMAP files directly.
 3. **No interactive tools.** Never call `AskUserQuestion`, never invoke
    `brainstorming`/`brainstorm`/`writing-plans` skills from inside the
    tick. Any unresolvable question becomes a halt with the appropriate

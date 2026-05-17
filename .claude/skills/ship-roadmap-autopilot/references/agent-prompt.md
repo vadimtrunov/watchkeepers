@@ -103,6 +103,91 @@ agent.
 }
 ```
 
+## Auto-decompose writer-Agent prompt
+
+Used when the orchestrator (Step 5) or the ship-Agent (Step 7) flags an
+M-id as `aggregate-needs-decomposition`. The orchestrator substitutes
+`{id}` (M-id without the leading `M`), `{family}` (leading M-family
+token), `{target_branch}` (active integration branch), and
+`{halt_detail}` (the free-text reason from the picker or the ship-Agent
+that triggered the decompose).
+
+The writer-Agent is the ONLY actor allowed to edit ROADMAP files in this
+flow. It must NOT touch `core/`, `harness/`, `keep/`, `tools-builtin/`,
+`bin/`, `scripts/`, or any file outside `docs/ROADMAP-{target_branch}.md`.
+
+```
+You are a single-shot decompose-writer for a roadmap doc-only commit.
+Repository on /Users/user/PhpstormProjects/wathkeepers, currently on
+branch {target_branch}. All edits and the resulting push target
+{target_branch} — never `main`.
+
+The ship-Agent (or the picker) flagged M{id} as
+aggregate-needs-decomposition. Detail:
+{halt_detail}
+
+Your job: read docs/ROADMAP-{target_branch}.md, locate the `[ ]` line
+for M{id}, and replace it with the parent line + 2–5 nested leaf
+sub-items M{id}.a, M{id}.b, M{id}.c, … using alphabetic suffixes
+(matches Phase-1 convention: M2.7.a/b/c/d/e, M2.8.d.a/b — see
+docs/ROADMAP-phase1.md for prior art).
+
+Each leaf must:
+- Project to <1000 LOC and <20 files (ship-Agent's aggregate budget).
+- Be independently shippable as a single squash-merged PR. If a strict
+  ordering dependency exists, encode it by letter (M{id}.b depends on
+  M{id}.a means b's bullet text says "depends on M{id}.a"); the autopilot
+  ships leaves top-down in file order.
+- Embed acceptance criteria inline in the bullet text (no nested AC
+  sub-bullets needed; Phase-1 convention treats the bullet text itself
+  as the AC for the leaf).
+- Be concrete: name the package directories, table names, function
+  signatures, or interfaces that will be touched. The ship-Agent
+  reading this leaf must be able to start without further clarification.
+
+Context to read BEFORE proposing the decomposition:
+- docs/ROADMAP-{target_branch}.md — the full milestone section around
+  M{id} (sibling sub-items, Verification block, Dependencies, etc.).
+- docs/lessons/{family}.md if it exists — prior-art grain for this
+  family; the decomposed leaves should match that grain (≈600–900 LOC,
+  ≈6 files per leaf is a healthy target).
+- docs/ROADMAP-phase1.md around M2.7 / M2.8 / M3.5.a — examples of how
+  Phase-1 decomposed aggregates into letter-suffixed leaves.
+- The relevant package directories named in M{id} (look at what already
+  exists vs. what's net-new), so the proposed scope is anchored in
+  reality.
+
+Then apply the edits via the Edit tool. Use exact-match replacement of
+the existing M{id} line; insert the new leaves indented two spaces under
+the parent line so the picker treats M{id} as a parent and the new
+M{id}.a/b/c… as children.
+
+Commit message (use a HEREDOC):
+
+docs(roadmap): decompose M{id} into <count> sub-leaves
+
+Ship-Agent flagged M{id} as aggregate. Decomposed into <comma-separated
+leaf-ids> per autopilot leaf-grain budget (<1000 LOC / <20 files per
+leaf).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+Push to origin/{target_branch} with `git push origin {target_branch}`.
+
+NEVER touch files outside docs/ROADMAP-{target_branch}.md. NEVER push
+to main. NEVER use --force, --no-verify, or --no-gpg-sign.
+
+Return value: a single JSON object only.
+
+{
+  "status": "ok" | "failed",
+  "commit_sha": "<sha or null>",
+  "parts": <count of sub-leaves added, or 0 on failure>,
+  "leaf_ids": ["M{id}.a", "M{id}.b", ...] | [],
+  "detail": null | "<failure reason, short>"
+}
+```
+
 ## Cascade-pass writer-Agent prompt
 
 Used in the optional cascade step (see `SKILL.md` step 4) when one or

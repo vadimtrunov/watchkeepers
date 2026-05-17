@@ -21,12 +21,13 @@ on the first tick after the upgrade.
   "iterations_total": 0,
   "iterations_shipped": 0,
   "iterations_halted": 0,
+  "iterations_decomposed": 0,
   "last_item": null,
   "history": []
 }
 ```
 
-After at least one shipped iteration:
+After a mix of shipped, halted, and decomposed iterations:
 
 ```json
 {
@@ -36,9 +37,10 @@ After at least one shipped iteration:
   "halt_reason": null,
   "halt_detail": null,
   "started_at": "2026-05-09T22:30:00Z",
-  "iterations_total": 12,
+  "iterations_total": 13,
   "iterations_shipped": 11,
   "iterations_halted": 1,
+  "iterations_decomposed": 1,
   "last_item": {
     "id": "M7.2.b",
     "status": "shipped",
@@ -49,10 +51,27 @@ After at least one shipped iteration:
   },
   "history": [
     {"ts": "2026-05-09T22:18:00Z", "id": "M7.2.b", "status": "shipped", "pr": 120, "sha": "f6aa80c"},
+    {"ts": "2026-05-09T22:02:00Z", "id": "M7.2", "status": "decomposed", "parts": 3, "sha": "ab12cd3", "leaf_ids": ["M7.2.a", "M7.2.b", "M7.2.c"]},
     {"ts": "2026-05-09T21:55:00Z", "id": "M7.2.a", "status": "shipped", "pr": 119, "sha": "f98a96c"}
   ]
 }
 ```
+
+### `iterations_decomposed`
+
+Counts ticks where the auto-decompose writer-Agent successfully replaced
+an aggregate `[ ]` with letter-suffixed sub-leaves. A decompose tick
+increments `iterations_total` AND `iterations_decomposed`. It does NOT
+increment `iterations_shipped` or `iterations_halted`. The next tick
+picks up the freshly-written sub-leaves and ships one of them.
+
+### `last_item.status` values
+
+| Value | Meaning |
+|---|---|
+| `shipped` | ship-Agent merged a PR for this leaf |
+| `halted` | ship-Agent returned a halt reason that did not auto-resolve |
+| `decomposed` | Step 8 writer-Agent replaced this aggregate with sub-leaves; `last_item.pr` and `last_item.duration_sec` are null; `last_item.parts` and `last_item.leaf_ids` are populated |
 
 ### `phase` field
 
@@ -73,7 +92,7 @@ Agent dispatch.
 
 | Reason | When |
 |---|---|
-| `aggregate-needs-decomposition` | Agent inspected the M-id and saw no concrete AC bullets / scope >1000 LOC / >20 files / >1 PR |
+| `aggregate-needs-decomposition` | Agent inspected the M-id and saw no concrete AC bullets / scope >1000 LOC / >20 files / >1 PR. **Not a terminal halt**: triggers Step 8 (auto-decompose). |
 | `phase2-uncertainty` | Agent could not pattern-match an API fork |
 | `build-failed` | `go build/vet/test -race` failed after 1 fix attempt |
 | `review-blocker` | codex/critic blocker not resolved after fallback |
@@ -85,7 +104,8 @@ Agent dispatch.
 | Reason | When |
 |---|---|
 | `phase-complete` | All `[ ]` in `docs/ROADMAP-<state.phase>.md` exhausted (terminal success for the active phase; operator retargets the next phase with `reset phase<N+1>`) |
-| `aggregate-needs-decomposition` | Picker hit a `[ ]` parent without leaf decomposition (also reachable from the agent side; same reason, set by either) |
+| `aggregate-needs-decomposition` | Picker hit a `[ ]` parent without leaf decomposition (also reachable from the agent side; same reason, set by either). **Not a terminal halt**: triggers Step 8 (auto-decompose). |
+| `decompose-failed` | Step 8 writer-Agent returned `status="failed"` or unparseable JSON. Terminal halt; operator inspects detail and either fixes the ROADMAP by hand + `reset`, or files a follow-up. |
 | `dirty-working-tree` | `git status --porcelain` non-empty at tick start |
 | `wrong-branch` | Orchestrator not on `state.phase` branch at tick start |
 | `phase-mismatch` | Arg `phase<N>` differs from persisted `state.phase`; operator must run `reset phase<N>` to retarget |
@@ -100,4 +120,5 @@ Agent dispatch.
 ```
 2026-05-09T22:18Z  M7.2.b  shipped   pr=120  sha=f6aa80c  dur=740s
 2026-05-09T22:30Z  M7.2.c  halted    reason=phase2-uncertainty  detail="resolver vs static for SpawnClaim"
+2026-05-09T22:45Z  M8.1    decomposed parts=4  sha=ab12cd3  leaves=M8.1.a,M8.1.b,M8.1.c,M8.1.d
 ```
