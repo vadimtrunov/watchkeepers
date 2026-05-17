@@ -71,14 +71,24 @@ var ErrSandboxKilled = errors.New("runtime: sandbox killed")
 // Matchable via [errors.Is].
 var ErrSubscriptionClosed = errors.New("runtime: subscription closed")
 
-// ErrEmbedderRequired is returned by [NewToolErrorReflector] when no
-// [llm.EmbeddingProvider] was supplied via [WithEmbedder]. The
-// reflector composes a [notebook.Entry] of category `lesson` and
-// MUST embed it before calling Remember; there is no sane default
-// embedder to fall back to (silently no-op'ing every call would mask
-// the bug). Matches the existing runtime sentinel idioms; matchable
-// via [errors.Is].
+// ErrEmbedderRequired is returned by [NewToolErrorReflector] /
+// [NewToolSuccessReflector] when no [llm.EmbeddingProvider] was
+// supplied via [WithEmbedder] / [WithSuccessEmbedder]. The reflector
+// composes a [notebook.Entry] and MUST embed it before calling
+// Remember; there is no sane default embedder to fall back to
+// (silently no-op'ing every call would mask the bug). Matches the
+// existing runtime sentinel idioms; matchable via [errors.Is].
 var ErrEmbedderRequired = errors.New("runtime: embedder required")
+
+// ErrSamplerRequired is returned by [NewToolSuccessReflector] when no
+// [ReflectionSampler] was supplied via [WithSuccessSampler]. The
+// success reflector consults the sampler on every Reflect call to
+// decide whether to write an `observation` row; without one the
+// default would either reflect every call (defeating the sampling
+// contract) or no calls (silent no-op masking the bug). Surfacing
+// the missing sampler as a constructor error matches the
+// [ErrEmbedderRequired] discipline. Matchable via [errors.Is].
+var ErrSamplerRequired = errors.New("runtime: sampler required")
 
 // ErrAgentNotOpened is returned by [NotebookSupervisor.BootCheck] when
 // the supplied `agentID` does not have a live [notebook.DB] handle in

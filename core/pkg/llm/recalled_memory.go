@@ -13,13 +13,14 @@ import (
 const RecalledMemoryHeader = "# Recalled memory"
 
 // RecalledMemory is a single recalled-memory entry the LLM layer injects into
-// the System prompt. The three fields mirror the most relevant columns of
+// the System prompt. The fields mirror the most relevant columns of
 // [notebook.RecallResult]:
 //
 //   - Subject   ← notebook.RecallResult.Subject   (human-readable label)
 //   - Content   ← notebook.RecallResult.Content   (body text)
 //   - Score     ← caller-computed relevance score in [0, 1]; float32 to match
 //     the precision the notebook's embedding layer produces
+//   - Category  ← notebook.RecallResult.Category  (M7.2 weight policy)
 //
 // RecalledMemory is intentionally a value type so WithRecalledMemory callers
 // can pass it from a stack-allocated slice without the allocator round-trip.
@@ -36,7 +37,20 @@ type RecalledMemory struct {
 
 	// Score is the caller-computed relevance score in [0, 1]. Rendered with
 	// the %g verb so compact values like 0.75 appear without trailing zeros.
+	// The M7.2 category-weight policy ([CategoryAutoInjectionWeights])
+	// multiplies the cosine-distance-derived score by a per-category factor
+	// at projection time so [BuildTurnRequest]'s
+	// [runtime.Manifest.NotebookRelevanceThreshold] filter naturally drops
+	// more observation rows than lesson rows when both kinds match the
+	// query.
 	Score float32
+
+	// Category is the [notebook.RecallResult.Category] passed through
+	// verbatim. Empty when the projection caller did not populate it;
+	// downstream rendering does not use it but the field is exposed so
+	// future tooling (e.g. category-aware highlight in the prompt
+	// rendering) can read it without re-querying the notebook.
+	Category string
 }
 
 // renderRecalledMemoryBlock formats `memories` into the canonical bullet

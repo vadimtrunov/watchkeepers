@@ -93,12 +93,50 @@ const (
 	RecalledMemoryStatusNoMatches = "no_matches"
 )
 
+// CategoryAutoInjectionWeights is the default per-category weight map
+// [recallResultsToMemories] uses to scale the cosine-derived relevance
+// score before [BuildTurnRequest]'s
+// [runtime.Manifest.NotebookRelevanceThreshold] filter runs.
+//
+// Weights live in [0, 1]; a category absent from the map defaults to
+// 1.0 (no down-weighting). The M7.2 policy pins:
+//
+//   - `lesson`        — weight 1.0 (full strength; lessons are the
+//     reactive corrections the auto-reflection cycle emits and they
+//     dominate prompt context when they match).
+//   - `observation`   — weight 0.5 (half strength; observations are
+//     opportunistic success-path reflections sampled 1-in-50, so
+//     their evidence is weaker than a focused lesson — when both
+//     kinds match the same query the lesson should win at the
+//     threshold filter).
+//
+// Other categories default to 1.0 — they are populated by deliberate
+// caller actions ([notebook.DB.Remember] from the toolset's
+// `notebook.remember` action) and do not need down-weighting.
+//
+// The map is exported so callers that build a custom turn pipeline
+// outside [BuildTurnRequest] (e.g. M6 Watchmaster session-aware
+// dispatch) can apply the same policy without re-deriving the
+// numbers.
+var CategoryAutoInjectionWeights = map[string]float32{
+	notebook.CategoryLesson:      1.0,
+	notebook.CategoryObservation: 0.5,
+}
+
 // recallResultsToMemories projects each [notebook.RecallResult] 1:1 to a
-// [RecalledMemory], copying Subject and Content verbatim and projecting the
-// caller-side relevance score. The notebook layer reports cosine
-// `Distance` (in [0, 2], lower is closer); we convert to a [0, 1] relevance
-// score via `1 - Distance/2` and clamp to the valid range so callers see a
-// portable "higher is better" number regardless of the underlying metric.
+// [RecalledMemory], copying Subject, Content, and Category verbatim and
+// projecting the caller-side relevance score. The notebook layer reports
+// cosine `Distance` (in [0, 2], lower is closer); we convert to a [0, 1]
+// relevance score via `1 - Distance/2` and clamp to the valid range so
+// callers see a portable "higher is better" number regardless of the
+// underlying metric.
+//
+// The M7.2 category-weight policy applies the
+// [CategoryAutoInjectionWeights] multiplier to the raw score before the
+// final clamp so [BuildTurnRequest]'s threshold filter sees the weighted
+// score. A category absent from the map uses weight 1.0 (no
+// down-weighting) — the policy default is "weight only the categories
+// that explicitly need scaling".
 //
 // Returns nil when `results` is nil; returns an empty (non-nil) slice when
 // `results` is an empty (non-nil) slice. The renderer tolerates both.
@@ -109,6 +147,11 @@ func recallResultsToMemories(results []notebook.RecallResult) []RecalledMemory {
 	out := make([]RecalledMemory, 0, len(results))
 	for _, r := range results {
 		score := float32(1 - r.Distance/2)
+		// Apply M7.2 per-category auto-injection weight. Absent
+		// categories default to 1.0 (no scaling).
+		if w, ok := CategoryAutoInjectionWeights[r.Category]; ok {
+			score *= w
+		}
 		if score < 0 {
 			score = 0
 		}
@@ -116,9 +159,10 @@ func recallResultsToMemories(results []notebook.RecallResult) []RecalledMemory {
 			score = 1
 		}
 		out = append(out, RecalledMemory{
-			Subject: r.Subject,
-			Content: r.Content,
-			Score:   score,
+			Subject:  r.Subject,
+			Content:  r.Content,
+			Score:    score,
+			Category: r.Category,
 		})
 	}
 	return out
