@@ -66,11 +66,16 @@ Slice 4 grows `harness/src/llm/` by three small modules that the existing
 ```
 harness/src/llm/
   claude-agent-provider.ts          # existing, extended
-  tool-bridge/
-    name-codec.ts                   # runtime-name <-> mcp-name bijection
-    mcp-stub-server.ts              # createSdkMcpServer with throw-stubs
-    interceptor.ts                  # iterator-watching + interrupt
+  tool-bridge-name-codec.ts         # runtime-name <-> mcp-name bijection
+  tool-bridge-mcp-stub-server.ts    # createSdkMcpServer with throw-stubs
+  tool-bridge-interceptor.ts        # iterator-watching + interrupt
 ```
+
+> **Note:** the spec originally proposed a `tool-bridge/` subdirectory. During
+> planning the layout was flattened to match the existing flat conventions of
+> `harness/src/llm/` (siblings: `claude-code-provider.ts`, `fake-provider.ts`,
+> etc.). The three modules keep a shared `tool-bridge-` filename prefix so they
+> still read as a family.
 
 The bridge is **outbound-only** in this slice; inbound handling stays at
 the existing `buildPromptFromMessages`, which still skips `role=tool` with
@@ -274,24 +279,24 @@ diagnostic safety net, not a happy path.
 
 ### 6.1 New unit suites
 
-- **`harness/test/llm/name-codec.test.ts`** — round-trip, collision,
-  multi-dot, no-op, decode of both prefixed and bare names, unknown-name
-  rejection, foreign-server prefix rejection.
-- **`harness/test/llm/mcp-stub-server.test.ts`** — server name is
-  `watchkeeper`, encoded tool names match codec output, every handler
-  throws with the sentinel string, schema conversion handles basic JSON
-  types and degrades to `z.any()` with one warning for unknown.
-- **`harness/test/llm/interceptor.test.ts`** — driven by a fake async
-  iterator. Cases: happy path (no tool use), single tool use, parallel
-  tool use (multiple `tool_use` blocks in one assistant message), name
-  decoding through codec, error-message propagation in assistant frame,
-  stub-escaped race detection, usage fallback when interrupt precedes
-  `result`, `interceptStream` event ordering with `message_stop` and
-  `finishReason: "tool_use"`.
+- **`harness/test/llm-tool-bridge-name-codec.test.ts`** — round-trip,
+  collision, multi-dot, no-op, decode of both prefixed and bare names,
+  unknown-name rejection, foreign-server prefix rejection.
+- **`harness/test/llm-tool-bridge-mcp-stub-server.test.ts`** — server
+  name is `watchkeeper`, encoded tool names match codec output, every
+  handler throws with the sentinel string, schema conversion handles
+  basic JSON types and degrades to `z.any()` with one warning for unknown.
+- **`harness/test/llm-tool-bridge-interceptor.test.ts`** — driven by a
+  fake async iterator. Cases: happy path (no tool use), single tool use,
+  parallel tool use (multiple `tool_use` blocks in one assistant
+  message), name decoding through codec, error-message propagation in
+  assistant frame, stub-escaped race detection, usage fallback when
+  interrupt precedes `result`, `interceptStream` event ordering with
+  `message_stop` and `finishReason: "tool_use"`.
 
 ### 6.2 Extensions to existing suite
 
-`harness/test/llm/claude-agent-provider.test.ts` gains ~4 integration
+`harness/test/llm-claude-agent-provider.test.ts` gains ~4 integration
 cases on the existing `queryImpl` DI seam:
 
 - `complete()` with tools registers `options.mcpServers` keyed by

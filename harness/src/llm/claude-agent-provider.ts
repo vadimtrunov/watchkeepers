@@ -310,16 +310,15 @@ function validateTools(tools: readonly ToolDefinition[] | undefined): void {
 
 function buildPromptFromMessages(messages: readonly Message[]): string {
   // Phase-scope simplification: collapse user + assistant turns into one
-  // prompt string. Multi-turn AsyncIterable<SDKUserMessage> mode lands
-  // when we wire conversation history through the M5.7.c.b stream slice.
-  // System messages lift to options.systemPrompt; tool messages are
-  // skipped at this layer.
+  // prompt string. Inbound role=tool folding is the cross-cutting M5.3.c.c.c
+  // slice (same deferral as claude-code-provider.ts). System messages lift
+  // to options.systemPrompt; tool messages are skipped at this layer.
   const parts: string[] = [];
   for (const m of messages) {
     if (m.role === "user") parts.push(m.content);
     else if (m.role === "assistant") parts.push(`[assistant prior turn] ${m.content}`);
     // role === 'system' is handled in buildOptions
-    // role === 'tool' is M5.7.c.b
+    // role === 'tool' is M5.3.c.c.c
   }
   return parts.join("\n\n");
 }
