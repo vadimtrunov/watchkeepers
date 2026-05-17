@@ -282,7 +282,7 @@ describe("interceptComplete – modelUsage parsing", () => {
     expect(turn.usage.costCents).toBe(1);
     // Per-model breakdown in metadata
     expect(turn.usage.metadata).toBeDefined();
-    expect(turn.usage.metadata?.["model:claude-3-5-sonnet-20241022"]).toBe("42/17/0.000123");
+    expect(turn.usage.metadata?.["model:claude-3-5-sonnet-20241022"]).toBe("42/17/0.000123000");
     // No cache keys when both are 0
     expect(turn.usage.metadata?.cacheReadInputTokens).toBeUndefined();
     expect(turn.usage.metadata?.cacheCreationInputTokens).toBeUndefined();
@@ -314,8 +314,8 @@ describe("interceptComplete – modelUsage parsing", () => {
     expect(turn.usage.outputTokens).toBe(15);
     expect(turn.usage.costCents).toBe(3);
     // Both model keys present in metadata
-    expect(turn.usage.metadata?.["model:claude-3-5-sonnet-20241022"]).toBe("30/10/0.0001");
-    expect(turn.usage.metadata?.["model:claude-3-opus-20240229"]).toBe("20/5/0.0002");
+    expect(turn.usage.metadata?.["model:claude-3-5-sonnet-20241022"]).toBe("30/10/0.000100000");
+    expect(turn.usage.metadata?.["model:claude-3-opus-20240229"]).toBe("20/5/0.000200000");
   });
 
   it("populates cacheReadInputTokens and cacheCreationInputTokens when non-zero", async () => {
@@ -338,7 +338,7 @@ describe("interceptComplete – modelUsage parsing", () => {
     const turn = await interceptComplete(iter, codec, REQUESTED_MODEL);
     expect(turn.usage.metadata?.cacheReadInputTokens).toBe("80");
     expect(turn.usage.metadata?.cacheCreationInputTokens).toBe("15");
-    expect(turn.usage.metadata?.["model:claude-3-5-sonnet-20241022"]).toBe("100/20/0.0005");
+    expect(turn.usage.metadata?.["model:claude-3-5-sonnet-20241022"]).toBe("100/20/0.000500000");
   });
 
   it("falls back to flat usage tokens and no metadata when modelUsage is absent", async () => {
@@ -356,6 +356,29 @@ describe("interceptComplete – modelUsage parsing", () => {
     expect(turn.usage.costCents).toBe(2);
     // No modelUsage → no metadata
     expect(turn.usage.metadata).toBeUndefined();
+  });
+
+  it("formats per-model costUSD as fixed-point decimal even for tiny values", async () => {
+    const codec = buildCodec([]);
+    const { iter } = fakeIter([
+      assistantText("hi"),
+      resultWithModelUsage({
+        modelUsage: {
+          "claude-3-5-haiku-20241022": {
+            inputTokens: 10,
+            outputTokens: 5,
+            costUSD: 1e-7,
+          },
+        },
+        totalCostUsd: 1e-7,
+        stopReason: "end_turn",
+      }),
+    ]);
+    const turn = await interceptComplete(iter, codec, REQUESTED_MODEL);
+    const value = turn.usage.metadata?.["model:claude-3-5-haiku-20241022"];
+    expect(value).toBeDefined();
+    expect(value).not.toMatch(/e/i); // no scientific notation
+    expect(value).toMatch(/^\d+\/\d+\/\d+\.\d+$/); // <int>/<int>/<decimal>
   });
 });
 

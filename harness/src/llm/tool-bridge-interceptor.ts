@@ -362,7 +362,7 @@ function parseResult(msg: unknown, requestedModel: Model): ParsedResult | undefi
         cacheCreationSum += cacheCreate;
         perModelEntries.push([
           `model:${name}`,
-          `${String(inT)}/${String(outT)}/${String(perCost)}`,
+          `${String(inT)}/${String(outT)}/${perCost.toFixed(9)}`,
         ]);
       }
     }
