@@ -598,10 +598,10 @@ func validateNotebookRecallFields(w http.ResponseWriter, body putManifestVersion
 // WriteHeader call per response). The sentinel is package-private —
 // callers of [handlePutManifestVersion] never see it on the wire; the
 // caller-visible signal is the 403 `immutable_core_modified` body.
+// Mirrors the [pgx.ErrNoRows] in-band sentinel precedent the existing
+// error block already recognises.
 //
-// in-band gate signalling; matches the [pgx.ErrNoRows] precedent above.
-//
-//nolint:gochecknoglobals // intentional package-scoped sentinel for
+//nolint:gochecknoglobals // intentional package-scoped sentinel for in-band gate signalling.
 var errImmutableCoreModified = errors.New("immutable_core modified by non-admin write path")
 
 // checkImmutableCoreParity is the M3.2 admin-only-editability gate.
@@ -613,18 +613,23 @@ var errImmutableCoreModified = errors.New("immutable_core modified by non-admin 
 // "Parent row" = the existing manifest_version with the greatest
 // VersionNo for the supplied `manifest_id`, scoped to the caller's
 // organization via the `manifest.organization_id = $claim_org`
-// EXISTS filter. The filter mirrors the
+// JOIN filter. The filter mirrors the
 // [handleInsertWatchkeeper] / [handlePutManifestVersion] cross-tenant
 // rejection precedent (M3.5.a.3.2) and gives the cross-tenant case a
-// deterministic "no parent → blocked" surface even when RLS would have
-// caught the same row.
+// deterministic "no parent → 404 not_found" surface even when RLS
+// would have caught the same row.
 //
-// Comparison semantics: `IS NOT DISTINCT FROM` on the `jsonb` type
-// compares structural value, not raw bytes — key order inside the JSON
-// object does not falsely trigger the gate, and SQL NULL == SQL NULL
-// (the "parent has no immutable_core declared yet AND caller is also
-// omitting it" case round-trips legally). NULL vs non-NULL (in either
-// direction) is a modification and trips the gate.
+// Comparison semantics: the SQL predicate is
+// `mv.immutable_core IS DISTINCT FROM $2::jsonb`. The `jsonb` type
+// compares structural value, not raw bytes — key order inside the
+// JSON object does not falsely trigger the gate. SQL `IS DISTINCT
+// FROM` treats NULL as equal to NULL (returns false), so the
+// "parent has no immutable_core declared yet AND caller is also
+// omitting it" case round-trips legally. NULL vs non-NULL in either
+// direction returns true (distinct) and trips the gate. The candidate
+// is passed through [jsonbOrNil] so an unset / empty
+// `json.RawMessage` round-trips as SQL NULL through the same helper
+// the INSERT uses, keeping the comparison apples-to-apples.
 //
 // Return value:
 //   - (false, nil) — parity matches, caller MAY proceed with INSERT.
@@ -648,12 +653,17 @@ var errImmutableCoreModified = errors.New("immutable_core modified by non-admin 
 // (version_no = N+1) point. A racing caller whose VersionNo == N+1
 // landed first will surface a 23505 unique_violation on the loser's
 // INSERT, mapped to 409 version_conflict. A FOR UPDATE here would
-// deadlock against the same tx's INSERT on shared rows.
+// deadlock against the same tx's INSERT on the same row set under
+// READ COMMITTED.
 //
-// distinct AC (NULL/NULL, NULL/non-NULL, non-NULL/NULL, non-NULL/non-NULL)
-// and splitting obscures the gate's contract.
-//
-//nolint:gocyclo // sequential parity-check branches; each branch is a
+// Transitivity argument: the gate is sufficient under READ COMMITTED
+// isolation without FOR UPDATE because immutable_core invariance is
+// transitive across the version chain. Parent v_N has immutable_core
+// X ⇒ any successful v_{N+1} write also has X (this gate enforces
+// it) ⇒ any v_{N+2} write that reads v_{N+1} sees X regardless of
+// whether the v_{N+1} commit landed before or after the v_{N+2} read.
+// A racing v_{N+1} insert with a different immutable_core would have
+// failed its own parity check; if it landed, X is preserved.
 func checkImmutableCoreParity(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -667,17 +677,16 @@ func checkImmutableCoreParity(
 	// so the gate compares like-for-like.
 	candidateArg := jsonbOrNil(candidate)
 
-	// SELECT the parent row's `immutable_core` and the structural
-	// equality flag in one round-trip. The CTE-style subquery picks the
-	// greatest `version_no` for the manifest (the canonical "latest
-	// parent" the M3.4 history / rollback tools also use); the
-	// `manifest.organization_id` join is the cross-tenant gate. A
+	// SELECT the parent row's structural-equality flag. The ORDER BY
+	// version_no DESC LIMIT 1 picks the canonical "latest parent" the
+	// M3.4 history / rollback tools also use; the
+	// `manifest.organization_id = $3` join is the cross-tenant gate. A
 	// cross-tenant `manifest_id` produces zero rows → pgx.ErrNoRows;
 	// the caller surfaces 404 not_found.
 	//
-	// `IS NOT DISTINCT FROM` returns true when both sides are NULL OR
-	// both sides are equal under jsonb structural comparison. We
-	// negate it for the "blocked" boolean.
+	// `IS DISTINCT FROM` returns false when both sides are NULL OR
+	// both sides are equal under jsonb structural comparison; we map
+	// the boolean directly to `blocked` (no negation needed).
 	const parityQuery = `
 SELECT
     (mv.immutable_core IS DISTINCT FROM $2::jsonb) AS blocked
@@ -787,11 +796,12 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 			//
 			// Mechanical enforcement: any write of a manifest_version
 			// row that is NOT the root (VersionNo > 1) MUST carry an
-			// immutable_core that is byte-identical to the parent row's
-			// immutable_core (canonicalised through pgsql `jsonb` —
-			// `IS NOT DISTINCT FROM` on the jsonb type compares
-			// structural value, not raw bytes, so key reordering inside
-			// the json document does not falsely trigger the gate).
+			// immutable_core that is structurally identical to the
+			// parent row's immutable_core (compared via the postgres
+			// `jsonb IS DISTINCT FROM jsonb` predicate, which compares
+			// structural value rather than raw bytes — key reordering
+			// inside the JSON object does not falsely trigger the
+			// gate).
 			//
 			// Root rows (VersionNo == 1) are exempt — that path is the
 			// admin spawn flow which has no parent to inherit from.
