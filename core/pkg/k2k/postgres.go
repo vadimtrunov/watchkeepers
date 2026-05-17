@@ -363,6 +363,67 @@ WHERE id = $3 AND status = 'open'`
 	return fmt.Errorf("k2k: close: unexpected status %q for id %s", status, id)
 }
 
+// BindSlackChannel implements [Repository.BindSlackChannel]. The
+// conditional UPDATE matches only rows whose `slack_channel_id` is
+// currently NULL AND whose status is 'open', so the bind is atomic at
+// the row level: a duplicate Bind racing with the first one either
+// matches zero rows (and the follow-up probe distinguishes
+// already-bound from already-archived from unknown id) or wins the
+// transition itself.
+//
+// The validator chain (ctx → trimmed id non-empty) runs BEFORE the
+// SQL round-trip so a malformed input fails fast without burning a
+// Postgres call.
+func (r *PostgresRepository) BindSlackChannel(ctx context.Context, id uuid.UUID, slackChannelID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	trimmed := strings.TrimSpace(slackChannelID)
+	if trimmed == "" {
+		return ErrEmptySlackChannelID
+	}
+
+	const updateSQL = `
+UPDATE watchkeeper.k2k_conversations
+SET slack_channel_id = $1
+WHERE id = $2 AND status = 'open' AND slack_channel_id IS NULL`
+
+	tag, err := r.q.Exec(ctx, updateSQL, trimmed, id)
+	if err != nil {
+		return fmt.Errorf("k2k: bind slack channel: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	// Zero rows affected — disambiguate via a follow-up SELECT to
+	// surface the precise sentinel. Mirrors [Close]'s discipline so the
+	// caller can distinguish "unknown id" / "already archived" /
+	// "already bound" without parsing the error chain.
+	const probeSQL = `SELECT status, slack_channel_id FROM watchkeeper.k2k_conversations WHERE id = $1`
+	var (
+		status         string
+		existingChanID *string
+	)
+	if probeErr := r.q.QueryRow(ctx, probeSQL, id).Scan(&status, &existingChanID); probeErr != nil {
+		if errors.Is(probeErr, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: %s", ErrConversationNotFound, id)
+		}
+		return fmt.Errorf("k2k: bind slack channel probe: %w", probeErr)
+	}
+	if status == string(StatusArchived) {
+		return fmt.Errorf("%w: %s", ErrAlreadyArchived, id)
+	}
+	if existingChanID != nil && *existingChanID != "" {
+		return fmt.Errorf("%w: %s", ErrSlackChannelAlreadyBound, id)
+	}
+	// Row exists in 'open' state with NULL channel id but the UPDATE
+	// still matched zero rows. Should not happen under normal
+	// operation; surface as a wrapped error so a future state-machine
+	// addition surfaces loudly.
+	return fmt.Errorf("k2k: bind slack channel: unexpected zero rows for id %s (status=%q)", id, status)
+}
+
 // IncTokens implements [Repository.IncTokens]. The atomic increment
 // via `UPDATE ... SET tokens_used = tokens_used + $1 ...
 // RETURNING tokens_used` composes correctly under concurrent callers

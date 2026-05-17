@@ -29,6 +29,7 @@ var rootSubcommands = map[string]subcommandFunc{
 	"language":         runLanguage,
 	"budget":           runBudget,
 	"approvals":        runApprovals,
+	"channel":          runChannel,
 }
 
 // run is the testable entrypoint. The signature mirrors
@@ -119,6 +120,10 @@ func writeUsage(stdout io.Writer) {
 	fmt.Fprintln(stdout, "Approvals:")
 	fmt.Fprintln(stdout, "  wk approvals {pending|inspect <id>}  (M10.2.c follow-up — exit 3)")
 	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "K2K channels (Phase 2 M1.1.c):")
+	fmt.Fprintln(stdout, "  wk channel reveal --user <slack-user-id> <conversation-id>")
+	fmt.Fprintln(stdout, "                    (looks up slack_channel_id from K2K row; calls Slack conversations.invite)")
+	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Env vars:")
 	fmt.Fprintln(stdout, "  WATCHKEEPER_KEEP_BASE_URL   Keep base URL (e.g. http://keep:8080) — Keep-backed subcommands")
 	fmt.Fprintln(stdout, "  WATCHKEEPER_OPERATOR_TOKEN  bearer token for Keep-backed subcommands")
@@ -126,6 +131,9 @@ func writeUsage(stdout io.Writer) {
 	fmt.Fprintln(stdout, "  WATCHKEEPER_DATA            data root for `wk notebook *` (notebook package — distinct from DATA_DIR)")
 	fmt.Fprintln(stdout, "  WATCHKEEPER_LOCAL_SOURCES   comma-separated allowlist for `tool local-install --source`")
 	fmt.Fprintln(stdout, "  WATCHKEEPER_GITHUB_TOKEN    default token env for `tool share` (override via --token-env)")
+	fmt.Fprintln(stdout, "  WATCHKEEPER_K2K_PG_DSN      Postgres DSN for `wk channel reveal` (M1.1.c)")
+	fmt.Fprintln(stdout, "  WATCHKEEPER_OPERATOR_ORG_ID operator's organization UUID for `wk channel reveal` (M1.1.c)")
+	fmt.Fprintln(stdout, "  WATCHKEEPER_SLACK_BOT_TOKEN bot xoxb-* token for `wk channel reveal` (M1.1.c)")
 }
 
 // notWiredExit prints a uniform "feature not yet wired" diagnostic and

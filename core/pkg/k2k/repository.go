@@ -155,4 +155,31 @@ type Repository interface {
 	// layer can compare against `token_budget` without a follow-up
 	// [Get] round-trip.
 	IncTokens(ctx context.Context, id uuid.UUID, delta int64) (int64, error)
+
+	// BindSlackChannel stamps `slackChannelID` onto an existing open
+	// row. Driven by the M1.1.c lifecycle wiring after a successful
+	// `CreateChannel` call: the K2K Open() flow opens the repository
+	// row (which mints the conversation id), uses that id to derive the
+	// Slack channel name, calls Slack `conversations.create`, then
+	// binds the returned channel id back onto the row before fan-out
+	// invite + return to the caller.
+	//
+	// Resolution order:
+	//   1. ctx.Err — refuses a pre-cancelled ctx.
+	//   2. `slackChannelID` non-empty after trim — [ErrEmptySlackChannelID].
+	//   3. row lookup — miss surfaces [ErrConversationNotFound].
+	//   4. row.Status == [StatusOpen] — [ErrAlreadyArchived]
+	//      otherwise. Binding a Slack channel onto an archived row is a
+	//      programmer bug (the lifecycle layer archives downstream of
+	//      bind, never upstream).
+	//   5. existing row.SlackChannelID empty — re-binding a row that
+	//      already carries a channel id is a programmer bug
+	//      ([ErrSlackChannelAlreadyBound]). The lifecycle layer is the
+	//      sole writer and binds at most once per conversation;
+	//      idempotent recovery on a duplicate-Open lives in the lifecycle
+	//      layer's `CreateChannel` `name_taken` resolution, not here.
+	//
+	// On success the row reflects the supplied channel id and a
+	// subsequent [Get] / [List] returns the bound value.
+	BindSlackChannel(ctx context.Context, id uuid.UUID, slackChannelID string) error
 }

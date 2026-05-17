@@ -638,3 +638,163 @@ func TestNewPostgresRepository_PanicsOnNilQuerier(t *testing.T) {
 	}()
 	k2k.NewPostgresRepository(nil, nil)
 }
+
+// ---------- BindSlackChannel (M1.1.c) ----------
+
+func TestMemoryRepository_BindSlackChannel_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	r := newRepo(t)
+	conv, err := r.Open(context.Background(), validParams())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if conv.SlackChannelID != "" {
+		t.Fatalf("fresh row SlackChannelID = %q, want empty", conv.SlackChannelID)
+	}
+
+	if err := r.BindSlackChannel(context.Background(), conv.ID, "C12345"); err != nil {
+		t.Fatalf("BindSlackChannel: %v", err)
+	}
+
+	got, err := r.Get(context.Background(), conv.ID)
+	if err != nil {
+		t.Fatalf("Get after bind: %v", err)
+	}
+	if got.SlackChannelID != "C12345" {
+		t.Errorf("SlackChannelID = %q, want %q", got.SlackChannelID, "C12345")
+	}
+	if got.Status != k2k.StatusOpen {
+		t.Errorf("Status after bind = %q, want StatusOpen", got.Status)
+	}
+}
+
+func TestMemoryRepository_BindSlackChannel_RefusesCancelledCtx(t *testing.T) {
+	t.Parallel()
+
+	r := newRepo(t)
+	conv, err := r.Open(context.Background(), validParams())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := r.BindSlackChannel(ctx, conv.ID, "C12345"); !errors.Is(err, context.Canceled) {
+		t.Errorf("BindSlackChannel cancelled ctx: err = %v, want context.Canceled", err)
+	}
+}
+
+func TestMemoryRepository_BindSlackChannel_RejectsEmptyChannelID(t *testing.T) {
+	t.Parallel()
+
+	r := newRepo(t)
+	conv, err := r.Open(context.Background(), validParams())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	for _, in := range []string{"", " ", "\t\n  "} {
+		if err := r.BindSlackChannel(context.Background(), conv.ID, in); !errors.Is(err, k2k.ErrEmptySlackChannelID) {
+			t.Errorf("BindSlackChannel(%q): err = %v, want ErrEmptySlackChannelID", in, err)
+		}
+	}
+}
+
+func TestMemoryRepository_BindSlackChannel_UnknownID(t *testing.T) {
+	t.Parallel()
+
+	r := newRepo(t)
+	err := r.BindSlackChannel(context.Background(), uuid.New(), "C12345")
+	if !errors.Is(err, k2k.ErrConversationNotFound) {
+		t.Errorf("BindSlackChannel unknown id: err = %v, want ErrConversationNotFound", err)
+	}
+}
+
+func TestMemoryRepository_BindSlackChannel_RejectsArchivedRow(t *testing.T) {
+	t.Parallel()
+
+	r := newRepo(t)
+	conv, err := r.Open(context.Background(), validParams())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := r.Close(context.Background(), conv.ID, "test"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := r.BindSlackChannel(context.Background(), conv.ID, "C12345"); !errors.Is(err, k2k.ErrAlreadyArchived) {
+		t.Errorf("BindSlackChannel archived row: err = %v, want ErrAlreadyArchived", err)
+	}
+}
+
+func TestMemoryRepository_BindSlackChannel_RejectsDuplicateBind(t *testing.T) {
+	t.Parallel()
+
+	r := newRepo(t)
+	conv, err := r.Open(context.Background(), validParams())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := r.BindSlackChannel(context.Background(), conv.ID, "C12345"); err != nil {
+		t.Fatalf("first BindSlackChannel: %v", err)
+	}
+	if err := r.BindSlackChannel(context.Background(), conv.ID, "C67890"); !errors.Is(err, k2k.ErrSlackChannelAlreadyBound) {
+		t.Errorf("duplicate BindSlackChannel: err = %v, want ErrSlackChannelAlreadyBound", err)
+	}
+
+	got, err := r.Get(context.Background(), conv.ID)
+	if err != nil {
+		t.Fatalf("Get after duplicate bind: %v", err)
+	}
+	if got.SlackChannelID != "C12345" {
+		t.Errorf("post-duplicate SlackChannelID = %q, want unchanged %q", got.SlackChannelID, "C12345")
+	}
+}
+
+func TestMemoryRepository_BindSlackChannel_ConcurrentBinds(t *testing.T) {
+	t.Parallel()
+
+	const goroutines = 16
+	r := newRepo(t)
+	conv, err := r.Open(context.Background(), validParams())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	var (
+		wg           sync.WaitGroup
+		successCount int64
+		successMu    sync.Mutex
+		alreadyCount int64
+		alreadyMu    sync.Mutex
+	)
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			cid := fmt.Sprintf("C%d", i)
+			err := r.BindSlackChannel(context.Background(), conv.ID, cid)
+			switch {
+			case err == nil:
+				successMu.Lock()
+				successCount++
+				successMu.Unlock()
+			case errors.Is(err, k2k.ErrSlackChannelAlreadyBound):
+				alreadyMu.Lock()
+				alreadyCount++
+				alreadyMu.Unlock()
+			default:
+				t.Errorf("unexpected concurrent BindSlackChannel err: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if successCount != 1 {
+		t.Errorf("successCount = %d, want exactly 1 winner", successCount)
+	}
+	if alreadyCount != goroutines-1 {
+		t.Errorf("alreadyCount = %d, want %d losers", alreadyCount, goroutines-1)
+	}
+}
