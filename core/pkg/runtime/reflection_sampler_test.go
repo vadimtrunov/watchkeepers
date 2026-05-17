@@ -176,3 +176,71 @@ func TestSamplerFunc_DispatchesToFunc(t *testing.T) {
 			gotAgent, gotTool, gotCallID)
 	}
 }
+
+// TestDeterministicSampler_EmptyCallID_PreservesRate verifies the
+// M7.2 iter-1 review fix #1: a caller that omits MetadataKeyToolCallID
+// (empty toolCallID) still samples at ≈1-in-N because the sampler
+// folds an atomic counter into the hash input. Without the fallback
+// the same (agentID, toolName, "") tuple would collapse to a single
+// FNV bucket — every call true OR every call false.
+//
+// Across 200 trials at rate 1-in-50 the expected count is ≈4; we
+// allow [0, 12] for FNV variance. The pre-fix code would yield
+// exactly 0 or exactly 200 (degenerate).
+func TestDeterministicSampler_EmptyCallID_PreservesRate(t *testing.T) {
+	t.Parallel()
+	s := runtime.NewDeterministicSampler(runtime.DefaultSuccessSampleRate)
+	hits := 0
+	for i := 0; i < 200; i++ {
+		if s.Sample("agent-X", "tool-Y", "") {
+			hits++
+		}
+	}
+	if hits == 0 || hits == 200 {
+		t.Fatalf("empty-callID fallback degenerate: hits=%d/200 (must be neither 0 nor 200)", hits)
+	}
+	if hits > 12 {
+		t.Errorf("empty-callID hit count = %d, want <= 12 (1-in-50 over 200 trials)", hits)
+	}
+}
+
+// TestDeterministicSampler_EmptyCallID_LosesRetryImmunity verifies the
+// documented trade-off: a retry of the same empty-id call may flip
+// its decision because the per-sampler counter advances. The test
+// asserts the counter ACTUALLY advances (two same-tuple Sample calls
+// produce at least one different decision across a moderate window),
+// pinning the fallback contract.
+func TestDeterministicSampler_EmptyCallID_LosesRetryImmunity(t *testing.T) {
+	t.Parallel()
+	s := runtime.NewDeterministicSampler(runtime.DefaultSuccessSampleRate)
+	// 200 trials is enough that ≥1 will sample true (≈4 expected)
+	// while another ≥1 samples false; the test verifies the decision
+	// stream is not constant.
+	first := s.Sample("agent-X", "tool-Y", "")
+	flipped := false
+	for i := 0; i < 200; i++ {
+		if s.Sample("agent-X", "tool-Y", "") != first {
+			flipped = true
+			break
+		}
+	}
+	if !flipped {
+		t.Error("empty-callID decision never flipped across 200 retries; counter not advancing")
+	}
+}
+
+// TestDeterministicSampler_NonEmptyCallID_StillRetryImmune verifies
+// the iter-1 fix did NOT regress the original retry-immunity
+// contract: a NON-empty callID still hashes deterministically (no
+// counter folding) so retries of the same tuple yield the same
+// decision.
+func TestDeterministicSampler_NonEmptyCallID_StillRetryImmune(t *testing.T) {
+	t.Parallel()
+	s := runtime.NewDeterministicSampler(runtime.DefaultSuccessSampleRate)
+	first := s.Sample("agent-X", "tool-Y", "call-id-1")
+	for i := 0; i < 100; i++ {
+		if got := s.Sample("agent-X", "tool-Y", "call-id-1"); got != first {
+			t.Fatalf("retry #%d flipped: first=%v, retry=%v", i, first, got)
+		}
+	}
+}

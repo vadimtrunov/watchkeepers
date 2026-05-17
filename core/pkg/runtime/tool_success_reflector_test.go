@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,16 +81,41 @@ func TestNewToolSuccessReflector_MissingEmbedder_ReturnsSentinel(t *testing.T) {
 	}
 }
 
-// TestNewToolSuccessReflector_MissingSampler_ReturnsSentinel verifies
-// [ErrSamplerRequired] surfaces when [WithSuccessSampler] is omitted.
-func TestNewToolSuccessReflector_MissingSampler_ReturnsSentinel(t *testing.T) {
+// TestNewToolSuccessReflector_MissingSampler_DefaultsTo1in50 verifies
+// the M7.2 iter-1 review fix: when [WithSuccessSampler] is omitted
+// the constructor wires a [NewDeterministicSampler] at the default
+// 1-in-50 rate so the reflector matches the roadmap-pinned contract
+// out of the box. Drives 200 Reflect calls (same agent/tool, varying
+// call ids) against the default sampler and asserts an observation
+// row count consistent with the 1-in-50 rate (small variance allowed
+// for FNV distribution).
+func TestNewToolSuccessReflector_MissingSampler_DefaultsTo1in50(t *testing.T) {
 	db := freshReflectorDB(t)
-	_, err := runtime.NewToolSuccessReflector(
+	r, err := runtime.NewToolSuccessReflector(
 		db,
 		runtime.WithSuccessEmbedder(llm.NewFakeEmbeddingProvider()),
 	)
-	if !errors.Is(err, runtime.ErrSamplerRequired) {
-		t.Errorf("err = %v, want ErrSamplerRequired", err)
+	if err != nil {
+		t.Fatalf("NewToolSuccessReflector with default sampler: %v", err)
+	}
+	const trials = 200
+	for i := 0; i < trials; i++ {
+		if err := r.Reflect(
+			context.Background(),
+			reflectorAgentID,
+			"tool",
+			"v1",
+			"call-"+strconv.Itoa(i),
+		); err != nil {
+			t.Fatalf("Reflect #%d: %v", i, err)
+		}
+	}
+	obs := recallAllObservations(t, db, time.Now().Add(1*time.Hour))
+	// Expected ≈ 200/50 = 4; allow [0, 12] for FNV variance + the
+	// recall TopK clamp (100). 12 is loose enough not to flake on
+	// rare bursts.
+	if len(obs) > 12 {
+		t.Errorf("observation count = %d after 200 default-sampler trials; want <= 12", len(obs))
 	}
 }
 

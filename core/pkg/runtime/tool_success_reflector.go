@@ -132,8 +132,7 @@ func WithSuccessReflectorLogger(l *slog.Logger) ToolSuccessReflectorOption {
 
 // NewToolSuccessReflector constructs a [ToolSuccessReflector] backed
 // by the supplied [Rememberer] (typically `*notebook.DB`). Returns
-// [ErrEmbedderRequired] when [WithSuccessEmbedder] is omitted and
-// [ErrSamplerRequired] when [WithSuccessSampler] is omitted.
+// [ErrEmbedderRequired] when [WithSuccessEmbedder] is omitted.
 //
 // `rememberer` MUST be non-nil; passing a nil rememberer is a
 // programmer error and panics with a clear message — matches the
@@ -142,9 +141,15 @@ func WithSuccessReflectorLogger(l *slog.Logger) ToolSuccessReflectorOption {
 // Defaults applied by the constructor:
 //   - clock      = [time.Now]
 //   - coolingOff = [DefaultSuccessCoolingOff] (= 0)
+//   - sampler    = [NewDeterministicSampler]([DefaultSuccessSampleRate])
 //   - logger     = [slog.Default]
 //
-// Supplied options override them.
+// Supplied options override them. The default sampler delivers the
+// roadmap-pinned 1-in-50 contract out of the box (M7.2 iter-1
+// review finding #3); callers that want a different rate (or
+// sampling disabled) supply [WithSuccessSampler] explicitly. The
+// only required option is the embedder because there is no sane
+// default to pick.
 func NewToolSuccessReflector(rememberer Rememberer, opts ...ToolSuccessReflectorOption) (*ToolSuccessReflector, error) {
 	if rememberer == nil {
 		panic("runtime: NewToolSuccessReflector: rememberer must not be nil")
@@ -153,6 +158,7 @@ func NewToolSuccessReflector(rememberer Rememberer, opts ...ToolSuccessReflector
 		rememberer: rememberer,
 		clock:      time.Now,
 		coolingOff: DefaultSuccessCoolingOff,
+		sampler:    NewDeterministicSampler(DefaultSuccessSampleRate),
 		logger:     slog.Default(),
 	}
 	for _, opt := range opts {
@@ -160,9 +166,6 @@ func NewToolSuccessReflector(rememberer Rememberer, opts ...ToolSuccessReflector
 	}
 	if r.embedder == nil {
 		return nil, ErrEmbedderRequired
-	}
-	if r.sampler == nil {
-		return nil, ErrSamplerRequired
 	}
 	return r, nil
 }

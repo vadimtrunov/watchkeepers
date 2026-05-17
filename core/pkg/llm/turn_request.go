@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/notebook"
@@ -118,6 +119,29 @@ const (
 // outside [BuildTurnRequest] (e.g. M6 Watchmaster session-aware
 // dispatch) can apply the same policy without re-deriving the
 // numbers.
+// RecallOverFetchFactor is the multiplier [resolveRecalledMemory]
+// applies to [runtime.Manifest.NotebookTopK] when querying the
+// notebook. The over-fetch widens the candidate pool so the M7.2
+// per-category auto-injection weight (see
+// [CategoryAutoInjectionWeights]) can re-rank the candidates BEFORE
+// the final TopK trim — without over-fetch a slightly closer
+// observation could crowd out a more distant lesson on the raw
+// cosine score, and the post-recall weight would only see the
+// degenerate post-trim set (M7.2 iter-1 review finding #2).
+//
+// Pinned at 4: the notebook layer clamps TopK at 100, and a typical
+// production manifest carries NotebookTopK in [5, 20], so 4× gives
+// a 20–80 row candidate window — plenty of headroom for the policy
+// to discriminate, well within the SQL cost ceiling.
+const RecallOverFetchFactor = 4
+
+// recallMaxTopK is the upper bound on the over-fetched TopK. Mirrors
+// the notebook layer's private `maxTopK = 100`; the notebook silently
+// clamps higher values so this re-declaration just lets the projection
+// caller avoid a wasted round-trip when the manifest's K times the
+// over-fetch factor exceeds the storage ceiling.
+const recallMaxTopK = 100
+
 var CategoryAutoInjectionWeights = map[string]float32{
 	notebook.CategoryLesson:      1.0,
 	notebook.CategoryObservation: 0.5,
@@ -352,9 +376,23 @@ func resolveRecalledMemory(
 		}
 	}
 
+	// M7.2 iter-1 review finding #2: over-fetch the recall so the
+	// per-category weight in [recallResultsToMemories] participates in
+	// candidate selection — without this the SQL layer's raw cosine
+	// distance picks the TopK rows BEFORE the weight applies, and a
+	// slightly closer observation can crowd out a more distant lesson.
+	fetchK := manifest.NotebookTopK * RecallOverFetchFactor
+	if fetchK > recallMaxTopK {
+		fetchK = recallMaxTopK
+	}
+	if fetchK < manifest.NotebookTopK {
+		// Defensive: integer overflow / hand-tuned manifest with K
+		// already at the ceiling. Never under-fetch.
+		fetchK = manifest.NotebookTopK
+	}
 	recallQuery := notebook.RecallQuery{
 		Embedding: vec,
-		TopK:      manifest.NotebookTopK,
+		TopK:      fetchK,
 	}
 	results, err := db.Recall(ctx, recallQuery)
 	if err != nil {
@@ -364,13 +402,15 @@ func resolveRecalledMemory(
 		}
 	}
 
-	// Filter counts are computed once for any path where a recall
-	// executed (success or empty results). The seam allows tests to
-	// inject a sentinel failure; production resolves to
-	// [(*notebook.DB).RecallFilterCounts]. Errors are best-effort: log
-	// nothing (no logger threaded through this layer) and leave the
-	// counts at zero so the metadata keys stay absent.
-	coolingOff, needsReview, _ := recallFilterCountsFn(ctx, db, recallQuery)
+	// Filter counts share the (vector, predicates) but NOT the TopK
+	// — the count helper runs a `SELECT COUNT(*)` whose result is
+	// independent of K. Pass the original manifest K so a future
+	// change to the count semantics does not over-count.
+	countsQuery := notebook.RecallQuery{
+		Embedding: vec,
+		TopK:      manifest.NotebookTopK,
+	}
+	coolingOff, needsReview, _ := recallFilterCountsFn(ctx, db, countsQuery)
 
 	if len(results) == 0 {
 		return recalledMemoryResolution{
@@ -381,6 +421,20 @@ func resolveRecalledMemory(
 	}
 
 	memories := recallResultsToMemories(results)
+
+	// Re-rank by the weighted Score (descending) so the projection
+	// order reflects the M7.2 policy, not the raw cosine distance.
+	// Stable sort preserves the within-equal-score order so two
+	// equally-weighted rows keep their distance ordering.
+	sort.SliceStable(memories, func(i, j int) bool {
+		return memories[i].Score > memories[j].Score
+	})
+
+	// Trim back to the manifest's NotebookTopK after re-rank so a
+	// caller asking for K=5 sees 5 (not the over-fetched 20).
+	if len(memories) > manifest.NotebookTopK {
+		memories = memories[:manifest.NotebookTopK]
+	}
 
 	// Post-filter by relevance threshold. Threshold == 0 is a no-op (every
 	// Score is >= 0). Negative thresholds are also no-ops by the same math.

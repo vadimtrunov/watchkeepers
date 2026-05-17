@@ -80,14 +80,15 @@ var ErrSubscriptionClosed = errors.New("runtime: subscription closed")
 // existing runtime sentinel idioms; matchable via [errors.Is].
 var ErrEmbedderRequired = errors.New("runtime: embedder required")
 
-// ErrSamplerRequired is returned by [NewToolSuccessReflector] when no
-// [ReflectionSampler] was supplied via [WithSuccessSampler]. The
-// success reflector consults the sampler on every Reflect call to
-// decide whether to write an `observation` row; without one the
-// default would either reflect every call (defeating the sampling
-// contract) or no calls (silent no-op masking the bug). Surfacing
-// the missing sampler as a constructor error matches the
-// [ErrEmbedderRequired] discipline. Matchable via [errors.Is].
+// ErrSamplerRequired is reserved for future use by
+// [NewToolSuccessReflector] when a sampler contract is broken in a
+// way the constructor cannot recover from. The M7.2 iter-1 review
+// removed the original construction-time check: the constructor now
+// applies [NewDeterministicSampler]([DefaultSuccessSampleRate]) by
+// default so omitting [WithSuccessSampler] is no longer an error.
+// The sentinel is preserved (rather than deleted) so downstream code
+// pinning it via [errors.Is] does not break. Matchable via
+// [errors.Is].
 var ErrSamplerRequired = errors.New("runtime: sampler required")
 
 // ErrAgentNotOpened is returned by [NotebookSupervisor.BootCheck] when

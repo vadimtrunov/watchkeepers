@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"hash/fnv"
+	"strconv"
+	"sync/atomic"
 )
 
 // DefaultSuccessSampleRate is the default 1-in-N rate the
@@ -73,10 +75,24 @@ func (f SamplerFunc) Sample(agentID, toolName, toolCallID string) bool {
 // would dominate the dispatch cost without buying any property the
 // 1-in-50 sample needs.
 //
-// Concurrency: safe — the struct holds only immutable configuration
-// after [NewDeterministicSampler] returns.
+// Concurrency: safe for concurrent use. The struct holds an
+// immutable rate and an atomic counter used as fallback entropy
+// when a caller omits the per-call id ([MetadataKeyToolCallID]).
+// The counter advances on every Sample call where callID is empty
+// so the M7.2 1-in-50 rate is preserved even for callers that do
+// not populate the metadata key; the trade-off is that empty-id
+// callers lose the retry-immunity contract documented on the
+// interface. See [DeterministicSampler.Sample] for details.
 type DeterministicSampler struct {
 	rate int
+	// emptyIDCounter is incremented per [Sample] call whose
+	// toolCallID is empty; the post-increment value is folded
+	// into the hash so each such call lands in a fresh bucket
+	// and the configured rate is preserved (M7.2 iter-1 review
+	// finding #1). Atomic so concurrent dispatch (the wiring's
+	// 16-goroutine test in the M5.6.b harness shape) is race-
+	// free without locking.
+	emptyIDCounter atomic.Uint64
 }
 
 // NewDeterministicSampler constructs a [DeterministicSampler] with
@@ -96,7 +112,18 @@ func NewDeterministicSampler(rate int) *DeterministicSampler {
 // equals 0. The `\x00` separators prevent ambiguous key collisions
 // across the three fields (e.g. agentID="a", toolName="bc" vs
 // agentID="ab", toolName="c"). When rate is 0 the method short-
-// circuits to false — sampling is disabled.
+// circuits to false — sampling is disabled. When rate is 1 every
+// call samples without touching FNV.
+//
+// Empty-toolCallID fallback (M7.2 iter-1 review finding #1): when
+// `toolCallID == ""` the sampler appends a per-instance atomic
+// counter (post-increment) to the hash input so each successive
+// call lands in a fresh bucket. This preserves the configured rate
+// (a tool/agent pair without a per-call id still samples ≈1-in-N)
+// at the cost of the retry-immunity contract: a retry of the same
+// empty-id call hashes to a NEW counter slot and may flip its
+// sample decision. Callers who need retry-immunity MUST populate
+// [MetadataKeyToolCallID].
 //
 // The method allocates a single FNV-64 hasher per call (no internal
 // buffer); benchmarks at the M7.2 cycle show <100 ns per call on
@@ -114,7 +141,16 @@ func (s *DeterministicSampler) Sample(agentID, toolName, toolCallID string) bool
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(toolName))
 	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(toolCallID))
+	if toolCallID == "" {
+		// Empty-id fallback: advance the per-sampler counter and
+		// fold its decimal representation into the hash input.
+		// strconv.AppendUint avoids the allocation of strconv.FormatUint.
+		n := s.emptyIDCounter.Add(1)
+		var buf [20]byte // max uint64 base-10 digits
+		_, _ = h.Write(strconv.AppendUint(buf[:0], n, 10))
+	} else {
+		_, _ = h.Write([]byte(toolCallID))
+	}
 	return h.Sum64()%uint64(s.rate) == 0
 }
 
