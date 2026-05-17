@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -674,5 +675,154 @@ func handleListWatchkeepers(r scopedRunner) http.Handler {
 		}
 
 		writeJSON(w, http.StatusOK, listWatchkeepersResponse{Items: out, NextCursor: nil})
+	})
+}
+
+// -----------------------------------------------------------------------
+// GET /v1/watchkeepers/latest-retired-by-role — handleGetLatestRetiredByRole
+// -----------------------------------------------------------------------
+
+// handleGetLatestRetiredByRole serves
+//
+//	GET /v1/watchkeepers/latest-retired-by-role?role_id=<role>
+//
+// returning the freshest `retired_at IS NOT NULL AND archive_uri IS NOT NULL`
+// watchkeeper row whose `role_id` matches the query parameter, scoped to
+// the caller's tenant. Backs the M7.1 inheritance saga
+// (`NotebookInheritStep`, M7.1.c): when a fresh watchkeeper spawns
+// carrying a `role_id`, the saga looks up its most recent retired peer
+// and seeds the new notebook from the predecessor's archive.
+//
+// Cross-tenant posture: the watchkeeper.watchkeeper table carries no
+// `organization_id` column of its own (see migration 002 — tenancy
+// flows through `lead_human_id → human.organization_id`). The SELECT
+// JOINs `watchkeeper.human` and filters on `h.organization_id =
+// $claim_org`, matching the M3.5.a.2 JOIN-on-human pattern established
+// by `handleUpdateWatchkeeperStatus`. A cross-tenant role match
+// produces zero rows → 404 not_found (NOT 403): the predecessor row
+// EXISTS in the database but is INVISIBLE to the caller's tenant, so
+// the indistinguishable-from-absent surface is the deliberate
+// choice — leaking 403-vs-404 here would reveal "a role with this id
+// exists in some OTHER org". Mirrors the contract on
+// `handleGetWatchkeeper`'s cross-tenant case after RLS hardening lands.
+//
+// Legacy claims (empty `claim.OrganizationID` — the pre-M3.5.a.1 wire
+// shape) are rejected up front with 403 organization_required before
+// `WithScope` opens any transaction. The 403-vs-404 split is the
+// reverse of the cross-tenant case: a legacy token signals a
+// misconfigured caller (rolling-deploy compat), not an attacker
+// probing for row existence, so the deterministic 403 is more useful
+// than a misleading 404.
+//
+// Index usage: the SELECT's WHERE clause matches the partial composite
+// index `idx_watchkeeper_role_id_retired` introduced by migration
+// `032_watchkeepers_role_id.sql` (M7.1.a, after the iter-1 follow-up
+// in #164): `(role_id, retired_at DESC) WHERE retired_at IS NOT NULL
+// AND archive_uri IS NOT NULL AND role_id IS NOT NULL`. The query
+// repeats the `role_id IS NOT NULL` predicate explicitly (in
+// addition to the `role_id = $1` equality) so the planner picks the
+// partial index without relying on its implication-detection logic
+// (`a = $1` ⇒ `a IS NOT NULL`) — explicit predicate alignment with
+// `predicate_implied_by` keeps the index usable across PG versions
+// and prepared-statement plan caching. The ORDER BY matches the
+// index's DESC sort so the planner can satisfy the LIMIT 1 with an
+// index-only scan against the retired-with-archive-and-non-null-
+// role subset.
+//
+// Audit / PII discipline: this handler is read-only and emits no
+// `keeperslog.` events. The M1.4 audit subscriber and the M7.1.c
+// `notebook_inherited` event own the inheritance observation surface.
+// The handler echoes the request's role_id back to the caller via the
+// row's `RoleID` field only — no claim subject, no internal tenant id,
+// no token fragments cross the response envelope.
+func handleGetLatestRetiredByRole(r scopedRunner) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		claim, ok := ClaimFromContext(req.Context())
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		// M3.5.a.2: legacy claims (no org) cannot pin tenancy and are
+		// rejected. Mirrors handleUpdateWatchkeeperStatus /
+		// handleSetWatchkeeperLead / handleInsertWatchkeeper. Fires
+		// before WithScope so a malicious legacy token never opens a
+		// tx.
+		if claim.OrganizationID == "" {
+			writeError(w, http.StatusForbidden, "organization_required")
+			return
+		}
+
+		// Reject both empty and whitespace-only role_id at the seam
+		// closest to the caller. Whitespace-only would otherwise hit
+		// the SQL filter `w.role_id = $1` with a value no row carries,
+		// return 404 → keepclient.ErrNoPredecessor on the client side,
+		// and silently disable inheritance on the M7.1.c saga step.
+		// Mirrors the same `strings.TrimSpace` gate in
+		// parseInsertWatchkeeperRequest. iter-1 codex finding (P2 /
+		// Major).
+		roleID := req.URL.Query().Get("role_id")
+		if roleID == "" || strings.TrimSpace(roleID) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+
+		var out watchkeeperRow
+		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
+			// JOIN-through-human org filter (M3.5.a.2 pattern): the
+			// `watchkeeper.watchkeeper` table has no
+			// `organization_id` column; tenancy flows through
+			// `lead_human_id → human.organization_id`. A
+			// cross-tenant caller's SELECT returns zero rows and the
+			// handler emits 404 not_found (the predecessor row
+			// EXISTS but is invisible to the caller's tenant).
+			//
+			// Index plan: the WHERE filters on `role_id`, the
+			// `retired_at IS NOT NULL` predicate, AND
+			// `archive_uri IS NOT NULL` matches the partial index
+			// `idx_watchkeeper_role_id_retired` introduced by
+			// migration 032. The ORDER BY retired_at DESC matches
+			// the index's sort key so the planner can satisfy
+			// LIMIT 1 with an index-only seek on the retired-with-
+			// archive subset (orders-of-magnitude smaller than the
+			// full table on a healthy deployment).
+			//
+			// Field projection mirrors handleGetWatchkeeper's Scan
+			// list — the wire shape of `Watchkeeper` on the
+			// keepclient side is the single source of truth for
+			// what an inheritance lookup needs (lead_human_id +
+			// active_manifest_version_id are surfaced for the
+			// M7.1.c saga step's downstream consumers).
+			return tx.QueryRow(ctx, `
+                SELECT w.id, w.manifest_id, w.lead_human_id,
+                       w.active_manifest_version_id, w.status,
+                       w.spawned_at, w.retired_at, w.archive_uri,
+                       w.role_id, w.created_at
+                FROM watchkeeper.watchkeeper AS w
+                JOIN watchkeeper.human AS h ON h.id = w.lead_human_id
+                WHERE w.role_id = $1
+                  AND w.role_id IS NOT NULL
+                  AND h.organization_id = $2
+                  AND w.retired_at IS NOT NULL
+                  AND w.archive_uri IS NOT NULL
+                ORDER BY w.retired_at DESC
+                LIMIT 1
+            `, roleID, claim.OrganizationID).Scan(
+				&out.ID, &out.ManifestID, &out.LeadHumanID,
+				&out.ActiveManifestVersionID, &out.Status,
+				&out.SpawnedAt, &out.RetiredAt, &out.ArchiveURI,
+				&out.RoleID, &out.CreatedAt,
+			)
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "not_found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "latest_retired_by_role_failed")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, out)
 	})
 }

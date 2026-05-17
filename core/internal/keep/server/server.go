@@ -106,6 +106,7 @@ func NewRouterWithMetrics(v auth.Verifier, pool *pgxpool.Pool, reg *publish.Regi
 		mux.Handle("POST /v1/watchkeepers", instrument("/v1/watchkeepers", authed(handleInsertWatchkeeper(runner))))
 		mux.Handle("PATCH /v1/watchkeepers/{id}/status", instrument("/v1/watchkeepers/{id}/status", authed(handleUpdateWatchkeeperStatus(runner))))
 		mux.Handle("PATCH /v1/watchkeepers/{id}/lead", instrument("/v1/watchkeepers/{id}/lead", authed(handleSetWatchkeeperLead(runner))))
+		mux.Handle("GET /v1/watchkeepers/latest-retired-by-role", instrument("/v1/watchkeepers/latest-retired-by-role", authed(handleGetLatestRetiredByRole(runner))))
 		mux.Handle("GET /v1/watchkeepers/{id}", instrument("/v1/watchkeepers/{id}", authed(handleGetWatchkeeper(runner))))
 		mux.Handle("GET /v1/watchkeepers", instrument("/v1/watchkeepers", authed(handleListWatchkeepers(runner))))
 		mux.Handle("GET /v1/peers", instrument("/v1/peers", authed(handleListPeers(runner))))

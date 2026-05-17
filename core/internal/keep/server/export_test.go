@@ -125,6 +125,7 @@ func NewRouterWithRunner(v auth.Verifier, runner *FakeScopedRunner) http.Handler
 		mux.Handle("POST /v1/watchkeepers", authed(handleInsertWatchkeeper(runner)))
 		mux.Handle("PATCH /v1/watchkeepers/{id}/status", authed(handleUpdateWatchkeeperStatus(runner)))
 		mux.Handle("PATCH /v1/watchkeepers/{id}/lead", authed(handleSetWatchkeeperLead(runner)))
+		mux.Handle("GET /v1/watchkeepers/latest-retired-by-role", authed(handleGetLatestRetiredByRole(runner)))
 		mux.Handle("GET /v1/watchkeepers/{id}", authed(handleGetWatchkeeper(runner)))
 		mux.Handle("GET /v1/watchkeepers", authed(handleListWatchkeepers(runner)))
 		mux.Handle("GET /v1/peers", authed(handleListPeers(runner)))
