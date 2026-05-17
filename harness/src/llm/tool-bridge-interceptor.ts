@@ -133,50 +133,38 @@ export async function interceptStream(
         }
       }
 
-      // Full assistant snapshot. The SDK emits this before invoking tool
-      // handlers, so this is our cue that the assistant turn is finished;
-      // downstream SDK builds may or may not also emit a result message.
-      // Capture the tool_use blocks for the eventual message_stop event.
-      const parsedAssistant = parseAssistantSnapshot(msg, codec);
-      if (parsedAssistant !== undefined && parsedAssistant.length > 0) {
-        toolUseSnapshot = parsedAssistant;
-      }
-
-      // Result message → final stop event.
+      // Result message → final stop event, with usage. This branch is
+      // checked BEFORE the assistant-snapshot branch so that on SDK builds
+      // that emit both, the result's usage is never masked.
       const result = parseResult(msg, requestedModel);
       if (result !== undefined) {
         const finishReason: FinishReason =
           toolUseSnapshot.length > 0 ? "tool_use" : result.finishReason;
-        const stopEvent: StreamEvent =
-          result.usage !== undefined
-            ? { kind: "message_stop", finishReason, usage: result.usage }
-            : { kind: "message_stop", finishReason };
-        try {
-          await handler(stopEvent);
-        } catch (handlerErr: unknown) {
-          abortBag.markStopped(handlerErr);
-        }
+        await emitToolUseStop(handler, abortBag, finishReason, result.usage, result.errorMessage);
         if (toolUseSnapshot.length > 0) {
           await safeInterrupt(iter);
         }
         return;
       }
 
-      // If the SDK does not also emit a result message for this turn (some
-      // builds skip it once the assistant message contains tool_use), the
-      // assistant snapshot we just captured IS the end of the turn. Emit
-      // the synthesised message_stop and interrupt now — the result branch
-      // above would have already returned if the SDK had sent one.
+      // Full assistant snapshot. The SDK emits this before invoking tool
+      // handlers, so this is our cue that the assistant turn is finished;
+      // downstream SDK builds may or may not also emit a result message.
+      // Capture the tool_use blocks and continue iterating — if the SDK
+      // emits a result on the next iteration, the result branch above fires
+      // with full usage. If the iterator exhausts without a result (degenerate
+      // SDK build), the fallback below fires after the loop.
+      const parsedAssistant = parseAssistantSnapshot(msg, codec);
       if (parsedAssistant !== undefined && parsedAssistant.length > 0) {
-        const stopEvent: StreamEvent = { kind: "message_stop", finishReason: "tool_use" };
-        try {
-          await handler(stopEvent);
-        } catch (handlerErr: unknown) {
-          abortBag.markStopped(handlerErr);
-        }
-        await safeInterrupt(iter);
-        return;
+        toolUseSnapshot = parsedAssistant;
       }
+    }
+
+    // Iterator exhausted (or abortBag.isStopped) without a result message.
+    // If we captured an assistant tool_use snapshot, synthesise the stop now.
+    if (toolUseSnapshot.length > 0 && !abortBag.isStopped) {
+      await emitToolUseStop(handler, abortBag, "tool_use", undefined, undefined);
+      await safeInterrupt(iter);
     }
   } catch (sdkErr: unknown) {
     const errEvent: StreamEvent = {
@@ -196,6 +184,37 @@ export async function interceptStream(
 /* ---------------------------------------------------------------------------
  * Internal helpers
  * ------------------------------------------------------------------------ */
+
+/**
+ * Emit the terminal `message_stop` event for a tool_use turn. Consolidates
+ * both call sites (result-branch with usage, degenerate-fallback without) so
+ * the emission logic is not duplicated. Handler errors are routed through
+ * `abortBag.markStopped` — the caller must check `abortBag.isStopped` after.
+ *
+ * Uses conditional spread rather than optional fields to satisfy
+ * `exactOptionalPropertyTypes: true`.
+ */
+async function emitToolUseStop(
+  handler: StreamHandler,
+  abortBag: AbortBag,
+  finishReason: FinishReason,
+  usage: Usage | undefined,
+  errorMessage: string | undefined,
+): Promise<void> {
+  const stopEvent: StreamEvent =
+    usage !== undefined && errorMessage !== undefined
+      ? { kind: "message_stop", finishReason, usage, errorMessage }
+      : usage !== undefined
+        ? { kind: "message_stop", finishReason, usage }
+        : errorMessage !== undefined
+          ? { kind: "message_stop", finishReason, errorMessage }
+          : { kind: "message_stop", finishReason };
+  try {
+    await handler(stopEvent);
+  } catch (handlerErr: unknown) {
+    abortBag.markStopped(handlerErr);
+  }
+}
 
 function checkForStubEscape(msg: unknown): void {
   if (msg === null || typeof msg !== "object") return;

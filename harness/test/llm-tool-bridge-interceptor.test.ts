@@ -455,6 +455,10 @@ describe("interceptStream", () => {
     const stop = events[events.length - 1];
     expect(stop?.kind).toBe("message_stop");
     expect(stop?.finishReason).toBe("tool_use");
+    // Fix 1: with the deferred result-branch, the result message's usage now
+    // flows through to the message_stop event on well-behaved SDK runs.
+    expect(stop?.usage?.inputTokens).toBeGreaterThanOrEqual(0);
+    expect(stop?.usage?.outputTokens).toBeGreaterThanOrEqual(0);
     expect(interrupted.value).toBe(true);
   });
 
@@ -503,6 +507,9 @@ describe("interceptStream", () => {
     const lastEvent = events[events.length - 1];
     expect(lastEvent?.kind).toBe("message_stop");
     expect(lastEvent?.finishReason).toBe("tool_use");
+    // Fix 1: the degenerate fallback (no result message) synthesises the stop
+    // without usage, so usage must be undefined here.
+    expect(lastEvent?.usage).toBeUndefined();
     expect(interrupted.value).toBe(true);
   });
 });

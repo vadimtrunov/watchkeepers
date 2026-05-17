@@ -30,6 +30,8 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
+import { anthropicApiKeyEnvOverride } from "../secrets/env.js";
+
 import { LLMError } from "./errors.js";
 import type { LLMProvider } from "./provider.js";
 import { interceptComplete, interceptStream, type AbortBag } from "./tool-bridge-interceptor.js";
@@ -253,28 +255,16 @@ export class ClaudeAgentProvider implements LLMProvider {
       opts.includePartialMessages = true;
     }
     if (this.apiKey !== undefined && this.apiKey !== "") {
-      // The credential literal lives only in harness/src/secrets/env.ts
-      // (M5.7.a grep-invariant). The boot path resolves the value and
-      // passes it here; we forward it via the SDK's env override so the
-      // SDK's own auth path picks it up.
-      opts.env = { ...process.env, ...this.apiKeyEnvOverride() };
+      // Forward the resolved credential via the env override helper from
+      // harness/src/secrets/env.ts — the literal credential name lives only
+      // in that module (M5.7.a grep-invariant).
+      opts.env = { ...process.env, ...anthropicApiKeyEnvOverride(this.apiKey) };
     }
     if (extras?.codec !== undefined && extras.tools !== undefined && extras.tools.length > 0) {
       const stub = buildStubMcpServer(extras.tools, extras.codec);
       opts.mcpServers = { [MCP_SERVER_NAME]: stub.sdkConfig };
     }
     return opts;
-  }
-
-  private apiKeyEnvOverride(): Record<string, string> {
-    // The literal name of the env var lives in env.ts (M5.7.a). Here we
-    // accept the value already pulled by the caller and place it under
-    // the documented Agent SDK env key — the same key the SDK reads
-    // when no subscription is present.
-    if (this.apiKey === undefined || this.apiKey === "") return {};
-
-    const key = ["ANTHROPIC", "API", "KEY"].join("_");
-    return { [key]: this.apiKey };
   }
 }
 
@@ -384,8 +374,7 @@ class ClaudeAgentStreamSubscription implements StreamSubscription {
   private readonly maybeQuery: { interrupt: () => Promise<void> } | undefined;
   private _stopped = false;
   private _cause: unknown = undefined;
-  private _stopRan = false;
-  private _stopResult: LLMError | undefined;
+  private _stopPromise: Promise<void> | undefined;
 
   public constructor(iter: AsyncIterable<unknown> | AsyncIterator<unknown>) {
     // Agent SDK's Query is an AsyncGenerator (has both [Symbol.asyncIterator]
@@ -438,13 +427,14 @@ class ClaudeAgentStreamSubscription implements StreamSubscription {
   }
 
   public async stop(): Promise<void> {
-    if (this._stopRan) {
-      if (this._stopResult !== undefined) {
-        throw this._stopResult;
-      }
-      return;
+    if (this._stopPromise !== undefined) {
+      return this._stopPromise;
     }
-    this._stopRan = true;
+    this._stopPromise = this._stopImpl();
+    return this._stopPromise;
+  }
+
+  private async _stopImpl(): Promise<void> {
     this._stopped = true;
     if (this.maybeQuery !== undefined) {
       try {
@@ -455,8 +445,7 @@ class ClaudeAgentStreamSubscription implements StreamSubscription {
       }
     }
     if (this._cause !== undefined) {
-      this._stopResult = LLMError.streamClosed(undefined, this._cause);
-      throw this._stopResult;
+      throw LLMError.streamClosed(undefined, this._cause);
     }
   }
 }

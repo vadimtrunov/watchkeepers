@@ -602,6 +602,48 @@ describe("ClaudeAgentProvider.stream — validation", () => {
 });
 
 describe("ClaudeAgentProvider.stream — cancellation", () => {
+  it("stop() race — concurrent callers observe the same settled promise", async () => {
+    // Build a generator that yields one text_delta event; the handler will
+    // throw on it, latching _cause inside the subscription.
+    // eslint-disable-next-line @typescript-eslint/require-await -- async generator yields a fixed sequence; no awaitable I/O inside.
+    const gen = (async function* () {
+      yield {
+        type: "stream_event",
+        event: { type: "content_block_delta", delta: { type: "text_delta", text: "hi" } },
+      };
+      // No result — dispatch loop ends after the handler throws.
+    })();
+    const queryLike = Object.assign(gen, {
+      interrupt: (): Promise<void> => Promise.resolve(),
+    });
+    const provider = new ClaudeAgentProvider({
+      queryImpl: (() => queryLike) as unknown as QueryImpl,
+    });
+    const handlerErr = new Error("handler boom");
+    const sub = await provider.stream(
+      { model: model("claude-sonnet-4-6"), messages: [{ role: "user", content: "ping" }] },
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars -- handler intentionally ignores its argument and throws to simulate a downstream error.
+      (_e: StreamEvent): void => {
+        throw handlerErr;
+      },
+    );
+    // Drain until the dispatch loop marks the subscription stopped via the
+    // abortBag (the handler throw latches _cause).
+    for (let i = 0; i < 50; i++) {
+      if ((sub as unknown as { isStopped: boolean }).isStopped) break;
+      await new Promise((r) => setImmediate(r));
+    }
+    // Fire two stop() calls in parallel. Both must observe the same outcome —
+    // same status (both resolved or both rejected) and, if rejected, the same
+    // error object (memoised promise shares the single rejection).
+    const [a, b] = await Promise.allSettled([sub.stop(), sub.stop()]);
+    expect(a.status).toBe(b.status);
+    if (a.status === "rejected" && b.status === "rejected") {
+      // The memoised promise ensures both callers share the identical rejection.
+      expect(a.reason).toBe(b.reason);
+    }
+  });
+
   it("stop() interrupts the underlying Query and is idempotent", async () => {
     let interruptCalls = 0;
     // eslint-disable-next-line @typescript-eslint/require-await -- generator yields a fixed sequence; no awaitable I/O.

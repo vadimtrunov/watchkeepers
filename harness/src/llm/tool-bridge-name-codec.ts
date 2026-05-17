@@ -65,12 +65,7 @@ export function buildCodec(tools: readonly ToolDefinition[]): ToolNameCodec {
       return encoded;
     },
     decode(mcpName) {
-      const bare = mcpName.startsWith(MCP_PREFIX)
-        ? mcpName.slice(MCP_PREFIX.length)
-        : mcpName.includes("__") && mcpName.startsWith("mcp__")
-          ? // Foreign server prefix — treat as unknown rather than guessing.
-            "<foreign-prefix>"
-          : mcpName;
+      const bare = mcpName.startsWith(MCP_PREFIX) ? mcpName.slice(MCP_PREFIX.length) : mcpName;
       const runtime = decodeMap.get(bare);
       if (runtime === undefined) {
         throw LLMError.providerUnavailable(`agent SDK emitted unknown tool name: ${mcpName}`);
