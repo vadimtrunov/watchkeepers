@@ -293,6 +293,65 @@ func TestTool_Close_IdempotentDoubleClose_PreservesFirstSummary(t *testing.T) {
 	}
 }
 
+// TestTool_Close_RecoversSummaryOnArchivedButEmptyRow exercises the
+// codex iter-1 Major fix: if a prior close archived the row but failed
+// to write the summary (transient repo error, ctx cancel mid-flow), a
+// subsequent retry MUST observe the archived-but-empty state and write
+// the supplied summary instead of short-circuiting silently. Otherwise
+// the conversation lives forever as `archived + empty summary` which
+// violates the M1.3.b persistence contract.
+func TestTool_Close_RecoversSummaryOnArchivedButEmptyRow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	target := samplePeer("Lead")
+	tool, repo, _, lc, tokens := newTool(t, orgID, []keepclient.Peer{target})
+	conv := mintConversationWithParticipants(t, repo, orgID, []string{"wk-asker", target.WatchkeeperID})
+
+	// Simulate the half-completed close: archive the row directly via
+	// repo.Close, leaving close_summary empty (as if SetCloseSummary
+	// failed on a previous attempt).
+	if err := repo.Close(context.Background(), conv.ID, peer.CloseLifecycleReason); err != nil {
+		t.Fatalf("repo.Close: %v", err)
+	}
+	before, err := repo.Get(context.Background(), conv.ID)
+	if err != nil {
+		t.Fatalf("Get before: %v", err)
+	}
+	if before.CloseSummary != "" {
+		t.Fatalf("pre-condition violated: CloseSummary = %q, want empty", before.CloseSummary)
+	}
+
+	// Retry. Should observe archived + empty summary → write the
+	// supplied summary AND return nil (idempotent recovery).
+	if err := tool.Close(context.Background(), peer.CloseParams{
+		ActingWatchkeeperID: "wk-asker",
+		OrganizationID:      orgID,
+		CapabilityToken:     tokens[peer.CapabilityClose],
+		ConversationID:      conv.ID,
+		Summary:             "recovered summary",
+	}); err != nil {
+		t.Fatalf("retry Close: %v", err)
+	}
+
+	// Lifecycle.Close MUST NOT have been called (row already archived).
+	lc.mu.Lock()
+	gotCloseCalls := lc.closeCalls
+	lc.mu.Unlock()
+	if gotCloseCalls != 0 {
+		t.Errorf("Lifecycle.Close calls = %d on recovery path, want 0 (row already archived)", gotCloseCalls)
+	}
+
+	// SetCloseSummary DID run — the persisted summary reflects the retry.
+	after, err := repo.Get(context.Background(), conv.ID)
+	if err != nil {
+		t.Fatalf("Get after: %v", err)
+	}
+	if after.CloseSummary != "recovered summary" {
+		t.Errorf("CloseSummary = %q, want %q (recovery path must write)", after.CloseSummary, "recovered summary")
+	}
+}
+
 func TestTool_Close_IdempotentOnAlreadyArchivedRace(t *testing.T) {
 	t.Parallel()
 
@@ -421,6 +480,77 @@ func TestTool_Close_LifecycleErrorWraps(t *testing.T) {
 	}
 	if persisted.CloseSummary != "" {
 		t.Errorf("CloseSummary = %q, want \"\" after lifecycle error", persisted.CloseSummary)
+	}
+}
+
+// TestTool_Close_CrossTenantSurfacesNotFound exercises the iter-1
+// critic defensive check: a Close issued under tenant B against a
+// conversation that belongs to tenant A must surface
+// ErrPeerConversationNotFound (mirroring RLS not-found semantics
+// rather than leaking a cross-tenant existence signal). Production
+// Postgres wiring already enforces this via the `watchkeeper.org`
+// RLS GUC; this in-process check belongs alongside the capability
+// gate so the in-memory adapter + any future non-RLS-aware
+// Repository impl honour the same boundary.
+func TestTool_Close_CrossTenantSurfacesNotFound(t *testing.T) {
+	t.Parallel()
+
+	orgA := uuid.New()
+	orgB := uuid.New()
+	target := samplePeer("Lead")
+
+	// Wire the tool with orgB tokens + a fresh broker that ALSO issues
+	// orgA tokens (so the orgA token is a real broker-minted token, not
+	// a forged string — the test must trip on the tenant mismatch on
+	// the row, not on the capability gate).
+	repo := k2k.NewMemoryRepository(time.Now, nil)
+	pl := &fakePeerLister{peers: []keepclient.Peer{target}}
+	lc := &fakeLifecycle{repo: repo}
+	broker := capability.New()
+	t.Cleanup(func() { _ = broker.Close() })
+	closeTokB, err := broker.IssueForOrg(peer.CapabilityClose, orgB.String(), time.Hour)
+	if err != nil {
+		t.Fatalf("IssueForOrg orgB: %v", err)
+	}
+	tool := peer.NewTool(peer.Deps{
+		PeerLister: pl,
+		Lifecycle:  lc,
+		Repository: repo,
+		Capability: broker,
+	})
+
+	// Mint a conversation under orgA.
+	convA := mintConversationWithParticipants(t, repo, orgA, []string{"wk-orgB-asker", target.WatchkeeperID})
+
+	// Try to close it from orgB with a valid orgB capability token.
+	// (The capability gate passes — the token is bound to orgB. The
+	// cross-tenant check must surface afterward.)
+	err = tool.Close(context.Background(), peer.CloseParams{
+		ActingWatchkeeperID: "wk-orgB-asker",
+		OrganizationID:      orgB,
+		CapabilityToken:     closeTokB,
+		ConversationID:      convA.ID,
+		Summary:             "cross-tenant attempt",
+	})
+	if !errors.Is(err, peer.ErrPeerConversationNotFound) {
+		t.Fatalf("Close err = %v, want errors.Is ErrPeerConversationNotFound", err)
+	}
+
+	// Conversation A must still be open.
+	persisted, err := repo.Get(context.Background(), convA.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if persisted.Status != k2k.StatusOpen {
+		t.Errorf("Status = %q, want %q (cross-tenant close must not mutate state)", persisted.Status, k2k.StatusOpen)
+	}
+
+	// Lifecycle.Close MUST NOT have been called.
+	lc.mu.Lock()
+	gotCloseCalls := lc.closeCalls
+	lc.mu.Unlock()
+	if gotCloseCalls != 0 {
+		t.Errorf("Lifecycle.Close calls = %d on cross-tenant attempt, want 0", gotCloseCalls)
 	}
 }
 

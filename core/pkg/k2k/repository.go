@@ -255,9 +255,13 @@ type Repository interface {
 	//     (programmer bug: the caller forgot to drive [Repository.Close]
 	//     first).
 	//   - Row in [StatusArchived] — atomic UPDATE writes the supplied
-	//     summary onto the row. Overwrites any prior `close_summary`
-	//     (the peer-tool layer is the sole writer and never replays
-	//     SetCloseSummary against the same row).
+	//     summary onto the row. The storage contract is last-write-wins
+	//     by consequence (concurrent / replayed writes overwrite each
+	//     other) — NOT a feature inviting consumers to call repeatedly.
+	//     The peer-tool layer is the sole writer and is responsible for
+	//     short-circuiting on a non-empty existing summary so the first
+	//     close's summary persists across retries; see `peer.Close`
+	//     idempotency contract.
 	//
 	// The in-memory adapter mirrors the Postgres conditional-UPDATE
 	// shape under its single write-lock so concurrent calls compose

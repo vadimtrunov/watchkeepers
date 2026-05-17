@@ -163,17 +163,33 @@ func (t *Tool) Close(ctx context.Context, params CloseParams) error {
 	// Resolve the conversation BEFORE Lifecycle.Close so:
 	//   1. Unknown conversation surfaces the dedicated sentinel rather
 	//      than a generic Lifecycle.Close failure.
-	//   2. The participant-membership gate runs over the persisted
-	//      participants list before any side effect.
+	//   2. The cross-tenant defensive check + participant-membership
+	//      gate run over the persisted row before any side effect.
 	//   3. An already-archived row short-circuits both Lifecycle.Close
-	//      AND SetCloseSummary so the idempotent no-op preserves the
-	//      original close_summary.
+	//      AND (when its existing close_summary is non-empty)
+	//      SetCloseSummary so the idempotent no-op preserves the
+	//      original close_summary while still allowing recovery of a
+	//      half-completed close (archive succeeded, summary write
+	//      failed) on a subsequent retry.
 	conv, err := t.deps.Repository.Get(ctx, params.ConversationID)
 	if err != nil {
 		if errors.Is(err, k2k.ErrConversationNotFound) {
 			return fmt.Errorf("%w: %w", ErrPeerConversationNotFound, err)
 		}
 		return fmt.Errorf("peer: close: get conversation: %w", err)
+	}
+
+	// Cross-tenant defensive check. Production Postgres wiring already
+	// filters by tenant via the `watchkeeper.org` RLS GUC (an unset /
+	// mismatched GUC fail-closes to ErrConversationNotFound); this
+	// in-process check belongs alongside the capability gate so the
+	// in-memory adapter + any future non-RLS-aware Repository impl
+	// honour the same boundary. The mismatch surfaces as
+	// ErrPeerConversationNotFound (not a leaky cross-tenant existence
+	// signal) so the caller cannot probe for foreign-tenant ids by
+	// observing a different error.
+	if conv.OrganizationID != params.OrganizationID {
+		return fmt.Errorf("%w: %s", ErrPeerConversationNotFound, params.ConversationID)
 	}
 
 	// Participant-membership gate. The acting watchkeeper must appear
@@ -188,11 +204,26 @@ func (t *Tool) Close(ctx context.Context, params CloseParams) error {
 		return fmt.Errorf("%w: %s", ErrPeerClosePermission, params.ConversationID)
 	}
 
-	// Idempotent double-close short-circuit BEFORE Lifecycle.Close: a
-	// second close against an already-archived row returns nil without
-	// touching the Slack channel (already archived) or the
-	// close_summary (the first close's summary is load-bearing).
+	// Idempotent double-close short-circuit BEFORE Lifecycle.Close.
+	// Two sub-cases:
+	//   * Archived row with a non-empty CloseSummary — fully complete.
+	//     Return nil without touching Lifecycle.Close OR
+	//     SetCloseSummary so the first close's summary persists.
+	//   * Archived row with an empty CloseSummary — the prior close
+	//     archived the row but failed to write the summary (e.g. a
+	//     Postgres tx aborted after the archive UPDATE committed but
+	//     before SetCloseSummary). Skip Lifecycle.Close (already done)
+	//     but DO call SetCloseSummary so the caller's summary lands on
+	//     the row. This recovers a half-completed close without
+	//     forcing a manual reaper. Mirrors the M1.1.c orphan-row
+	//     recovery discipline.
 	if conv.Status == k2k.StatusArchived {
+		if conv.CloseSummary != "" {
+			return nil
+		}
+		if err := t.deps.Repository.SetCloseSummary(ctx, params.ConversationID, params.Summary); err != nil {
+			return fmt.Errorf("peer: close: set close summary (recovery): %w", err)
+		}
 		return nil
 	}
 
