@@ -46,11 +46,25 @@ func runSpawn(ctx context.Context, args []string, stdout, stderr io.Writer, env 
 		leadHumanID   string
 		activeVersion string
 		reason        string
+		noInherit     bool
 	)
 	fs.StringVar(&manifestID, "manifest", "", "manifest UUID (required)")
 	fs.StringVar(&leadHumanID, "lead", "", "lead-human UUID (required)")
 	fs.StringVar(&activeVersion, "active-version", "", "optional pinned manifest_version UUID")
 	fs.StringVar(&reason, "reason", "", "operator-supplied audit text (required)")
+	// Phase 2 §M7.1.c operator opt-out for the spawn-saga's
+	// NotebookInheritStep. When set, the new Watchkeeper's notebook
+	// is NOT seeded from the most-recently-retired peer's archive
+	// (the spawn flow falls through to a virgin file). The flag is
+	// captured at the CLI surface today and reflected in the
+	// success message; the full round-trip to
+	// `saga.SpawnContext.NoInherit` lands when the Slack-bot binary
+	// takes over the spawn-saga kickoff wiring (see the
+	// `approval_wiring/wiring.go` DEFERRED WIRING note). The CLI
+	// captures the operator's intent so an audit-aware reader of
+	// shell transcripts has a record of the choice even though
+	// `wk spawn` itself only writes the watchkeeper row today.
+	fs.BoolVar(&noInherit, "no-inherit", false, "suppress predecessor-notebook inheritance on spawn (Phase 2 §M7.1.c opt-out)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -81,7 +95,7 @@ func runSpawn(ctx context.Context, args []string, stdout, stderr io.Writer, env 
 			stderrf(stderr, fmt.Sprintf("wk: spawn: %v\n", err))
 			return 1
 		}
-		fmt.Fprintf(stdout, "wk: spawn ok watchkeeper_id=%s reason=%q\n", resp.ID, reason)
+		fmt.Fprintf(stdout, "wk: spawn ok watchkeeper_id=%s reason=%q no_inherit=%t\n", resp.ID, reason, noInherit)
 		return 0
 	})
 }

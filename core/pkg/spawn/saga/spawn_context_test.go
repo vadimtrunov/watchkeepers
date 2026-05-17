@@ -54,6 +54,70 @@ func TestWithSpawnContext_RoundTrip_ReturnsValue(t *testing.T) {
 	}
 }
 
+// TestWithSpawnContext_RoundTrip_RoleIDAndNoInherit pins the
+// Phase 2 §M7.1.c additive fields: a SpawnContext seeded with a
+// non-empty `RoleID` AND `NoInherit=true` round-trips both values
+// verbatim. The fields are additive — every previously-zero usage
+// stays valid (covered by the existing RoundTrip test which omits
+// them and expects zero-value defaults).
+func TestWithSpawnContext_RoundTrip_RoleIDAndNoInherit(t *testing.T) {
+	t.Parallel()
+
+	want := saga.SpawnContext{
+		ManifestVersionID: uuid.New(),
+		AgentID:           uuid.New(),
+		Claim: saga.SpawnClaim{
+			OrganizationID:  "org-456",
+			AgentID:         "agent-watchmaster",
+			AuthorityMatrix: map[string]string{},
+		},
+		RoleID:    "frontline-watchkeeper",
+		NoInherit: true,
+	}
+
+	ctx := saga.WithSpawnContext(context.Background(), want)
+	got, ok := saga.SpawnContextFromContext(ctx)
+	if !ok {
+		t.Fatalf("SpawnContextFromContext after WithSpawnContext returned ok=false")
+	}
+	if got.RoleID != want.RoleID {
+		t.Errorf("RoleID = %q, want %q", got.RoleID, want.RoleID)
+	}
+	if got.NoInherit != want.NoInherit {
+		t.Errorf("NoInherit = %t, want %t", got.NoInherit, want.NoInherit)
+	}
+}
+
+// TestWithSpawnContext_RoundTrip_ZeroValueAdditiveFields pins the
+// backward-compatibility contract: a SpawnContext that does NOT
+// set the M7.1.c additive fields (RoleID / NoInherit) round-trips
+// with the zero values, matching pre-M7.1.c call-site shape.
+func TestWithSpawnContext_RoundTrip_ZeroValueAdditiveFields(t *testing.T) {
+	t.Parallel()
+
+	want := saga.SpawnContext{
+		ManifestVersionID: uuid.New(),
+		AgentID:           uuid.New(),
+		Claim: saga.SpawnClaim{
+			OrganizationID:  "org-789",
+			AgentID:         "agent-watchmaster",
+			AuthorityMatrix: map[string]string{},
+		},
+	}
+
+	ctx := saga.WithSpawnContext(context.Background(), want)
+	got, ok := saga.SpawnContextFromContext(ctx)
+	if !ok {
+		t.Fatalf("SpawnContextFromContext after WithSpawnContext returned ok=false")
+	}
+	if got.RoleID != "" {
+		t.Errorf("RoleID (default) = %q, want %q", got.RoleID, "")
+	}
+	if got.NoInherit {
+		t.Errorf("NoInherit (default) = true, want false")
+	}
+}
+
 func TestWithSpawnContext_DifferentKey_NotConfused(t *testing.T) {
 	t.Parallel()
 

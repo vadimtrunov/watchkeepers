@@ -147,8 +147,11 @@ type SpawnKickoffer struct {
 	// slice and the saga completes immediately with a single
 	// `saga_completed` audit event (matches the M7.1.b zero-step
 	// behaviour). Production wiring populates this with
-	// CreateApp + OAuthInstall + BotProfile + (M7.1.d Notebook) +
-	// (M7.1.e Runtime launch) over the M7.1.c–.e milestones.
+	// CreateApp + OAuthInstall + BotProfile + NotebookInherit
+	// (Phase 2 §M7.1.c — runs BEFORE NotebookProvision so the
+	// provision step finds an already-seeded file when a
+	// predecessor exists) + NotebookProvision (M7.1.d) +
+	// RuntimeLaunch (M7.1.e) over the M7.1.c–.e milestones.
 	steps []saga.Step
 }
 
@@ -195,8 +198,10 @@ type SpawnKickoffDeps struct {
 	//
 	// Production wiring populates this with the M7.1.c.a CreateApp
 	// step + M7.1.c.b.b OAuthInstall step + M7.1.c.c BotProfile step
-	// (in that order), with M7.1.d Notebook + M7.1.e Runtime launch
-	// landing in their own milestones.
+	// (in that order), with the Phase 2 §M7.1.c NotebookInherit
+	// step running BEFORE the M7.1.d NotebookProvision step (so the
+	// provision step finds an already-seeded file when a
+	// predecessor exists), and M7.1.e Runtime launch landing last.
 	Steps []saga.Step
 }
 
