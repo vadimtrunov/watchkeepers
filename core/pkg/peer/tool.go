@@ -12,6 +12,7 @@ import (
 	"github.com/vadimtrunov/watchkeepers/core/pkg/capability"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/audit"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/budget"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/keepclient"
 )
 
@@ -40,6 +41,19 @@ const (
 // caller's tool-call return indefinitely. Mirrors the matching
 // constant in `core/pkg/k2k/lifecycle.go` (iter-1 codex Major fix).
 const auditEmitTimeout = 5 * time.Second
+
+// budgetChargeTimeout caps the detached-ctx window the M1.5 budget
+// charge runs under from [Tool.Ask] / [Tool.Reply]. The charge happens
+// AFTER `Repository.AppendMessage` has persisted the message, so the
+// load-bearing message write is already durable; the charge advances
+// the running token counter via `Repository.IncTokens` + dispatches
+// over-budget side effects. The detached ctx ensures a client
+// disconnect / timeout arriving between AppendMessage completion and
+// this call does NOT systematically skip the counter advance (iter-1
+// codex P1 Major fix). 5-second cap matches [auditEmitTimeout]: a
+// healthy IncTokens completes well within the cap while a degenerate
+// repository cannot tie up the caller indefinitely.
+const budgetChargeTimeout = 5 * time.Second
 
 // Lister is the narrow seam [Tool.Ask] consumes from
 // [keepclient.Client]. The interface is the unit-test seam:
@@ -191,11 +205,71 @@ type Deps struct {
 	// Mirrors the M1.3.c [EventBus] optional-dep discipline.
 	Auditor audit.Emitter
 
+	// Budget is the M1.5 token-budget enforcement seam — typically a
+	// [*budget.Writer] in production wiring. OPTIONAL: nil is
+	// permitted so M1.3.\*-era callers wiring the tool without a
+	// budget enforcer stay valid (the budget plumbing then becomes a
+	// no-op: messages append without an IncTokens follow-up).
+	//
+	// Charge responsibilities split as follows:
+	//   - [Tool.Ask] charges the request body's estimated token count
+	//     after the request [k2k.Repository.AppendMessage] succeeds
+	//     and BEFORE the [k2k.Repository.WaitForReply] block. The
+	//     replier's body is charged by the recipient's
+	//     [Tool.Reply] call site.
+	//   - [Tool.Reply] charges the reply body's estimated token count
+	//     after the reply [k2k.Repository.AppendMessage] succeeds.
+	//   - [Tool.Close] performs no charge — closing a conversation
+	//     does not consume tokens.
+	// Mirrors the M1.3.c [EventBus] / M1.4 [Auditor] optional-dep
+	// discipline.
+	Budget budget.Enforcer
+
+	// TokenBudgetResolver is the M1.5 per-call resolver that returns
+	// the per-Watchkeeper token-budget override (in tokens) for the
+	// acting watchkeeper. OPTIONAL: nil falls back to
+	// [budget.DefaultTokenBudget] for every [Tool.Ask] call. Mirrors
+	// the M1.3.d [FilterResolver] per-call seam discipline.
+	//
+	// The resolver is consulted by [Tool.Ask] BEFORE
+	// [k2k.Lifecycle.Open] so the stamped
+	// [k2k.OpenParams.TokenBudget] reflects the per-Watchkeeper
+	// configuration. Production wiring composes the resolver out of
+	// the M5.5 manifest loader's
+	// [runtime.ImmutableCore.CostLimits[K2KTokenBudgetCostLimitsKey]]
+	// projection (see `core/pkg/manifest.K2KTokenBudget`); tests
+	// inject a deterministic fake. A resolver-returned negative budget
+	// clamps to 0 via [budget.ResolveBudget] (treated as "enforcement
+	// disabled for this conversation"). A resolver error short-circuits
+	// the [Tool.Ask] call with the wrapped error — a misconfigured
+	// per-Watchkeeper budget is a caller bug, not a runtime
+	// observability concern.
+	TokenBudgetResolver TokenBudgetResolver
+
 	// Now overrides the wall-clock used to compute the `since` cursor
 	// passed to [Repository.WaitForReply]. Defaults to [time.Now]; a
 	// test fixture may pass a deterministic clock. Optional.
 	Now func() time.Time
 }
+
+// TokenBudgetResolver is the M1.5 per-call seam [Tool.Ask] consults to
+// fetch the per-Watchkeeper token-budget override declared in the
+// acting watchkeeper's Manifest. Returns `(budget, true, nil)` when the
+// override is present; `(0, false, nil)` when no override is declared
+// (the call site falls back to [budget.DefaultTokenBudget]); a non-nil
+// error short-circuits the call.
+//
+// Implementations MUST be safe for concurrent use across goroutines —
+// the production manifest-loader-backed resolver is goroutine-safe by
+// construction (it issues read-only HTTP GETs against the keep server
+// + decodes the response; no shared state).
+//
+// The signature is a typed function alias (rather than an interface
+// with a single method) so production wiring can pass a closure
+// over `manifest.LoadManifest` + `manifest.K2KTokenBudget` without
+// declaring a wrapper type. Mirrors the
+// `core/pkg/llm/cost.Provider`-shaped closure pattern.
+type TokenBudgetResolver func(ctx context.Context, actingWatchkeeperID string, organizationID uuid.UUID) (int64, bool, error)
 
 // Tool is the M1.3.a peer.* orchestrator. Construct via [NewTool];
 // the zero value is NOT usable — callers must always go through the

@@ -42,6 +42,7 @@ import (
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/audit"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/budget"
 )
 
 // ReplyParams is the closed-set input shape [Tool.Reply] accepts.
@@ -178,5 +179,57 @@ func (t *Tool) Reply(ctx context.Context, params ReplyParams) error {
 		})
 		cancel()
 	}
+
+	// M1.5 token-budget charge for the reply body. Nil Budget is a
+	// no-op (M1.3.\*-era wirings stay valid by design). The reply
+	// flow forwards the conversation's persisted TokenBudget so the
+	// enforcer compares against the same value the M1.5 Ask-path
+	// charge wrote into the row at Open time — the M1.5 budget is
+	// per-conversation, not per-Watchkeeper-per-call. A Charge
+	// failure does NOT propagate (same rationale as the Ask-side
+	// charge — observability + workflow surface, not load-bearing).
+	t.chargeReplyBody(ctx, body, conv, params, replyMsg)
 	return nil
+}
+
+// chargeReplyBody runs the M1.5 budget charge for the reply append
+// site. A nil Budget enforcer is a no-op; a non-nil enforcer charges
+// the estimated token count + handles the over-budget side effects
+// internally. The Charge error does NOT propagate — see the call-site
+// comment for the rationale. Hoisted so [Reply] stays scannable + under
+// the gocyclo budget.
+//
+// The `conv` reference is the row read at the Reply entry boundary so
+// the charge forwards the conversation's persisted TokenBudget (which
+// was stamped at the Ask-side k2k.Lifecycle.Open call) AND the
+// persisted CorrelationID (so an over-budget detection on a reply
+// preserves the link back to the originating watch order / saga —
+// iter-1 codex P2 fix). The `replyMsg` reference is unused by the
+// charge today; the parameter keeps the helper's signature aligned
+// with the Ask-side helper so a future addition (e.g. an explicit
+// MessageID on ChargeParams) lands as a single-site change.
+//
+// The Charge runs under a detached `context.WithoutCancel` ctx with a
+// short cap (iter-1 codex P1 Major fix). Same rationale as
+// [Tool.chargeRequestBody]: the reply message is persisted before this
+// call so the load-bearing counter advance must not be silently
+// skipped by a caller-side cancellation.
+func (t *Tool) chargeReplyBody(ctx context.Context, body []byte, conv k2k.Conversation, params ReplyParams, _ k2k.Message) {
+	if t.deps.Budget == nil {
+		return
+	}
+	delta := budget.EstimateTokensFromBody(body)
+	if delta <= 0 {
+		return
+	}
+	chargeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budgetChargeTimeout)
+	defer cancel()
+	_, _ = t.deps.Budget.Charge(chargeCtx, budget.ChargeParams{
+		ConversationID:      params.ConversationID,
+		OrganizationID:      params.OrganizationID,
+		ActingWatchkeeperID: params.ActingWatchkeeperID,
+		TokenBudget:         conv.TokenBudget,
+		Delta:               delta,
+		CorrelationID:       conv.CorrelationID,
+	})
 }
