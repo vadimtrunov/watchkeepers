@@ -596,8 +596,10 @@ for cost analysis:
   via `skipMethods: ["countTokens"]` so the gap is visible to
   maintainers without flaking the test run.
 - Inbound `role=tool` message folding (feeding tool results back to the
-  model in a multi-turn conversation) is deferred to the cross-cutting
-  M5.3.c.c.c slice and applies to both providers.
+  model in a multi-turn conversation) is currently skipped in both
+  `ClaudeCodeProvider` and `ClaudeAgentProvider` — the cross-cutting fix
+  is tracked in the source via an in-code comment marker, not exposed at
+  the provider surface yet.
 
 ## Provisioning the dev Slack workspace
 

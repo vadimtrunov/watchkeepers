@@ -550,7 +550,7 @@ The harness must be able to reach a Claude model to answer Watch Orders.
 Phase 1 supports two credential paths and the choice is made via the
 `WATCHKEEPER_LLM_PROVIDER` env var. Path A2.1 works with both providers;
 path A2.2 requires `claude-agent` mode. See
-`docs/DEVELOPING.md#LLM-provider` for the full provider comparison table.
+`docs/DEVELOPING.md#llm-provider` for the full provider comparison table.
 
 #### Path A2.1 — API key (`ANTHROPIC_API_KEY`)
 
@@ -607,8 +607,10 @@ SDK auto-detects a locally authenticated `claude` CLI session when
    Do NOT set `ANTHROPIC_API_KEY`; if both are present the key wins and
    the subscription path is bypassed.
 
-4. Restart the harness. Confirm the provider is active by checking the
-   boot log for `harness/ready` emitted without the API-key warning.
+4. Restart the harness. Confirm the provider is active by running the
+   conformance suite verification step below — when the live
+   `ClaudeAgentProvider` case runs rather than being skipped, the
+   subscription auth is wired correctly.
 
 #### Verification
 
