@@ -516,7 +516,11 @@ func TestGetManifest_ModelProjection(t *testing.T) {
 			// immutable_core column (M3.1 addition) is scanned via
 			// **json.RawMessage so SQL NULL leaves the pointer nil; the
 			// fake row mirrors that by leaving dest[13] untouched.
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -576,7 +580,11 @@ func TestGetManifest_AutonomyProjection(t *testing.T) {
 			// immutable_core column (M3.1 addition) is scanned via
 			// **json.RawMessage so SQL NULL leaves the pointer nil; the
 			// fake row mirrors that by leaving dest[13] untouched.
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -640,7 +648,11 @@ func TestGetManifest_NotebookRecallProjection(t *testing.T) {
 			// immutable_core column (M3.1 addition) — dest[13] is
 			// **json.RawMessage; SQL NULL leaves the pointer nil so the
 			// fake leaves dest[13] untouched.
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}

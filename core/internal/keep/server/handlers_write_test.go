@@ -902,7 +902,11 @@ func TestPutManifestVersion_WithModel_201_RoundTrip(t *testing.T) {
 			// so SQL NULL leaves the pointer nil. Test fakes pass an
 			// untouched dest[13] to mirror "NULL row" — the production
 			// scan path leaves `**json.RawMessage` untouched on NULL.
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -965,17 +969,15 @@ func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	// Expect exactly 9 nil args: tools, authority_matrix, knowledge_sources,
+	// Expect 13 nil args: tools, authority_matrix, knowledge_sources,
 	// personality, language, model, autonomy, notebook_top_k,
-	// notebook_relevance_threshold. If any wiring is absent the count drops
-	// and this assertion catches the regression.
-	// Expect 10 nil args: tools, authority_matrix, knowledge_sources,
-	// personality, language, model, autonomy, notebook_top_k,
-	// notebook_relevance_threshold, immutable_core. If any wiring is
-	// absent the count drops and this assertion catches the regression.
-	const wantNilArgs = 10
+	// notebook_relevance_threshold, immutable_core, reason,
+	// previous_version_id, proposer. If any wiring is absent the count
+	// drops and this assertion catches the regression. The count was 10
+	// before Phase 2 §M3.3 added the three metadata bindings.
+	const wantNilArgs = 13
 	if nilArgCount != wantNilArgs {
-		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy/notebook_top_k/notebook_relevance_threshold/immutable_core)", nilArgCount, wantNilArgs)
+		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy/notebook_top_k/notebook_relevance_threshold/immutable_core/reason/previous_version_id/proposer)", nilArgCount, wantNilArgs)
 	}
 
 	// Step 2: GET — SELECT returns coalesce(model, '') == "" so the
@@ -1000,7 +1002,11 @@ func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
 			// so SQL NULL leaves the pointer nil. Test fakes pass an
 			// untouched dest[13] to mirror "NULL row" — the production
 			// scan path leaves `**json.RawMessage` untouched on NULL.
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1162,7 +1168,11 @@ func TestPutManifestVersion_WithAutonomy_201_RoundTrip(t *testing.T) {
 			// so SQL NULL leaves the pointer nil. Test fakes pass an
 			// untouched dest[13] to mirror "NULL row" — the production
 			// scan path leaves `**json.RawMessage` untouched on NULL.
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1226,13 +1236,15 @@ func TestPutManifestVersion_AutonomyOmitted_201_GetHasNoAutonomyKey(t *testing.T
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	// Expect 10 nil args: tools, authority_matrix, knowledge_sources,
+	// Expect 13 nil args: tools, authority_matrix, knowledge_sources,
 	// personality, language, model, autonomy, notebook_top_k,
-	// notebook_relevance_threshold, immutable_core. If any wiring is
-	// absent the count drops and this assertion catches the regression.
-	const wantNilArgs = 10
+	// notebook_relevance_threshold, immutable_core, reason,
+	// previous_version_id, proposer. If any wiring is absent the count
+	// drops and this assertion catches the regression. The count was 10
+	// before Phase 2 §M3.3 added the three metadata bindings.
+	const wantNilArgs = 13
 	if nilArgCount != wantNilArgs {
-		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy/notebook_top_k/notebook_relevance_threshold/immutable_core)", nilArgCount, wantNilArgs)
+		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy/notebook_top_k/notebook_relevance_threshold/immutable_core/reason/previous_version_id/proposer)", nilArgCount, wantNilArgs)
 	}
 
 	// Step 2: GET — SELECT returns coalesce(autonomy, '') == "" so the
@@ -1257,7 +1269,11 @@ func TestPutManifestVersion_AutonomyOmitted_201_GetHasNoAutonomyKey(t *testing.T
 			// so SQL NULL leaves the pointer nil. Test fakes pass an
 			// untouched dest[13] to mirror "NULL row" — the production
 			// scan path leaves `**json.RawMessage` untouched on NULL.
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1639,7 +1655,11 @@ func TestPutManifestVersion_WithNotebookRecall_201_RoundTrip(t *testing.T) { //n
 			*dest[12].(*float64) = capturedThreshold
 			// immutable_core (M3.1) scans into **json.RawMessage; SQL
 			// NULL leaves dest[13] untouched (mirrors production path).
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1700,10 +1720,11 @@ func TestPutManifestVersion_NotebookRecallOmitted_201_GetHasNoKeys(t *testing.T)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	// Expect 10 nil args: tools, authority_matrix, knowledge_sources,
+	// Expect 13 nil args: tools, authority_matrix, knowledge_sources,
 	// personality, language, model, autonomy, notebook_top_k,
-	// notebook_relevance_threshold, immutable_core.
-	const wantNilArgs = 10
+	// notebook_relevance_threshold, immutable_core, reason,
+	// previous_version_id, proposer (M3.3).
+	const wantNilArgs = 13
 	if nilArgCount != wantNilArgs {
 		t.Errorf("nil arg count = %d, want %d", nilArgCount, wantNilArgs)
 	}
@@ -1729,7 +1750,11 @@ func TestPutManifestVersion_NotebookRecallOmitted_201_GetHasNoKeys(t *testing.T)
 			// so SQL NULL leaves the pointer nil. Test fakes pass an
 			// untouched dest[13] to mirror "NULL row" — the production
 			// scan path leaves `**json.RawMessage` untouched on NULL.
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1919,9 +1944,10 @@ func TestPutManifestVersion_WithImmutableCore_201_RoundTrip(t *testing.T) {
 		// re-marshal the object — a key re-order would imply the
 		// handler is editorialising what M3.2 promises to gate).
 		// immutable_core is the 13th INSERT-time bind ($13 in the SQL)
-		// → args[12] in 0-indexed Go arg space (placeholders $1..$14
-		// map to args[0..13]; the trailing claim.OrganizationID is
-		// args[13]).
+		// → args[12] in 0-indexed Go arg space. After Phase 2 §M3.3 the
+		// placeholders run $1..$17 → args[0..16]; reason/previous_version_id/
+		// proposer occupy $14/$15/$16 (args[13..15]) and the trailing
+		// claim.OrganizationID is args[16].
 		const immutableCoreArgIdx = 12
 		if s, ok := args[immutableCoreArgIdx].(string); ok {
 			capturedImmutableCore = s
@@ -1975,7 +2001,11 @@ func TestPutManifestVersion_WithImmutableCore_201_RoundTrip(t *testing.T) {
 			// where pgx hands the bytes through verbatim on non-NULL.
 			ic := json.RawMessage(wantImmutableCore)
 			*dest[13].(**json.RawMessage) = &ic
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -2081,7 +2111,11 @@ func TestPutManifestVersion_ImmutableCoreOmitted_201_GetHasNoImmutableCoreKey(t 
 			*dest[12].(*float64) = 0
 			// dest[13] (immutable_core, **json.RawMessage) left
 			// untouched — mirrors SQL NULL semantics.
-			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			*dest[14].(*string) = "" // M3.3 reason NULL → coalesce → ""
+			// M3.3 previous_version_id scans into **string; SQL NULL
+			// leaves dest[15] untouched (root version of the manifest).
+			*dest[16].(*string) = "" // M3.3 proposer NULL → coalesce → ""
+			*dest[17].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}

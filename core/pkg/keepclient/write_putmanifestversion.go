@@ -39,6 +39,21 @@ const clientPersonalityMaxRunes = 1024
 // past a byte-based cap.
 const manifestModelMaxRunes = 100
 
+// manifestReasonMaxRunes mirrors the server-side `manifestReasonMaxRunes`
+// cap and the SQL `char_length(reason) <= 1024` CHECK from migration 031
+// (Phase 2 §M3.3). Counted in Unicode codepoints so a CJK / accented-
+// Latin payload cannot smuggle past a byte-based cap. Matches the
+// existing `personality` cap precedent (migration 010).
+const manifestReasonMaxRunes = 1024
+
+// manifestProposerMaxRunes mirrors the server-side
+// `manifestProposerMaxRunes` cap and the SQL
+// `char_length(proposer) <= 256` CHECK from migration 031
+// (Phase 2 §M3.3). 256 codepoints is enough room for any UUID +
+// optional tag prefix + Slack handle, while still bounding the
+// audit column.
+const manifestProposerMaxRunes = 256
+
 // manifestAutonomyAllowed mirrors the server-side enum CHECK constraint
 // from migration 015 (`autonomy IN ('supervised','autonomous')`) plus the
 // NULL/empty-string case (server treats NULL as the runtime default of
@@ -125,6 +140,32 @@ type PutManifestVersionRequest struct {
 	// M3.6, so the client does NOT presume to validate bucket contents
 	// here.
 	ImmutableCore json.RawMessage `json:"immutable_core,omitempty"`
+	// Reason is the optional free-text rationale describing why this
+	// manifest_version is being proposed (Phase 2 §M3.3). Capped at
+	// 1024 Unicode codepoints (utf8.RuneCountInString, not len) to
+	// mirror SQL char_length semantics. Server and DB CHECK constraint
+	// (migration 031) enforce the same cap. Empty string round-trips as
+	// SQL NULL via `omitempty`; the server's `coalesce(reason, '')` on
+	// the read path keeps the wire shape stable for legacy callers.
+	Reason string `json:"reason,omitempty"`
+	// PreviousVersionID is the optional UUID of the manifest_version
+	// row this version is derived from (Phase 2 §M3.3). Empty string
+	// round-trips as SQL NULL (root version of the manifest). When
+	// non-empty the value MUST be a canonical RFC 4122 UUID; the
+	// client preflights the shape so a malformed string short-circuits
+	// before any network hit. The FK target lives in the same
+	// manifest_version table — cross-manifest references are
+	// impossible by construction once callers respect `manifest_id`-
+	// scoped reads.
+	PreviousVersionID string `json:"previous_version_id,omitempty"`
+	// Proposer is the optional free-text identifier of the actor that
+	// proposed this version (Phase 2 §M3.3). No FK on either `human`
+	// or `watchkeeper` because M3.4 tools take callers from
+	// heterogeneous sources (Watchkeeper UUID, human handle, the
+	// literal "watchmaster"). Capped at 256 Unicode codepoints; server
+	// and DB CHECK constraint (migration 031) enforce the same cap.
+	// Empty string round-trips as SQL NULL via `omitempty`.
+	Proposer string `json:"proposer,omitempty"`
 }
 
 // PutManifestVersionResponse mirrors the server's
@@ -151,52 +192,7 @@ func (c *Client) PutManifestVersion(ctx context.Context, manifestID string, req 
 	if req.VersionNo <= 0 || req.SystemPrompt == "" {
 		return nil, ErrInvalidRequest
 	}
-	// Symmetric with parsePutManifestVersionRequest on the server: an
-	// empty Language is allowed (round-trips as SQL NULL); a non-empty
-	// value must match the BCP 47-lite shape. Personality is capped at
-	// 1024 Unicode codepoints (utf8.RuneCountInString, not len) to mirror
-	// SQL char_length semantics. Both checks short-circuit before any
-	// network hit.
-	if req.Language != "" && !clientLanguagePattern.MatchString(req.Language) {
-		return nil, ErrInvalidRequest
-	}
-	if utf8.RuneCountInString(req.Personality) > clientPersonalityMaxRunes {
-		return nil, ErrInvalidRequest
-	}
-	// Model mirrors the server's CHECK ≤ 100 runes (migration 014).
-	// Boundary at exactly 100 is accepted; rune-count semantics so a
-	// non-ASCII payload cannot smuggle past a byte-based cap.
-	if utf8.RuneCountInString(req.Model) > manifestModelMaxRunes {
-		return nil, ErrInvalidRequest
-	}
-	// Autonomy mirrors the server's CHECK enum (migration 015): empty,
-	// "supervised", or "autonomous". Anything else short-circuits before
-	// the network hit so the caller sees ErrInvalidRequest, not a 400 from
-	// the server.
-	if _, ok := manifestAutonomyAllowed[req.Autonomy]; !ok {
-		return nil, ErrInvalidRequest
-	}
-	// NotebookTopK mirrors the server's CHECK range (migration 016):
-	// [0, 100] where 0 means "unset". Out-of-range short-circuits before
-	// the network hit.
-	if req.NotebookTopK < 0 || req.NotebookTopK > 100 {
-		return nil, ErrInvalidRequest
-	}
-	// NotebookRelevanceThreshold mirrors the server's CHECK range
-	// (migration 016): [0, 1] where 0 means "unset". Out-of-range
-	// short-circuits before the network hit.
-	if req.NotebookRelevanceThreshold < 0 || req.NotebookRelevanceThreshold > 1 {
-		return nil, ErrInvalidRequest
-	}
-	// ImmutableCore mirrors the server's CHECK shape (migration 030) +
-	// the `parsePutManifestVersionRequest` precheck: an empty / nil
-	// RawMessage round-trips as SQL NULL via `omitempty`; any non-empty
-	// payload MUST be a JSON object. Reject arrays / scalars / the JSON
-	// `null` literal client-side so the caller sees ErrInvalidRequest
-	// rather than a 400 from the server. The bucket contents themselves
-	// are NOT validated here — admin-only enforcement lands in M3.2 and
-	// the self-tuning validator lands in M3.6.
-	if !isJSONObjectOrEmpty(req.ImmutableCore) {
+	if !validatePutManifestVersionPreflight(req) {
 		return nil, ErrInvalidRequest
 	}
 	var out PutManifestVersionResponse
@@ -205,6 +201,67 @@ func (c *Client) PutManifestVersion(ctx context.Context, manifestID string, req 
 		return nil, err
 	}
 	return &out, nil
+}
+
+// validatePutManifestVersionPreflight aggregates every field-level
+// client-side precheck for [Client.PutManifestVersion] into a single
+// helper so the public API surface stays under the gocyclo budget
+// after each column-extension chain (model, autonomy, notebook recall,
+// immutable_core, M3.3 metadata) added a branch.
+//
+// Each invariant mirrors the matching server-side check
+// (`parsePutManifestVersionRequest`) + the DB CHECK / FK on
+// `watchkeeper.manifest_version`; the goal is for the caller to see
+// [ErrInvalidRequest] before any network hit. Empty / zero / nil
+// values round-trip as SQL NULL via `omitempty` and short-circuit each
+// branch.
+//
+// Returns true when every preflight passes; false otherwise (the
+// caller MUST translate false into [ErrInvalidRequest]).
+//
+//nolint:gocyclo // sequential field validations; each branch is a distinct AC mirroring a server-side rule; splitting would obscure the validation contract.
+func validatePutManifestVersionPreflight(req PutManifestVersionRequest) bool {
+	// Language: BCP 47-lite (migration 010 / server `languagePattern`).
+	if req.Language != "" && !clientLanguagePattern.MatchString(req.Language) {
+		return false
+	}
+	// Personality: ≤ 1024 codepoints (migration 010, char_length semantics).
+	if utf8.RuneCountInString(req.Personality) > clientPersonalityMaxRunes {
+		return false
+	}
+	// Model: ≤ 100 codepoints (migration 014).
+	if utf8.RuneCountInString(req.Model) > manifestModelMaxRunes {
+		return false
+	}
+	// Autonomy: closed-set {"", "supervised", "autonomous"} (migration 015).
+	if _, ok := manifestAutonomyAllowed[req.Autonomy]; !ok {
+		return false
+	}
+	// NotebookTopK: [0, 100], 0 means "unset" (migration 016).
+	if req.NotebookTopK < 0 || req.NotebookTopK > 100 {
+		return false
+	}
+	// NotebookRelevanceThreshold: [0, 1], 0 means "unset" (migration 016).
+	if req.NotebookRelevanceThreshold < 0 || req.NotebookRelevanceThreshold > 1 {
+		return false
+	}
+	// ImmutableCore: JSON object shape (migration 030, M3.1).
+	if !isJSONObjectOrEmpty(req.ImmutableCore) {
+		return false
+	}
+	// Reason: ≤ 1024 codepoints (migration 031, M3.3).
+	if utf8.RuneCountInString(req.Reason) > manifestReasonMaxRunes {
+		return false
+	}
+	// PreviousVersionID: canonical UUID shape when non-empty (migration 031, M3.3).
+	if req.PreviousVersionID != "" && !uuidPattern.MatchString(req.PreviousVersionID) {
+		return false
+	}
+	// Proposer: ≤ 256 codepoints (migration 031, M3.3).
+	if utf8.RuneCountInString(req.Proposer) > manifestProposerMaxRunes {
+		return false
+	}
+	return true
 }
 
 // isJSONObjectOrEmpty returns true when raw is empty / nil (the

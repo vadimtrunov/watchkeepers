@@ -151,6 +151,31 @@ type Manifest struct {
 	// a typed field lands.
 	ImmutableCore *ImmutableCore
 
+	// Reason is the optional free-text rationale the proposer attached
+	// to this manifest_version row (Phase 2 §M3.3). The runtime does
+	// not consume it directly — it is preserved here so meta-tools
+	// (M3.4 `manifest.history`, `manifest.diff`) and the M3.5 Slack UX
+	// can surface "why this version" without re-querying the Keep.
+	// Empty means "no reason recorded" (legacy row predating M3.3 OR a
+	// row that simply omitted the field on PUT).
+	Reason string
+
+	// PreviousVersionID is the optional UUID of the manifest_version
+	// row this version is derived from (Phase 2 §M3.3). Empty for the
+	// root version of every manifest (no previous). The M3.4
+	// `manifest.history` / `manifest.diff` tools walk the chain via
+	// this field; the runtime itself does not consume it.
+	PreviousVersionID string
+
+	// Proposer is the optional free-text identifier of the actor that
+	// proposed this version (Phase 2 §M3.3) — typically a Watchkeeper
+	// UUID, a human handle, or the literal "watchmaster" for
+	// system-initiated rollback proposals. Empty means "no proposer
+	// recorded" (legacy row OR a row that omitted the field on PUT).
+	// The runtime preserves it for meta-tools / audit; it does not
+	// drive any policy decision at this milestone.
+	Proposer string
+
 	// Metadata carries runtime-specific extensions (TS-harness module
 	// path, Claude Code subprocess flags, isolate options, …). The
 	// runtime consumes only the keys it recognises and ignores the
