@@ -1022,6 +1022,15 @@ fi
 if ! printf '%s' "${role_id_index}" | grep -q 'archive_uri IS NOT NULL'; then
   fail "partial index missing 'archive_uri IS NOT NULL' predicate; got: ${role_id_index}"
 fi
+# Iter-1 codex finding (Major): the partial index must ALSO exclude
+# NULL-valued role_id rows so equality-probes on `WHERE role_id = $1`
+# never scan dead entries (equality on NULL is undefined and can never
+# match, so including those rows bloats the index without serving the
+# query). A regression that drops the role_id IS NOT NULL clause
+# surfaces here.
+if ! printf '%s' "${role_id_index}" | grep -q 'role_id IS NOT NULL'; then
+  fail "partial index missing 'role_id IS NOT NULL' predicate (iter-1 finding); got: ${role_id_index}"
+fi
 echo "OK: idx_watchkeeper_role_id_retired present with documented partial WHERE clause"
 
 # Round-trip insert: an explicit role_id persists; a NULL role_id is

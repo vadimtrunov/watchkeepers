@@ -28,13 +28,16 @@
 --   LIMIT 1
 --
 -- A partial composite index on `(role_id, retired_at DESC)` that filters
--- exclusively on the retired-with-archive subset (the population the
--- M7.1.b query cares about) keeps the index small — production tables
--- carry orders-of-magnitude more pending/active rows than retired ones,
--- and the M7.1.b query never reaches them. The DESC order on
--- `retired_at` matches the query's ORDER BY so the planner can satisfy
--- the LIMIT 1 with an index-only scan. Mirrors the partial-index
--- precedent of `idx_pending_approvals_open_per_tool` (migration 018) and
+-- on `retired_at IS NOT null AND archive_uri IS NOT null AND role_id IS
+-- NOT null` keeps the index small — production tables carry orders-of-
+-- magnitude more pending/active rows than retired ones, the M7.1.b
+-- query never reaches them, and a row whose `role_id` is NULL can never
+-- satisfy `WHERE role_id = $1` either (equality on NULL is undefined)
+-- so leaving NULL-role rows out of the index removes dead weight
+-- without affecting query semantics. The DESC order on `retired_at`
+-- matches the query's ORDER BY so the planner can satisfy the LIMIT 1
+-- with an index-only scan. Mirrors the partial-index precedent of
+-- `idx_pending_approvals_open_per_tool` (migration 018) and
 -- `idx_outbox_pending` (migration 003) — partial indexes pay for
 -- themselves any time the predicate trims more than a couple of
 -- percent of the underlying table.
@@ -57,11 +60,21 @@ ADD COLUMN role_id text NULL;
 
 -- Partial composite index backing the M7.1.b predecessor-lookup query.
 -- The WHERE clause matches the query's filter exactly so the index is
--- only populated for retired watchkeepers that have an archive URI —
--- the population the M7.1.b inheritance lookup cares about.
+-- only populated for retired watchkeepers that have BOTH an archive URI
+-- AND a non-NULL role_id — the population the M7.1.b inheritance
+-- lookup cares about. NULL-valued role_id rows are excluded explicitly
+-- (codex iter-1 finding, Major): the planned lookup is
+-- `WHERE role_id = $1` which can never match a SQL-NULL value (equality
+-- on NULL is undefined → never satisfied), so including NULL-role rows
+-- in the index would bloat it without ever serving a query. Pre-M7.1
+-- retired rows + every legacy insert that omits the optional `role_id`
+-- body field land with `role_id IS NULL` and therefore stay out of
+-- this index, keeping it lean.
 CREATE INDEX idx_watchkeeper_role_id_retired
 ON watchkeeper.watchkeeper (role_id, retired_at DESC)
-WHERE retired_at IS NOT null AND archive_uri IS NOT null;
+WHERE retired_at IS NOT null
+AND archive_uri IS NOT null
+AND role_id IS NOT null;
 
 -- +goose Down
 DROP INDEX IF EXISTS watchkeeper.idx_watchkeeper_role_id_retired;
