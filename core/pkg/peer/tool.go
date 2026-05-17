@@ -146,6 +146,14 @@ type Deps struct {
 	// [NewTool] panics otherwise.
 	Capability CapabilityValidator
 
+	// EventBus is the M1.3.c event-stream seam [Tool.Subscribe]
+	// consumes — typically a [*PostgresEventBus] in production or a
+	// [*MemoryEventBus] in tests. OPTIONAL: nil is permitted for callers
+	// that wire the tool only for `peer.Ask` / `peer.Reply` / `peer.Close`
+	// surfaces. [Tool.Subscribe] surfaces [ErrPeerEventBusUnavailable]
+	// when invoked against a nil EventBus.
+	EventBus EventBus
+
 	// Now overrides the wall-clock used to compute the `since` cursor
 	// passed to [Repository.WaitForReply]. Defaults to [time.Now]; a
 	// test fixture may pass a deterministic clock. Optional.

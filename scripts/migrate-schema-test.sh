@@ -985,4 +985,108 @@ if [[ "${close_summary_write}" != "integration-test summary" ]]; then
 fi
 echo "OK: close_summary write on archived row persists under wk_org_role"
 
+# M1.3.c — peer_events table assertions (migration 032).
+#
+# Block (ab) pins:
+#   * the table exists with the expected column shape (id, org id,
+#     watchkeeper id, event type, jsonb payload, created_at);
+#   * the `peer_event_published` trigger fires NOTIFY peer_events on
+#     INSERT;
+#   * per-tenant RLS isolates rows by `watchkeeper.org` GUC.
+
+echo ">> migrate-schema-test: (ab) peer_events table shape + trigger + RLS"
+peer_events_columns=$("${PSQL[@]}" -tA <<'SQL'
+SELECT string_agg(column_name, ',' ORDER BY ordinal_position)
+FROM information_schema.columns
+WHERE table_schema = 'watchkeeper'
+  AND table_name = 'peer_events';
+SQL
+)
+if [[ "${peer_events_columns}" != "id,organization_id,watchkeeper_id,event_type,payload,created_at" ]]; then
+  fail "expected peer_events columns [id,organization_id,watchkeeper_id,event_type,payload,created_at]; got '${peer_events_columns}'"
+fi
+echo "OK: peer_events table has expected column shape"
+
+peer_events_payload_type=$("${PSQL[@]}" -tA <<'SQL'
+SELECT data_type
+FROM information_schema.columns
+WHERE table_schema = 'watchkeeper'
+  AND table_name = 'peer_events'
+  AND column_name = 'payload';
+SQL
+)
+if [[ "${peer_events_payload_type}" != "jsonb" ]]; then
+  fail "expected peer_events.payload to be jsonb; got '${peer_events_payload_type}'"
+fi
+echo "OK: peer_events.payload column is jsonb"
+
+peer_events_trigger=$("${PSQL[@]}" -tA <<'SQL'
+SELECT trigger_name
+FROM information_schema.triggers
+WHERE event_object_schema = 'watchkeeper'
+  AND event_object_table = 'peer_events'
+  AND trigger_name = 'peer_event_published_after_insert';
+SQL
+)
+if [[ "${peer_events_trigger}" != "peer_event_published_after_insert" ]]; then
+  fail "expected peer_event_published_after_insert trigger; got '${peer_events_trigger}'"
+fi
+echo "OK: peer_event_published_after_insert trigger registered"
+
+peer_events_insert=$("${PSQL[@]}" -tA <<SQL
+BEGIN;
+SET LOCAL ROLE wk_org_role;
+SET LOCAL watchkeeper.org TO '${org_a_id}';
+INSERT INTO watchkeeper.peer_events (
+  id, organization_id, watchkeeper_id, event_type, payload
+) VALUES (
+  gen_random_uuid(), '${org_a_id}', 'wk-asker', 'k2k_message_sent', '{"k":"v"}'::jsonb
+)
+RETURNING event_type;
+ROLLBACK;
+SQL
+)
+if [[ "${peer_events_insert}" != "k2k_message_sent" ]]; then
+  fail "expected peer_events INSERT under wk_org_role to return event_type; got '${peer_events_insert}'"
+fi
+echo "OK: peer_events INSERT under wk_org_role + matching watchkeeper.org GUC accepted"
+
+peer_events_rls_cross=$("${PSQL[@]}" -tA <<SQL 2>&1 || true
+BEGIN;
+SET LOCAL ROLE wk_org_role;
+SET LOCAL watchkeeper.org TO '${org_a_id}';
+SAVEPOINT before_chk;
+INSERT INTO watchkeeper.peer_events (
+  id, organization_id, watchkeeper_id, event_type
+) VALUES (
+  gen_random_uuid(), '${org_b_id}', 'wk-asker', 'evt'
+);
+ROLLBACK TO SAVEPOINT before_chk;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${peer_events_rls_cross}" | grep -qi 'policy'; then
+  fail "expected RLS policy violation on cross-tenant peer_events INSERT; got: ${peer_events_rls_cross}"
+fi
+echo "OK: peer_events cross-tenant INSERT rejected by RLS WITH CHECK"
+
+peer_events_check_empty=$("${PSQL[@]}" -tA <<SQL 2>&1 || true
+BEGIN;
+SET LOCAL ROLE wk_org_role;
+SET LOCAL watchkeeper.org TO '${org_a_id}';
+SAVEPOINT before_chk;
+INSERT INTO watchkeeper.peer_events (
+  id, organization_id, watchkeeper_id, event_type
+) VALUES (
+  gen_random_uuid(), '${org_a_id}', '   ', 'evt'
+);
+ROLLBACK TO SAVEPOINT before_chk;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${peer_events_check_empty}" | grep -qi 'check constraint'; then
+  fail "expected CHECK violation on whitespace-only watchkeeper_id; got: ${peer_events_check_empty}"
+fi
+echo "OK: whitespace-only watchkeeper_id rejected by CHECK"
+
 echo "ALL schema assertions passed"

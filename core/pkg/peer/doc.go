@@ -22,11 +22,37 @@
 //     matching capability ids, satisfying the M1.3.a AC's tool-
 //     registry entry contract.
 //
-// What this package deliberately does NOT ship at M1.3.a:
+// M1.3.b adds:
 //
-//   - No `peer.Close` lifecycle finalize — that is M1.3.b's scope.
-//   - No `peer.Subscribe` event-stream seam — that is M1.3.c's scope
-//     (and introduces the `peer.EventBus` interface M1.4 will consume).
+//   - [Close]: lifecycle finalize. Composes [k2k.Lifecycle.Close]
+//     (archives the Slack channel + transitions
+//     `k2k_conversations.status` to `archived`) with the M1.3.b
+//     `k2k.Repository.SetCloseSummary` write of a one-line operator
+//     summary onto the row. Idempotent on double-close (preserves the
+//     first close's summary) and recovers a half-completed close
+//     (archive succeeded, summary write failed).
+//   - [BuiltinCloseManifest]: tool-registry manifest entry stamped with
+//     `Source: "built-in"` and the `peer:close` capability.
+//
+// M1.3.c adds:
+//
+//   - [Subscribe]: event-stream seam. Validates the supplied filter,
+//     gates on `peer:subscribe` capability, and forwards to the
+//     constructor-supplied [EventBus]. Returns a read-only delivery
+//     channel + [CancelFunc]; the channel closes on ctx cancel or
+//     CancelFunc invocation. Slow-consumer drop policy: events are
+//     non-blocking-delivered into a bounded buffer; a full buffer
+//     drops the event and increments the bus-wide drop counter.
+//   - [EventBus] interface: Publish + Subscribe seam. In-memory
+//     implementation [MemoryEventBus] for tests + dev loops; Postgres
+//     LISTEN/NOTIFY implementation [PostgresEventBus] for production
+//     wiring. The Postgres adapter uses migration `032_peer_events.sql`
+//     (`peer_events` table + `peer_event_published` trigger).
+//   - [BuiltinSubscribeManifest]: tool-registry manifest entry stamped
+//     with `Source: "built-in"` and the `peer:subscribe` capability.
+//
+// What this package deliberately does NOT ship at M1.3.c:
+//
 //   - No `peer.Broadcast` fan-out — that is M1.3.d's scope (and
 //     introduces the `peer.RoleFilter` resolver).
 //   - No audit emission. The K2K event taxonomy
