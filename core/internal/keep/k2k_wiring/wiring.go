@@ -26,6 +26,7 @@ import (
 	"fmt"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/audit"
 	"github.com/vadimtrunov/watchkeepers/core/pkg/messenger/slack"
 )
 
@@ -53,6 +54,12 @@ type LifecycleDeps struct {
 	// [*slack.Client]; tests inject a fake satisfying
 	// [k2k.SlackChannels]. Required (non-nil).
 	Slack k2k.SlackChannels
+
+	// Auditor is the M1.4 K2K audit-emission seam. Production wiring
+	// passes a [*audit.Writer] wrapping the keeperslog writer; tests
+	// inject a fake satisfying [audit.Emitter], or leave nil (the
+	// lifecycle skips emission). OPTIONAL.
+	Auditor audit.Emitter
 }
 
 // ComposeLifecycle composes the M1.1.c K2K lifecycle from the
@@ -73,7 +80,8 @@ func ComposeLifecycle(deps LifecycleDeps) (*k2k.Lifecycle, error) {
 		return nil, fmt.Errorf("k2kwiring: ComposeLifecycle: Slack must not be nil")
 	}
 	return k2k.NewLifecycle(k2k.LifecycleDeps{
-		Repo:  deps.Repo,
-		Slack: deps.Slack,
+		Repo:    deps.Repo,
+		Slack:   deps.Slack,
+		Auditor: deps.Auditor,
 	}), nil
 }

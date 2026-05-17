@@ -33,11 +33,14 @@
 //
 // audit discipline: this file does NOT import `keeperslog` and does
 // NOT call `.Append(`. The K2K event taxonomy
-// (`k2k_conversation_opened` / `k2k_conversation_closed` / etc.)
-// is owned by the M1.4 audit subscriber; the lifecycle layer is the
-// state-mutation surface, not the audit sink. A source-grep AC test
-// pins this so a future contributor adding inline audit emission
-// here trips a fast-failing test.
+// (`k2k_conversation_opened` / `k2k_conversation_closed` / etc.) is
+// emitted through the M1.4 `k2k/audit.Emitter` seam — a typed
+// interface that wraps `keeperslog.Writer` outside this file. The
+// lifecycle layer composes the seam via `LifecycleDeps.Auditor` (an
+// OPTIONAL dep; nil-permissive so M1.1.c-era wirings stay valid). A
+// source-grep AC test pins the keeperslog/Append ban so a future
+// contributor adding inline audit emission here trips a fast-failing
+// test.
 //
 // PII discipline: channel ids and slack user ids are workspace-public
 // identifiers (Slack documents them as opaque non-secret values). The
@@ -65,14 +68,26 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/audit"
 )
 
 // channelNamePrefix is the canonical leader on every K2K-derived Slack
 // channel name. Surfaced as a constant so a future M1.7 channel-name
 // audit can match the pattern via a single source of truth.
 const channelNamePrefix = "k2k-"
+
+// auditEmitTimeout caps the detached-ctx window the M1.4 audit emit
+// runs under. The emit is best-effort observability; a 5-second cap
+// is long enough that a healthy keeperslog Append completes under
+// any realistic backpressure but short enough that a degenerate Keep
+// outage cannot tie up the caller's lifecycle / peer-tool return
+// indefinitely. Tuned to the same order of magnitude as the M9.4.a
+// publisher timeout discipline.
+const auditEmitTimeout = 5 * time.Second
 
 // conversationIDPrefixLen is the number of leading UUID hex characters
 // the [DeriveChannelName] helper consumes. Eight chars is the minimum
@@ -143,6 +158,19 @@ type LifecycleDeps struct {
 	// [*messenger/slack.Client] in production. Required (non-nil);
 	// [NewLifecycle] panics otherwise.
 	Slack SlackChannels
+
+	// Auditor is the M1.4 K2K audit-emission seam — typically a
+	// [*audit.Writer] in production wiring. OPTIONAL: nil is permitted
+	// so M1.1.c-era callers wiring the lifecycle without an audit sink
+	// stay valid. When non-nil, [Open] emits
+	// [audit.EventConversationOpened] after the row + Slack channel
+	// are bound, and [Close] emits [audit.EventConversationClosed]
+	// after the repository transition. Mirrors the M1.3.c
+	// [peer.Deps.EventBus] optional-dep discipline. An audit-emit
+	// failure NEVER short-circuits the lifecycle's own success — the
+	// row + channel state is the load-bearing surface; the audit row
+	// is observability.
+	Auditor audit.Emitter
 }
 
 // Lifecycle is the M1.1.c K2K conversation lifecycle orchestrator. It
@@ -300,6 +328,31 @@ func (l *Lifecycle) Open(ctx context.Context, params OpenParams) (Conversation, 
 	if err != nil {
 		return Conversation{}, fmt.Errorf("k2k: lifecycle open: refresh row: %w", err)
 	}
+
+	// M1.4 audit emission. Emit AFTER the row + Slack channel are
+	// bound + the invite fan-out completed, so the audit row reflects
+	// the state any subsequent reader can observe. A nil Auditor is a
+	// no-op (M1.1.c-era wirings stayed valid by design); an emit
+	// failure is logged but does NOT propagate — the lifecycle's
+	// success is gated on persisted state, not observability. The
+	// emit runs under a detached ctx (`context.WithoutCancel` + a
+	// short timeout) so a caller-side cancellation arriving after the
+	// state mutation succeeded does NOT systematically drop the audit
+	// row (iter-1 codex Major fix).
+	if l.deps.Auditor != nil {
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditEmitTimeout)
+		defer cancel()
+		_, _ = l.deps.Auditor.EmitConversationOpened(auditCtx, audit.ConversationOpenedEvent{
+			ConversationID: bound.ID,
+			OrganizationID: bound.OrganizationID,
+			Participants:   bound.Participants,
+			Subject:        bound.Subject,
+			CorrelationID:  bound.CorrelationID,
+			SlackChannelID: bound.SlackChannelID,
+			OpenedAt:       bound.OpenedAt,
+		})
+	}
+
 	return bound, nil
 }
 
@@ -347,10 +400,37 @@ func (l *Lifecycle) Close(ctx context.Context, id uuid.UUID, reason string) erro
 			// Saga-replay: the row was already closed by a prior
 			// invocation. Surface the typed sentinel so the caller
 			// branches on errors.Is, mirroring M1.1.b's idempotent-
-			// archive translation discipline.
+			// archive translation discipline. The race-winner already
+			// emitted the audit row; emitting a second one here would
+			// duplicate the observed close so we deliberately skip.
 			return err
 		}
 		return fmt.Errorf("k2k: lifecycle close: %w", err)
 	}
+
+	// M1.4 audit emission. Emit AFTER the repository transition so the
+	// audit row reflects the state any subsequent reader can observe.
+	// A nil Auditor is a no-op; an emit failure is logged but does NOT
+	// propagate — the close's success is gated on persisted state, not
+	// observability. The post-close Get re-reads the row so the emitted
+	// `closed_at` matches the persisted column rather than a wall-clock
+	// approximation. The Get + emit both run under a detached ctx so a
+	// caller-side cancellation arriving after Repo.Close succeeded does
+	// NOT systematically drop the close audit row (iter-1 codex Major
+	// fix).
+	if l.deps.Auditor != nil {
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditEmitTimeout)
+		defer cancel()
+		closed, getErr := l.deps.Repo.Get(auditCtx, id)
+		if getErr == nil {
+			_, _ = l.deps.Auditor.EmitConversationClosed(auditCtx, audit.ConversationClosedEvent{
+				ConversationID: closed.ID,
+				OrganizationID: closed.OrganizationID,
+				CloseReason:    closed.CloseReason,
+				ClosedAt:       closed.ClosedAt,
+			})
+		}
+	}
+
 	return nil
 }

@@ -16,11 +16,18 @@
 //	      OR (uuid.Nil, nil, ErrPeerCapabilityDenied) on capability deny.
 //
 // audit discipline: this file does NOT import `keeperslog` and does
-// NOT call `.Append(`. The K2K message-sent / conversation-opened
-// audit taxonomy is owned by the M1.4 audit subscriber; this file is
-// the call surface, not the audit sink. A source-grep AC test pins
-// this so a future contributor adding inline audit emission here
-// trips a fast-failing test.
+// NOT call `.Append(`. The K2K message-sent / conversation-opened /
+// message-received audit taxonomy is owned by the M1.4
+// `k2k/audit.Emitter` seam — typed interface composed via
+// `Deps.Auditor` (an OPTIONAL dep; nil-permissive so M1.3.a-era
+// wirings stay valid). On a successful Ask the file emits
+// `audit.EventMessageSent` for the request append and
+// `audit.EventMessageReceived` for the observed reply; the
+// `audit.EventConversationOpened` row is emitted by the M1.1.c
+// lifecycle layer (the row+channel ownership lives there). A
+// source-grep AC test pins the keeperslog/Append ban so a future
+// contributor adding inline keeperslog calls here trips a
+// fast-failing test.
 //
 // PII discipline: the `body` payload is treated as opaque bytes. The
 // implementation defensively deep-copies the input + the result so
@@ -39,6 +46,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k"
+	"github.com/vadimtrunov/watchkeepers/core/pkg/k2k/audit"
 )
 
 // AskParams is the closed-set input shape [Tool.Ask] accepts. Hoisted
@@ -205,23 +213,51 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 		return AskResult{}, fmt.Errorf("peer: ask: open conversation: %w", err)
 	}
 
-	// Capture the wall-clock BEFORE the AppendMessage so the
-	// WaitForReply `since` cursor is strictly earlier than the
-	// reply's `created_at`. The cursor is exclusive on the storage
-	// side; using a pre-append timestamp here guarantees a reply
-	// stamped at exactly the AppendMessage's `created_at` would NOT
-	// satisfy the wait (which is the correct semantic — the request
-	// is not its own reply).
-	since := t.now().UTC()
-
-	if _, err := t.deps.Repository.AppendMessage(ctx, k2k.AppendMessageParams{
+	reqMsg, err := t.deps.Repository.AppendMessage(ctx, k2k.AppendMessageParams{
 		ConversationID:      conv.ID,
 		OrganizationID:      params.OrganizationID,
 		SenderWatchkeeperID: params.ActingWatchkeeperID,
 		Body:                reqBody,
 		Direction:           k2k.MessageDirectionRequest,
-	}); err != nil {
+	})
+	if err != nil {
 		return AskResult{}, fmt.Errorf("peer: ask: append request: %w", err)
+	}
+
+	// Anchor the WaitForReply cursor strictly BELOW the persisted
+	// request's `CreatedAt` (iter-1 codex Major fix). The storage-layer
+	// `WaitForReply` cursor is exclusive (`created_at > since`); a
+	// pre-AppendMessage `t.now()` could equal `reqMsg.CreatedAt` under
+	// a fixed / coarse clock (test fixture, low-resolution platform
+	// monotonic source). With `since == reqMsg.CreatedAt` a reply
+	// stamped at the same tick would also have `created_at ==
+	// reqMsg.CreatedAt` and the strict-greater predicate drops it —
+	// the wait then times out even though a valid reply arrived.
+	// Anchoring at `reqMsg.CreatedAt - 1ns` keeps the cursor strictly
+	// less than the request row AND strictly less than any reply that
+	// shares the request's tick. The semantic invariant "the request
+	// is not its own reply" still holds because the request row is a
+	// `request`-direction message and `WaitForReply` filters by
+	// direction inside the storage layer.
+	since := reqMsg.CreatedAt.Add(-time.Nanosecond)
+
+	// M1.4 audit emission for the request append. Nil Auditor is a
+	// no-op; an emit failure is logged but does NOT propagate — the
+	// peer-tool surface is gated on persisted state, not observability.
+	// Runs under a detached ctx (iter-1 codex Major fix) so a
+	// caller-side cancellation arriving after AppendMessage succeeded
+	// does NOT systematically drop the audit row.
+	if t.deps.Auditor != nil {
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditEmitTimeout)
+		_, _ = t.deps.Auditor.EmitMessageSent(auditCtx, audit.MessageSentEvent{
+			MessageID:           reqMsg.ID,
+			ConversationID:      conv.ID,
+			OrganizationID:      params.OrganizationID,
+			SenderWatchkeeperID: params.ActingWatchkeeperID,
+			Direction:           string(k2k.MessageDirectionRequest),
+			CreatedAt:           reqMsg.CreatedAt,
+		})
+		cancel()
 	}
 
 	reply, err := t.deps.Repository.WaitForReply(ctx, conv.ID, since, params.Timeout)
@@ -230,6 +266,25 @@ func (t *Tool) Ask(ctx context.Context, params AskParams) (AskResult, error) {
 			return AskResult{}, fmt.Errorf("%w: %w", ErrPeerTimeout, err)
 		}
 		return AskResult{}, fmt.Errorf("peer: ask: wait for reply: %w", err)
+	}
+
+	// M1.4 audit emission for the observed reply (receiver side). The
+	// replier's `peer.Reply` emits the sender side; this emit captures
+	// the round-trip's recipient view so a subscriber can join the two
+	// halves on `conversation_id` + `message_id`. Detached ctx (same
+	// rationale as the request emit above).
+	if t.deps.Auditor != nil {
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditEmitTimeout)
+		_, _ = t.deps.Auditor.EmitMessageReceived(auditCtx, audit.MessageReceivedEvent{
+			MessageID:              reply.ID,
+			ConversationID:         conv.ID,
+			OrganizationID:         params.OrganizationID,
+			SenderWatchkeeperID:    reply.SenderWatchkeeperID,
+			RecipientWatchkeeperID: params.ActingWatchkeeperID,
+			Direction:              string(k2k.MessageDirectionReply),
+			CreatedAt:              reply.CreatedAt,
+		})
+		cancel()
 	}
 
 	// Defensive deep-copy on the way out so the caller cannot bleed
