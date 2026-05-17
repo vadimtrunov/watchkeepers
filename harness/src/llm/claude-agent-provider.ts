@@ -381,9 +381,9 @@ function mapAgentError(e: unknown): LLMError {
 class ClaudeAgentStreamSubscription implements StreamSubscription {
   // iter is stored as the original iterable/iterator so that interceptStream
   // can call iter[Symbol.asyncIterator]() and also reach iter.interrupt().
-  public readonly iter: AsyncIterable<unknown> & { interrupt?: () => Promise<void> };
+  private readonly iter: AsyncIterable<unknown> & { interrupt?: () => Promise<void> };
   private readonly maybeQuery: { interrupt: () => Promise<void> } | undefined;
-  public _stopped = false;
+  private _stopped = false;
   private _cause: unknown = undefined;
   private _stopRan = false;
   private _stopResult: LLMError | undefined;
@@ -473,11 +473,13 @@ class ClaudeAgentStreamSubscription implements StreamSubscription {
 function makeAbortBagFor(sub: ClaudeAgentStreamSubscription): AbortBag {
   return {
     get isStopped(): boolean {
-      return sub._stopped;
+      return sub.isStopped;
     },
     set isStopped(v: boolean) {
-      // Forward stop signals from the interceptor; ignore writes of false
-      // because once stopped the subscription stays stopped.
+      // The interceptor (tool-bridge-interceptor.ts) only ever writes true
+      // via the dispatch loop's error / handler-throw paths. Writes of false
+      // are intentionally no-ops here — once a subscription is stopped, the
+      // cause-latch in markStopped should not be cleared.
       if (v) sub.markStopped(undefined);
     },
     markStopped: (cause: unknown) => {
