@@ -141,6 +141,23 @@ func handleListPeers(r scopedRunner) http.Handler {
 			// JOIN against `manifest` carries the role name
 			// (display_name) — manifest_version itself does NOT
 			// store the role name; that lives one hop up.
+			// JOIN chain note (iter-1 codex P2 fix): the manifest join
+			// follows `mv.manifest_id`, NOT `wk.manifest_id`. Migration
+			// 002's docblock spells out that the composite-FK invariant
+			// "`watchkeeper.active_manifest_version_id` references a
+			// `manifest_version` whose `manifest_id` matches
+			// `watchkeeper.manifest_id`" is deferred to Phase 2 and is
+			// NOT enforced at the SQL layer today. If a write path
+			// (legacy or malformed) lands a row where the two ids
+			// disagree, joining `manifest` on `wk.manifest_id` would
+			// surface a peer whose `role` (from `m.display_name`) and
+			// `description` / `language` / `capabilities` (from
+			// `mv.*`) belong to two different manifests — an
+			// impossible peer record. Threading the join through
+			// `mv.manifest_id` keeps every projected row internally
+			// consistent: all four manifest-derived fields come from
+			// the SAME manifest version that the watchkeeper is
+			// currently bound to.
 			rows, err := tx.Query(ctx, `
                 SELECT wk.id,
                        coalesce(m.display_name, ''),
@@ -151,7 +168,7 @@ func handleListPeers(r scopedRunner) http.Handler {
                 JOIN watchkeeper.manifest_version mv
                   ON mv.id = wk.active_manifest_version_id
                 JOIN watchkeeper.manifest m
-                  ON m.id = wk.manifest_id
+                  ON m.id = mv.manifest_id
                 WHERE wk.status = 'active'
                 ORDER BY wk.created_at DESC
                 LIMIT $1

@@ -296,6 +296,19 @@ func TestListPeers_SQLFiltersActiveAndJoinsManifest(t *testing.T) {
 	if !strings.Contains(gotSQL, "JOIN watchkeeper.manifest m") {
 		t.Errorf("SQL missing manifest join; got: %s", gotSQL)
 	}
+	// iter-1 codex P2 fix: the manifest join MUST follow
+	// `mv.manifest_id`, not `wk.manifest_id`. Migration 002's
+	// invariant (active_manifest_version_id's manifest_id matches
+	// watchkeeper.manifest_id) is not SQL-enforced; routing through
+	// `mv.manifest_id` keeps every projected row internally
+	// consistent across the role / description / language /
+	// capabilities tuple even when a malformed row lands.
+	if !strings.Contains(gotSQL, "m.id = mv.manifest_id") {
+		t.Errorf("SQL must join manifest via mv.manifest_id (iter-1 P2 fix), not wk.manifest_id; got: %s", gotSQL)
+	}
+	if strings.Contains(gotSQL, "m.id = wk.manifest_id") {
+		t.Errorf("SQL joins manifest via wk.manifest_id — iter-1 codex P2 fix requires routing through mv.manifest_id so divergent-manifest rows do not mix role with description/language/capabilities; got: %s", gotSQL)
+	}
 	if !strings.Contains(gotSQL, "ORDER BY wk.created_at DESC") {
 		t.Errorf("SQL missing deterministic ORDER BY; got: %s", gotSQL)
 	}
