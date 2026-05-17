@@ -210,7 +210,16 @@ type manifestVersionResponse struct {
 	Autonomy                   string          `json:"autonomy,omitempty"`
 	NotebookTopK               int             `json:"notebook_top_k,omitempty"`
 	NotebookRelevanceThreshold float64         `json:"notebook_relevance_threshold,omitempty"`
-	CreatedAt                  time.Time       `json:"created_at"`
+	// ImmutableCore is the optional manifest immutable_core jsonb column
+	// per Phase 2 §M3.1. A NULL column in the DB scans as a zero-length
+	// [json.RawMessage] (see the read handler below — pgx skips Scan
+	// writes on SQL NULL when the destination is a pointer-typed slice);
+	// `omitempty` then drops the key from the wire response so legacy
+	// callers that never set it observe no schema change. When non-NULL
+	// the server CHECK constraint `manifest_version_immutable_core_shape`
+	// (migration 030) guarantees the payload is a JSON object.
+	ImmutableCore json.RawMessage `json:"immutable_core,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
 }
 
 // handleGetManifest serves GET /v1/manifests/{manifest_id}. It returns
@@ -232,6 +241,14 @@ func handleGetManifest(r scopedRunner) http.Handler {
 		}
 
 		var out manifestVersionResponse
+		// immutableCore is scanned as a pointer-to-RawMessage so the SQL
+		// NULL case (no immutable_core declared yet) projects as a Go nil
+		// rather than the JSON `null` literal — `omitempty` on the
+		// response field then drops the key entirely from the wire so
+		// legacy GET callers observe no schema change. Mirrors the
+		// nullable-jsonb pattern recommended by pgx; pgx writes through
+		// the pointer only on a non-NULL row.
+		var immutableCore *json.RawMessage
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `
                 SELECT id, manifest_id, version_no, system_prompt,
@@ -241,6 +258,7 @@ func handleGetManifest(r scopedRunner) http.Handler {
                        coalesce(autonomy, ''),
                        coalesce(notebook_top_k, 0),
                        coalesce(notebook_relevance_threshold, 0),
+                       immutable_core,
                        created_at
                 FROM watchkeeper.manifest_version
                 WHERE manifest_id = $1
@@ -254,6 +272,7 @@ func handleGetManifest(r scopedRunner) http.Handler {
 				&out.Autonomy,
 				&out.NotebookTopK,
 				&out.NotebookRelevanceThreshold,
+				&immutableCore,
 				&out.CreatedAt,
 			)
 		})
@@ -264,6 +283,14 @@ func handleGetManifest(r scopedRunner) http.Handler {
 			}
 			writeError(w, http.StatusInternalServerError, "get_manifest_failed")
 			return
+		}
+		// Promote the pointer-to-RawMessage scan target onto the
+		// response struct only when the column was non-NULL; on SQL
+		// NULL the pointer stays nil and `omitempty` drops the field
+		// from the wire (preserving legacy GET shape for callers that
+		// have not set immutable_core yet).
+		if immutableCore != nil {
+			out.ImmutableCore = *immutableCore
 		}
 
 		writeJSON(w, http.StatusOK, out)

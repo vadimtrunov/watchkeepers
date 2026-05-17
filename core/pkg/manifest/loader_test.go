@@ -666,3 +666,213 @@ func TestLoadManifest_NotebookRecallFields_ZeroPassThrough(t *testing.T) {
 		t.Errorf("NotebookRelevanceThreshold = %v, want 0 (zero pass-through)", got.NotebookRelevanceThreshold)
 	}
 }
+
+// -----------------------------------------------------------------------
+// M3.1 — immutable_core projection into [runtime.Manifest.ImmutableCore]
+// -----------------------------------------------------------------------
+
+// TestLoadManifest_ImmutableCore_NilByDefault asserts that a manifest
+// version with no `immutable_core` jsonb (nil RawMessage) projects to a
+// nil [runtime.Manifest.ImmutableCore] pointer — the "no governance
+// declared yet" sentinel documented on the runtime field. Mirrors the
+// pattern from [decodeAuthorityMatrix] / [decodeToolset].
+func TestLoadManifest_ImmutableCore_NilByDefault(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:   "m",
+		SystemPrompt: "x",
+	}}
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.ImmutableCore != nil {
+		t.Errorf("ImmutableCore = %+v, want nil (no immutable_core declared)", got.ImmutableCore)
+	}
+}
+
+// TestLoadManifest_ImmutableCore_NullLiteralProjectsNil asserts that the
+// JSON literal `null` (a row that was explicitly cleared rather than
+// never set) projects to a nil pointer — same shape as the absent case.
+// Symmetric with the AuthorityMatrix / Toolset null-literal treatment.
+func TestLoadManifest_ImmutableCore_NullLiteralProjectsNil(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:    "m",
+		SystemPrompt:  "x",
+		ImmutableCore: json.RawMessage(`null`),
+	}}
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.ImmutableCore != nil {
+		t.Errorf("ImmutableCore = %+v, want nil for JSON null literal", got.ImmutableCore)
+	}
+}
+
+// TestLoadManifest_ImmutableCore_EmptyObjectProjectsNil asserts that the
+// JSON literal `{}` (an explicitly-empty but valid object) projects to a
+// nil pointer — bucket-absent everywhere reads as "no overrides".
+// Symmetric with the AuthorityMatrix empty-map projection.
+func TestLoadManifest_ImmutableCore_EmptyObjectProjectsNil(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:    "m",
+		SystemPrompt:  "x",
+		ImmutableCore: json.RawMessage(`{}`),
+	}}
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.ImmutableCore != nil {
+		t.Errorf("ImmutableCore = %+v, want nil for empty object", got.ImmutableCore)
+	}
+}
+
+// TestLoadManifest_ImmutableCore_AllFiveBucketsProjected asserts that
+// the canonical Phase 2 §M3.1 five-bucket payload projects onto the
+// typed fields verbatim. Each bucket is exercised so a regression in
+// any single field name (e.g. a typo on `cost_limits` →
+// `cost_limit`) surfaces immediately.
+func TestLoadManifest_ImmutableCore_AllFiveBucketsProjected(t *testing.T) {
+	t.Parallel()
+
+	const payload = `{
+		"role_boundaries":["delete_production_data","spawn_subagents"],
+		"security_constraints":{"pii_export":"forbidden","classification_floor":"internal"},
+		"escalation_protocols":{"pii_leak":"#security-on-call","cost_breach":"#ops-leads"},
+		"cost_limits":{"per_task_tokens":50000,"per_day_tokens":500000},
+		"audit_requirements":{"manifest_changes":"retain_forever","tool_invocations":"retain_90d"}
+	}`
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:    "m",
+		SystemPrompt:  "x",
+		ImmutableCore: json.RawMessage(payload),
+	}}
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.ImmutableCore == nil {
+		t.Fatal("ImmutableCore is nil; want non-nil typed projection")
+	}
+	wantRoleBoundaries := []string{"delete_production_data", "spawn_subagents"}
+	if !reflect.DeepEqual(got.ImmutableCore.RoleBoundaries, wantRoleBoundaries) {
+		t.Errorf("RoleBoundaries = %v, want %v", got.ImmutableCore.RoleBoundaries, wantRoleBoundaries)
+	}
+	if v := got.ImmutableCore.SecurityConstraints["pii_export"]; v != "forbidden" {
+		t.Errorf("SecurityConstraints[pii_export] = %v, want forbidden", v)
+	}
+	if v := got.ImmutableCore.EscalationProtocols["pii_leak"]; v != "#security-on-call" {
+		t.Errorf("EscalationProtocols[pii_leak] = %v, want #security-on-call", v)
+	}
+	if v, ok := got.ImmutableCore.CostLimits["per_task_tokens"].(float64); !ok || v != 50000 {
+		t.Errorf("CostLimits[per_task_tokens] = %v, want 50000", got.ImmutableCore.CostLimits["per_task_tokens"])
+	}
+	if v := got.ImmutableCore.AuditRequirements["manifest_changes"]; v != "retain_forever" {
+		t.Errorf("AuditRequirements[manifest_changes] = %v, want retain_forever", v)
+	}
+	if got.ImmutableCore.Extra != nil {
+		t.Errorf("Extra = %v, want nil (no forward-compat buckets in this payload)", got.ImmutableCore.Extra)
+	}
+}
+
+// TestLoadManifest_ImmutableCore_UnknownBucketRidesIntoExtra asserts
+// the forward-compatibility contract: a sixth (M3.4+) bucket on the
+// wire decodes into [runtime.ImmutableCore.Extra] verbatim rather than
+// being silently dropped. The canonical M3.1 buckets still project
+// onto their typed fields.
+func TestLoadManifest_ImmutableCore_UnknownBucketRidesIntoExtra(t *testing.T) {
+	t.Parallel()
+
+	const payload = `{"role_boundaries":["x"],"merge_history":{"v3":"by_lead"}}`
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:    "m",
+		SystemPrompt:  "x",
+		ImmutableCore: json.RawMessage(payload),
+	}}
+	got, err := LoadManifest(context.Background(), f, "m")
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got.ImmutableCore == nil {
+		t.Fatal("ImmutableCore is nil; want non-nil typed projection")
+	}
+	if !reflect.DeepEqual(got.ImmutableCore.RoleBoundaries, []string{"x"}) {
+		t.Errorf("RoleBoundaries = %v, want [x]", got.ImmutableCore.RoleBoundaries)
+	}
+	extraVal, ok := got.ImmutableCore.Extra["merge_history"]
+	if !ok {
+		t.Fatalf("Extra[merge_history] missing; Extra=%v", got.ImmutableCore.Extra)
+	}
+	var extraObj map[string]string
+	if err := json.Unmarshal(extraVal, &extraObj); err != nil {
+		t.Fatalf("Extra[merge_history] decode: %v", err)
+	}
+	if extraObj["v3"] != "by_lead" {
+		t.Errorf("Extra[merge_history].v3 = %v, want by_lead", extraObj["v3"])
+	}
+}
+
+// TestLoadManifest_ImmutableCore_MalformedRejected asserts that a
+// non-object top-level (array / scalar) or malformed JSON surfaces as a
+// wrapped `manifest: immutable_core:` error rather than silently
+// coercing. The server-side CHECK constraint enforces this at the SQL
+// layer; the loader is defense-in-depth for any code path that does not
+// go through the validated PUT path (e.g. a test seeding rows via raw
+// SQL).
+func TestLoadManifest_ImmutableCore_MalformedRejected(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"array", json.RawMessage(`[1,2,3]`)},
+		{"string", json.RawMessage(`"oops"`)},
+		{"number", json.RawMessage(`42`)},
+		{"malformed", json.RawMessage(`{not-json`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeFetcher{response: &keepclient.ManifestVersion{
+				ManifestID:    "m",
+				SystemPrompt:  "x",
+				ImmutableCore: tc.raw,
+			}}
+			_, err := LoadManifest(context.Background(), f, "m")
+			if err == nil {
+				t.Fatalf("err = nil, want wrapped immutable_core decode error")
+			}
+			if !strings.Contains(err.Error(), "manifest: immutable_core") {
+				t.Errorf("err = %q, want it to contain 'manifest: immutable_core'", err.Error())
+			}
+		})
+	}
+}
+
+// TestLoadManifest_ImmutableCore_TypedBucketTypeMismatchRejected asserts
+// that a per-bucket type error (e.g. role_boundaries supplied as an
+// object instead of an array) wraps as a bucket-named error so the
+// caller can tell which bucket misshaped.
+func TestLoadManifest_ImmutableCore_TypedBucketTypeMismatchRejected(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeFetcher{response: &keepclient.ManifestVersion{
+		ManifestID:    "m",
+		SystemPrompt:  "x",
+		ImmutableCore: json.RawMessage(`{"role_boundaries":{"oops":"object_not_array"}}`),
+	}}
+	_, err := LoadManifest(context.Background(), f, "m")
+	if err == nil {
+		t.Fatal("err = nil, want wrapped per-bucket decode error")
+	}
+	if !strings.Contains(err.Error(), "role_boundaries") {
+		t.Errorf("err = %q, want it to name the role_boundaries bucket", err.Error())
+	}
+}

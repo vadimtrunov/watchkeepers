@@ -342,6 +342,17 @@ type putManifestVersionRequest struct {
 	Autonomy                   string          `json:"autonomy"`
 	NotebookTopK               int             `json:"notebook_top_k"`
 	NotebookRelevanceThreshold float64         `json:"notebook_relevance_threshold"`
+	// ImmutableCore is the optional manifest immutable_core jsonb column
+	// per Phase 2 §M3.1. When non-empty the wire payload MUST be a JSON
+	// object — validated via [validateImmutableCoreShape] before the row
+	// reaches Postgres so the caller sees the stable
+	// `invalid_immutable_core` 400 reason rather than a 23514
+	// check_violation. The five buckets carried by the object
+	// (`role_boundaries`, `security_constraints`, `escalation_protocols`,
+	// `cost_limits`, `audit_requirements`) are intentionally not
+	// validated at the bucket level here — admin-only editability lands
+	// in M3.2 and the self-tuning validator lands in M3.6.
+	ImmutableCore json.RawMessage `json:"immutable_core"`
 }
 
 // putManifestVersionResponse is the 201 body returned on successful insert.
@@ -428,7 +439,46 @@ func parsePutManifestVersionRequest(w http.ResponseWriter, req *http.Request) (p
 	if !validateNotebookRecallFields(w, body) {
 		return body, false
 	}
+	if !validateImmutableCoreShape(w, body) {
+		return body, false
+	}
 	return body, true
+}
+
+// validateImmutableCoreShape mirrors the SQL CHECK
+// `manifest_version_immutable_core_shape` (migration 030): an empty /
+// nil RawMessage round-trips as SQL NULL (allowed); any non-empty
+// payload MUST be a JSON object literal. Arrays, scalars, and the JSON
+// `null` literal are rejected with the stable 400 reason
+// `invalid_immutable_core` before the row hits Postgres so the caller
+// gets a clear signal rather than a 23514 check_violation.
+//
+// The check is structural — bucket contents (role_boundaries,
+// security_constraints, escalation_protocols, cost_limits,
+// audit_requirements) are intentionally NOT validated here; admin-only
+// editability is M3.2 and the self-tuning validator is M3.6.
+func validateImmutableCoreShape(w http.ResponseWriter, body putManifestVersionRequest) bool {
+	if !isJSONObjectOrEmpty(body.ImmutableCore) {
+		writeError(w, http.StatusBadRequest, "invalid_immutable_core")
+		return false
+	}
+	return true
+}
+
+// isJSONObjectOrEmpty reports whether raw is empty / nil (the
+// `omitempty` round-trip case) OR carries a JSON object literal
+// (`{...}`). Arrays, scalars, the JSON `null` literal, and malformed
+// JSON return false. Mirrors the keepclient-side precheck shape so the
+// server-side rejection and the client-side preflight stay in lock-step.
+func isJSONObjectOrEmpty(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	if !json.Valid(raw) {
+		return false
+	}
+	trimmed := bytes.TrimLeft(raw, " \t\r\n")
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 // validateNotebookRecallFields checks the notebook_top_k and
@@ -515,7 +565,11 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 		// The three jsonb columns default to '[]' / '{}' / '[]' at the
 		// table level; pass SQL NULL via nil interface when the client
 		// omits the field so the default fires instead of Postgres
-		// rejecting an empty json.RawMessage literal.
+		// rejecting an empty json.RawMessage literal. immutable_core has
+		// no SQL default — an unset / empty wire value rides through as
+		// SQL NULL (Phase 2 §M3.1: schema-only; M3.2 hardens admin-only
+		// editability; the runtime treats NULL as "no immutable core
+		// declared yet" rather than an empty allow-all object).
 		tools := jsonbOrNil(body.Tools)
 		authorityMatrix := jsonbOrNil(body.AuthorityMatrix)
 		knowledgeSources := jsonbOrNil(body.KnowledgeSources)
@@ -525,6 +579,7 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 		autonomy := stringOrNil(body.Autonomy)
 		notebookTopK := intOrNil(body.NotebookTopK)
 		notebookRelevanceThreshold := floatOrNil(body.NotebookRelevanceThreshold)
+		immutableCore := jsonbOrNil(body.ImmutableCore)
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
@@ -543,7 +598,8 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
                     manifest_id, version_no, system_prompt,
                     tools, authority_matrix, knowledge_sources,
                     personality, language, model, autonomy,
-                    notebook_top_k, notebook_relevance_threshold
+                    notebook_top_k, notebook_relevance_threshold,
+                    immutable_core
                 )
                 SELECT
                     $1, $2, $3,
@@ -551,16 +607,19 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
                     coalesce($5::jsonb, '{}'::jsonb),
                     coalesce($6::jsonb, '[]'::jsonb),
                     $7, $8, $9, $10,
-                    $11, $12
+                    $11, $12,
+                    $13::jsonb
                 WHERE EXISTS (
                     SELECT 1 FROM watchkeeper.manifest
-                    WHERE id = $1 AND organization_id = $13
+                    WHERE id = $1 AND organization_id = $14
                 )
                 RETURNING id
             `, manifestID, body.VersionNo, body.SystemPrompt,
 				tools, authorityMatrix, knowledgeSources,
 				personality, language, model, autonomy,
-				notebookTopK, notebookRelevanceThreshold, claim.OrganizationID,
+				notebookTopK, notebookRelevanceThreshold,
+				immutableCore,
+				claim.OrganizationID,
 			).Scan(&id)
 		})
 		if err != nil {

@@ -104,6 +104,11 @@ func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (r
 		return runtime.Manifest{}, err
 	}
 
+	immutableCore, err := decodeImmutableCore(mv.ImmutableCore)
+	if err != nil {
+		return runtime.Manifest{}, err
+	}
+
 	return runtime.Manifest{
 		AgentID:                    mv.ManifestID,
 		SystemPrompt:               composeSystemPrompt(mv.SystemPrompt, mv.Personality, mv.Language),
@@ -115,6 +120,7 @@ func LoadManifest(ctx context.Context, kc ManifestFetcher, manifestID string) (r
 		AuthorityMatrix:            authorityMatrix,
 		NotebookTopK:               mv.NotebookTopK,
 		NotebookRelevanceThreshold: mv.NotebookRelevanceThreshold,
+		ImmutableCore:              immutableCore,
 	}, nil
 }
 
@@ -187,6 +193,113 @@ func decodeAuthorityMatrix(raw json.RawMessage) (map[string]string, error) {
 		return nil, nil
 	}
 	return m, nil
+}
+
+// decodeImmutableCore projects the manifest_version `immutable_core`
+// jsonb column — a JSON object carrying the five Phase 2 §M3.1 buckets
+// (`role_boundaries`, `security_constraints`, `escalation_protocols`,
+// `cost_limits`, `audit_requirements`) — into a typed
+// [*runtime.ImmutableCore]. The five canonical buckets decode into
+// typed fields; any additional top-level keys ride into
+// [runtime.ImmutableCore.Extra] verbatim so a forward-only schema
+// extension (Phase 2 §M3.4 `merge_fields` / `rollback`) does not
+// silently drop bucket data the M3.1 loader was not yet aware of.
+//
+// Empty or null inputs (nil RawMessage, the JSON literal `null`) return
+// a nil pointer — a row predating M3.1 surfaces as "no immutable core
+// declared yet", matching the documented contract on
+// [runtime.Manifest.ImmutableCore]. An empty JSON object (`{}`) also
+// returns nil so callers can treat "all buckets absent" identically
+// across both the SQL-NULL and the explicit-empty-object cases (M3.2
+// will tighten this once admin-only editability is enforced; M3.6 will
+// reject empty objects from the self-tuning path).
+//
+// Decode failures (malformed JSON, non-object top-level, wrong bucket
+// types) are wrapped as `fmt.Errorf("manifest: immutable_core: %w",
+// err)` so callers can errors.Is the underlying [json.Unmarshal]
+// failure mode (mirrors the `manifest: toolset:` and
+// `manifest: authority_matrix:` precedents).
+func decodeImmutableCore(raw json.RawMessage) (*runtime.ImmutableCore, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	// First pass: decode into a map[string]json.RawMessage so unknown
+	// keys can ride into Extra without forcing a re-marshal. Rejects
+	// non-object top-level (arrays, scalars) via the [json.Unmarshal]
+	// type-error path; the server CHECK constraint enforces the same
+	// shape at the SQL layer (migration 030) as defense-in-depth.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, fmt.Errorf("manifest: immutable_core: %w", err)
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+
+	out := &runtime.ImmutableCore{}
+	// Decode each canonical bucket with the bucket's typed shape; an
+	// absent key leaves the corresponding field as its zero value
+	// (nil slice / nil map). Mirrors the strict-but-tolerant decode
+	// pattern from [decodeAuthorityMatrix].
+	if err := decodeImmutableCoreBuckets(fields, out); err != nil {
+		return nil, err
+	}
+	// Whatever remains is a forward-compatible bucket the M3.1 loader
+	// does not yet recognise; preserve it verbatim so a Phase 2 §M3.4
+	// `merge_fields` / `rollback` flow can introspect bucket additions
+	// without re-decoding the raw jsonb.
+	if len(fields) > 0 {
+		out.Extra = fields
+	}
+	return out, nil
+}
+
+// decodeImmutableCoreBuckets pulls each canonical M3.1 bucket out of
+// the keyed RawMessage map and projects it onto the typed field of
+// out. Recognised buckets are deleted from fields so the caller can
+// stash whatever remains onto [runtime.ImmutableCore.Extra]. A
+// per-bucket decode failure surfaces as
+// `fmt.Errorf("manifest: immutable_core: <bucket>: %w", err)` so the
+// caller can pinpoint which bucket misshaped.
+//
+// Extracted from [decodeImmutableCore] to keep that function under
+// the gocyclo budget — five identically-shaped lookup+unmarshal+delete
+// triples each contribute to cyclomatic complexity, so factoring them
+// out is a structural simplification not a code-smell-hide.
+func decodeImmutableCoreBuckets(fields map[string]json.RawMessage, out *runtime.ImmutableCore) error {
+	if err := decodeBucket(fields, "role_boundaries", &out.RoleBoundaries); err != nil {
+		return err
+	}
+	if err := decodeBucket(fields, "security_constraints", &out.SecurityConstraints); err != nil {
+		return err
+	}
+	if err := decodeBucket(fields, "escalation_protocols", &out.EscalationProtocols); err != nil {
+		return err
+	}
+	if err := decodeBucket(fields, "cost_limits", &out.CostLimits); err != nil {
+		return err
+	}
+	if err := decodeBucket(fields, "audit_requirements", &out.AuditRequirements); err != nil {
+		return err
+	}
+	return nil
+}
+
+// decodeBucket is the generic per-bucket helper for
+// [decodeImmutableCoreBuckets]: look up the named key in the
+// RawMessage map, decode into dst, delete the key on success so the
+// caller can collect leftovers into Extra. Wraps the decode error
+// with the bucket name so the per-bucket diagnostics survive.
+func decodeBucket[T any](fields map[string]json.RawMessage, name string, dst *T) error {
+	v, ok := fields[name]
+	if !ok {
+		return nil
+	}
+	if err := json.Unmarshal(v, dst); err != nil {
+		return fmt.Errorf("manifest: immutable_core: %s: %w", name, err)
+	}
+	delete(fields, name)
+	return nil
 }
 
 // composeSystemPrompt is the deterministic templater documented on

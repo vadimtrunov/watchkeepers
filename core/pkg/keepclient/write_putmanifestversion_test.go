@@ -731,3 +731,190 @@ func TestPutManifestVersion_NotebookRecallBoundaries_Accepted(t *testing.T) {
 		})
 	}
 }
+
+// -----------------------------------------------------------------------
+// M3.1 — immutable_core preflight + round-trip
+// -----------------------------------------------------------------------
+
+// TestPutManifestVersion_ImmutableCore_ObjectAccepted asserts the M3.1
+// happy path: a well-formed immutable_core JSON object preflight-passes
+// the client-side `isJSONObjectOrEmpty` check, hits the network, and
+// the body bytes carry the object verbatim onto the wire. Mirrors the
+// Tools / AuthorityMatrix raw-jsonb passthrough pattern.
+func TestPutManifestVersion_ImmutableCore_ObjectAccepted(t *testing.T) {
+	t.Parallel()
+
+	const wantImmutableCore = `{"role_boundaries":["x"],"cost_limits":{"per_task_tokens":1000}}`
+
+	var capturedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		capturedBody = b
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"row-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:     1,
+		SystemPrompt:  "sp",
+		ImmutableCore: json.RawMessage(wantImmutableCore),
+	})
+	if err != nil {
+		t.Fatalf("PutManifestVersion: %v", err)
+	}
+	// The body MUST carry `"immutable_core":{...}` verbatim. We do a
+	// substring check to avoid coupling the test to other field
+	// ordering — the assertion is "the object survived the marshal".
+	if !strings.Contains(string(capturedBody), `"immutable_core":`+wantImmutableCore) {
+		t.Errorf("body = %s, want it to contain immutable_core=%s", capturedBody, wantImmutableCore)
+	}
+}
+
+// TestPutManifestVersion_ImmutableCore_NonObjectRejected asserts the
+// M3.1 client-side preflight: an array / scalar / JSON-null payload is
+// rejected with ErrInvalidRequest BEFORE the network hit (mirrors the
+// server's stable `invalid_immutable_core` 400 reason; the client
+// short-circuits so callers see one error mode regardless of which
+// side caught the malformed shape).
+func TestPutManifestVersion_ImmutableCore_NonObjectRejected(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		body json.RawMessage
+	}{
+		{"array", json.RawMessage(`[1,2,3]`)},
+		{"string", json.RawMessage(`"oops"`)},
+		{"number", json.RawMessage(`42`)},
+		{"bool_true", json.RawMessage(`true`)},
+		{"jsonnull", json.RawMessage(`null`)},
+		{"malformed", json.RawMessage(`{not-json`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				atomic.AddInt32(&hits, 1)
+				w.WriteHeader(http.StatusCreated)
+			}))
+			t.Cleanup(srv.Close)
+
+			c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+			_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+				VersionNo:     1,
+				SystemPrompt:  "sp",
+				ImmutableCore: tc.body,
+			})
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("err = %v, want ErrInvalidRequest", err)
+			}
+			if got := atomic.LoadInt32(&hits); got != 0 {
+				t.Errorf("network hits = %d, want 0 (preflight should short-circuit)", got)
+			}
+		})
+	}
+}
+
+// TestPutManifestVersion_ImmutableCore_EmptyOmitted asserts that a nil
+// RawMessage round-trips as `omitempty` (no `immutable_core` key on the
+// wire). Mirrors the Tools / AuthorityMatrix nil-jsonb wire-omit
+// behaviour.
+func TestPutManifestVersion_ImmutableCore_EmptyOmitted(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		capturedBody = b
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"row-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:    1,
+		SystemPrompt: "sp",
+	})
+	if err != nil {
+		t.Fatalf("PutManifestVersion: %v", err)
+	}
+	if strings.Contains(string(capturedBody), `"immutable_core"`) {
+		t.Errorf("body = %s, want no immutable_core key (omitempty + nil)", capturedBody)
+	}
+}
+
+// TestPutManifestVersion_ImmutableCore_EmptyObjectAccepted asserts the
+// lower-boundary case: `{}` passes the preflight (mirrors the
+// server-side `jsonb_typeof = 'object'` CHECK). M3.6 may later reject
+// empty objects from the self-tuning path, but the M3.1 schema layer
+// accepts them at both sides.
+func TestPutManifestVersion_ImmutableCore_EmptyObjectAccepted(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"row-1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(WithBaseURL(srv.URL), WithTokenSource(StaticToken("t")))
+	_, err := c.PutManifestVersion(context.Background(), validManifestID, PutManifestVersionRequest{
+		VersionNo:     1,
+		SystemPrompt:  "sp",
+		ImmutableCore: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("PutManifestVersion: %v", err)
+	}
+}
+
+// TestIsJSONObjectOrEmpty_Boundaries exercises the private preflight
+// directly so callers do not have to round-trip through HTTP for the
+// boundary cases (whitespace before `{`, valid-JSON-but-not-object, …).
+// This keeps the predicate covered even if a future caller (a new
+// resource type) reuses it.
+func TestIsJSONObjectOrEmpty_Boundaries(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   json.RawMessage
+		want bool
+	}{
+		{"nil", nil, true},
+		{"empty", json.RawMessage{}, true},
+		{"empty_object", json.RawMessage(`{}`), true},
+		{"object_with_keys", json.RawMessage(`{"a":1}`), true},
+		{"leading_whitespace_object", json.RawMessage("  \t\n{}"), true},
+		{"array", json.RawMessage(`[]`), false},
+		{"string", json.RawMessage(`"x"`), false},
+		{"number", json.RawMessage(`0`), false},
+		{"bool_true", json.RawMessage(`true`), false},
+		{"bool_false", json.RawMessage(`false`), false},
+		{"jsonnull", json.RawMessage(`null`), false},
+		{"malformed", json.RawMessage(`{`), false},
+		{"trailing_garbage", json.RawMessage(`{}x`), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isJSONObjectOrEmpty(tc.in); got != tc.want {
+				t.Errorf("isJSONObjectOrEmpty(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// Compile-time hint: keep the utf8 import used by neighbour tests.
+var _ = utf8.RuneCountInString

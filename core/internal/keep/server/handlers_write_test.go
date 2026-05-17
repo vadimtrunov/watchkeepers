@@ -897,7 +897,12 @@ func TestPutManifestVersion_WithModel_201_RoundTrip(t *testing.T) {
 			*dest[10].(*string) = ""
 			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
 			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
-			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			// immutable_core column is the M3.1 addition; the read handler
+			// scans it through a `*json.RawMessage` (pointer-to-RawMessage)
+			// so SQL NULL leaves the pointer nil. Test fakes pass an
+			// untouched dest[13] to mirror "NULL row" — the production
+			// scan path leaves `**json.RawMessage` untouched on NULL.
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -964,9 +969,13 @@ func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
 	// personality, language, model, autonomy, notebook_top_k,
 	// notebook_relevance_threshold. If any wiring is absent the count drops
 	// and this assertion catches the regression.
-	const wantNilArgs = 9
+	// Expect 10 nil args: tools, authority_matrix, knowledge_sources,
+	// personality, language, model, autonomy, notebook_top_k,
+	// notebook_relevance_threshold, immutable_core. If any wiring is
+	// absent the count drops and this assertion catches the regression.
+	const wantNilArgs = 10
 	if nilArgCount != wantNilArgs {
-		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy/notebook_top_k/notebook_relevance_threshold)", nilArgCount, wantNilArgs)
+		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy/notebook_top_k/notebook_relevance_threshold/immutable_core)", nilArgCount, wantNilArgs)
 	}
 
 	// Step 2: GET — SELECT returns coalesce(model, '') == "" so the
@@ -986,7 +995,12 @@ func TestPutManifestVersion_ModelOmitted_201_GetHasNoModelKey(t *testing.T) {
 			*dest[10].(*string) = "" // autonomy NULL → coalesce → ""
 			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
 			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
-			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			// immutable_core column is the M3.1 addition; the read handler
+			// scans it through a `*json.RawMessage` (pointer-to-RawMessage)
+			// so SQL NULL leaves the pointer nil. Test fakes pass an
+			// untouched dest[13] to mirror "NULL row" — the production
+			// scan path leaves `**json.RawMessage` untouched on NULL.
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1143,7 +1157,12 @@ func TestPutManifestVersion_WithAutonomy_201_RoundTrip(t *testing.T) {
 			*dest[10].(*string) = capturedAutonomy
 			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
 			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
-			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			// immutable_core column is the M3.1 addition; the read handler
+			// scans it through a `*json.RawMessage` (pointer-to-RawMessage)
+			// so SQL NULL leaves the pointer nil. Test fakes pass an
+			// untouched dest[13] to mirror "NULL row" — the production
+			// scan path leaves `**json.RawMessage` untouched on NULL.
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1207,9 +1226,13 @@ func TestPutManifestVersion_AutonomyOmitted_201_GetHasNoAutonomyKey(t *testing.T
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	const wantNilArgs = 9
+	// Expect 10 nil args: tools, authority_matrix, knowledge_sources,
+	// personality, language, model, autonomy, notebook_top_k,
+	// notebook_relevance_threshold, immutable_core. If any wiring is
+	// absent the count drops and this assertion catches the regression.
+	const wantNilArgs = 10
 	if nilArgCount != wantNilArgs {
-		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy/notebook_top_k/notebook_relevance_threshold)", nilArgCount, wantNilArgs)
+		t.Errorf("nil arg count = %d, want %d (tools/authority_matrix/knowledge_sources/personality/language/model/autonomy/notebook_top_k/notebook_relevance_threshold/immutable_core)", nilArgCount, wantNilArgs)
 	}
 
 	// Step 2: GET — SELECT returns coalesce(autonomy, '') == "" so the
@@ -1229,7 +1252,12 @@ func TestPutManifestVersion_AutonomyOmitted_201_GetHasNoAutonomyKey(t *testing.T
 			*dest[10].(*string) = "" // autonomy NULL → coalesce → ""
 			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
 			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
-			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			// immutable_core column is the M3.1 addition; the read handler
+			// scans it through a `*json.RawMessage` (pointer-to-RawMessage)
+			// so SQL NULL leaves the pointer nil. Test fakes pass an
+			// untouched dest[13] to mirror "NULL row" — the production
+			// scan path leaves `**json.RawMessage` untouched on NULL.
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1609,7 +1637,9 @@ func TestPutManifestVersion_WithNotebookRecall_201_RoundTrip(t *testing.T) { //n
 			*dest[10].(*string) = ""
 			*dest[11].(*int) = capturedTopK
 			*dest[12].(*float64) = capturedThreshold
-			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			// immutable_core (M3.1) scans into **json.RawMessage; SQL
+			// NULL leaves dest[13] untouched (mirrors production path).
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1670,10 +1700,10 @@ func TestPutManifestVersion_NotebookRecallOmitted_201_GetHasNoKeys(t *testing.T)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	// Expect 9 nil args: tools, authority_matrix, knowledge_sources,
+	// Expect 10 nil args: tools, authority_matrix, knowledge_sources,
 	// personality, language, model, autonomy, notebook_top_k,
-	// notebook_relevance_threshold.
-	const wantNilArgs = 9
+	// notebook_relevance_threshold, immutable_core.
+	const wantNilArgs = 10
 	if nilArgCount != wantNilArgs {
 		t.Errorf("nil arg count = %d, want %d", nilArgCount, wantNilArgs)
 	}
@@ -1694,7 +1724,12 @@ func TestPutManifestVersion_NotebookRecallOmitted_201_GetHasNoKeys(t *testing.T)
 			*dest[10].(*string) = ""
 			*dest[11].(*int) = 0     // notebook_top_k NULL → coalesce → 0
 			*dest[12].(*float64) = 0 // notebook_relevance_threshold NULL → coalesce → 0
-			*dest[13].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			// immutable_core column is the M3.1 addition; the read handler
+			// scans it through a `*json.RawMessage` (pointer-to-RawMessage)
+			// so SQL NULL leaves the pointer nil. Test fakes pass an
+			// untouched dest[13] to mirror "NULL row" — the production
+			// scan path leaves `**json.RawMessage` untouched on NULL.
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
 			return nil
 		})
 	}
@@ -1850,5 +1885,288 @@ func TestPutManifestVersion_NotebookRelevanceThresholdOutOfRange_400_InvalidNote
 				t.Errorf("error = %q, want invalid_notebook_relevance_threshold", env.Error)
 			}
 		})
+	}
+}
+
+// -----------------------------------------------------------------------
+// M3.1 — immutable_core column round-trip + shape validation
+// -----------------------------------------------------------------------
+
+// TestPutManifestVersion_WithImmutableCore_201_RoundTrip — a PUT body
+// carrying a well-formed immutable_core object (five M3.1 buckets +
+// one forward-compatible extra bucket) is accepted; the runner sees the
+// jsonb bytes pass through to the INSERT verbatim (no canonical-shape
+// re-marshal). The companion GET asserts that the same jsonb projects
+// back through the SELECT path verbatim onto the wire response. M3.1
+// is schema-only: bucket contents are not validated server-side
+// (admin-only editability lands in M3.2 and the self-tuning validator
+// lands in M3.6).
+func TestPutManifestVersion_WithImmutableCore_201_RoundTrip(t *testing.T) {
+	const wantImmutableCore = `{` +
+		`"role_boundaries":["delete_production_data"],` +
+		`"security_constraints":{"pii_export":"forbidden"},` +
+		`"escalation_protocols":{"pii_leak":"#security-on-call"},` +
+		`"cost_limits":{"per_task_tokens":50000},` +
+		`"audit_requirements":{"manifest_changes":"retain_forever"},` +
+		`"extra_bucket":{"future":"m3.4"}` +
+		`}`
+
+	var capturedImmutableCore string
+	queryRow := func(_ context.Context, _ string, args ...any) pgx.Row {
+		// jsonbOrNil promotes the wire bytes via `string(m)` so the
+		// pgx-bound parameter is a JSON-typed text payload. Capture it
+		// to assert verbatim pass-through (the server MUST NOT
+		// re-marshal the object — a key re-order would imply the
+		// handler is editorialising what M3.2 promises to gate).
+		// immutable_core is the 13th INSERT-time bind ($13 in the SQL)
+		// → args[12] in 0-indexed Go arg space (placeholders $1..$14
+		// map to args[0..13]; the trailing claim.OrganizationID is
+		// args[13]).
+		const immutableCoreArgIdx = 12
+		if s, ok := args[immutableCoreArgIdx].(string); ok {
+			capturedImmutableCore = s
+		}
+		return server.NewFakeRow(func(dest ...any) error {
+			if sp, ok := dest[0].(*string); ok {
+				*sp = fakeUUID
+			}
+			return nil
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		nil,
+		`{"version_no":1,"system_prompt":"ok","immutable_core":`+wantImmutableCore+`}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	// The handler MUST forward the immutable_core JSON object verbatim
+	// (key order tolerated since the wire JSON is the same input we
+	// fed, so byte-equality is the strongest assertion possible here).
+	if capturedImmutableCore != wantImmutableCore {
+		t.Errorf("INSERT immutable_core = %q, want %q (handler must NOT re-marshal)", capturedImmutableCore, wantImmutableCore)
+	}
+
+	// GET round-trip: the SELECT returns the same jsonb bytes through
+	// the **json.RawMessage scan path. The response JSON must carry
+	// the object back verbatim under the `immutable_core` key.
+	getQueryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			*dest[0].(*string) = fakeUUID
+			*dest[1].(*string) = putManifestID
+			*dest[2].(*int) = 1
+			*dest[3].(*string) = "ok"
+			*dest[4].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[5].(*json.RawMessage) = json.RawMessage(`{}`)
+			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[7].(*string) = ""
+			*dest[8].(*string) = ""
+			*dest[9].(*string) = ""
+			*dest[10].(*string) = ""
+			*dest[11].(*int) = 0
+			*dest[12].(*float64) = 0
+			// immutable_core scan target is **json.RawMessage — allocate
+			// a RawMessage carrying the wire bytes and have the fake
+			// promote the pointer through. Mirrors the production path
+			// where pgx hands the bytes through verbatim on non-NULL.
+			ic := json.RawMessage(wantImmutableCore)
+			*dest[13].(**json.RawMessage) = &ic
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			return nil
+		})
+	}
+	getRunner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: getQueryRow})}
+	gh, gti := writeRouterForTest(t, mustFixedNow(), getRunner)
+	gtok := mustMintToken(t, gti, "org")
+
+	greq := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/v1/manifests/"+putManifestID, nil)
+	greq.Header.Set("Authorization", "Bearer "+gtok)
+	grec := httptest.NewRecorder()
+	gh.ServeHTTP(grec, greq)
+	if grec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body=%s", grec.Code, grec.Body.String())
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(grec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	gotImmutableCore, present := got["immutable_core"]
+	if !present {
+		t.Fatalf("GET response missing immutable_core key; body=%s", grec.Body.String())
+	}
+	// Compare structurally — Go's encoding/json reorders map keys, so
+	// comparing parsed maps is the structural assertion that survives
+	// any future jsonb-side normalisation.
+	var gotObj, wantObj map[string]any
+	if err := json.Unmarshal(gotImmutableCore, &gotObj); err != nil {
+		t.Fatalf("GET immutable_core decode: %v", err)
+	}
+	if err := json.Unmarshal([]byte(wantImmutableCore), &wantObj); err != nil {
+		t.Fatalf("wantImmutableCore decode: %v", err)
+	}
+	if len(gotObj) != len(wantObj) {
+		t.Errorf("GET immutable_core has %d top-level keys, want %d; body=%s", len(gotObj), len(wantObj), grec.Body.String())
+	}
+	for k := range wantObj {
+		if _, ok := gotObj[k]; !ok {
+			t.Errorf("GET immutable_core missing key %q; body=%s", k, grec.Body.String())
+		}
+	}
+}
+
+// TestPutManifestVersion_ImmutableCoreOmitted_201_GetHasNoImmutableCoreKey
+// — when the PUT body omits `immutable_core`, the runner sees a nil arg
+// at the immutable_core bind slot AND a subsequent GET must NOT include
+// an `immutable_core` key in the response JSON (omitempty + nullable
+// scan). Mirrors the wire-omit posture of `personality` / `language` /
+// `model` / `autonomy`.
+func TestPutManifestVersion_ImmutableCoreOmitted_201_GetHasNoImmutableCoreKey(t *testing.T) {
+	var capturedImmutableCoreArg any
+	captured := false
+	queryRow := func(_ context.Context, _ string, args ...any) pgx.Row {
+		// $13 (zero-indexed args[12]) is the immutable_core bind slot.
+		const immutableCoreArgIdx = 12
+		if len(args) > immutableCoreArgIdx {
+			capturedImmutableCoreArg = args[immutableCoreArgIdx]
+			captured = true
+		}
+		return server.NewFakeRow(func(dest ...any) error {
+			if sp, ok := dest[0].(*string); ok {
+				*sp = fakeUUID
+			}
+			return nil
+		})
+	}
+	runner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: queryRow})}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		map[string]any{
+			"version_no":    1,
+			"system_prompt": "ok",
+		}, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if !captured {
+		t.Fatal("runner did not capture immutable_core arg slot")
+	}
+	if capturedImmutableCoreArg != nil {
+		t.Errorf("immutable_core bind = %v, want nil (omitted → jsonbOrNil)", capturedImmutableCoreArg)
+	}
+
+	// GET: SQL NULL → **json.RawMessage stays nil → response omits the
+	// key.
+	getQueryRow := func(_ context.Context, _ string, _ ...any) pgx.Row {
+		return server.NewFakeRow(func(dest ...any) error {
+			*dest[0].(*string) = fakeUUID
+			*dest[1].(*string) = putManifestID
+			*dest[2].(*int) = 1
+			*dest[3].(*string) = "ok"
+			*dest[4].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[5].(*json.RawMessage) = json.RawMessage(`{}`)
+			*dest[6].(*json.RawMessage) = json.RawMessage(`[]`)
+			*dest[7].(*string) = ""
+			*dest[8].(*string) = ""
+			*dest[9].(*string) = ""
+			*dest[10].(*string) = ""
+			*dest[11].(*int) = 0
+			*dest[12].(*float64) = 0
+			// dest[13] (immutable_core, **json.RawMessage) left
+			// untouched — mirrors SQL NULL semantics.
+			*dest[14].(*time.Time) = time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+			return nil
+		})
+	}
+	getRunner := &server.FakeScopedRunner{Tx: server.NewFakeTx(server.FakeTxFns{QueryRow: getQueryRow})}
+	gh, gti := writeRouterForTest(t, mustFixedNow(), getRunner)
+	gtok := mustMintToken(t, gti, "org")
+
+	greq := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/v1/manifests/"+putManifestID, nil)
+	greq.Header.Set("Authorization", "Bearer "+gtok)
+	grec := httptest.NewRecorder()
+	gh.ServeHTTP(grec, greq)
+	if grec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200; body=%s", grec.Code, grec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(grec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET decode: %v", err)
+	}
+	if _, present := got["immutable_core"]; present {
+		t.Errorf("GET response carries immutable_core key when body omitted it; body=%s", grec.Body.String())
+	}
+}
+
+// TestPutManifestVersion_ImmutableCoreNonObject_400_InvalidImmutableCore
+// — the server CHECK constraint requires `immutable_core` to be a JSON
+// object when not NULL. The handler MUST reject non-object payloads
+// (array, scalar, JSON `null` literal) with stable 400 reason
+// `invalid_immutable_core` BEFORE Postgres sees the row — preserves the
+// stable-reason-code contract that downstream tooling (Watchmaster
+// manifest tools in M3.4) relies on.
+func TestPutManifestVersion_ImmutableCoreNonObject_400_InvalidImmutableCore(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"array", `{"version_no":1,"system_prompt":"ok","immutable_core":[1,2,3]}`},
+		{"string", `{"version_no":1,"system_prompt":"ok","immutable_core":"oops"}`},
+		{"number", `{"version_no":1,"system_prompt":"ok","immutable_core":42}`},
+		{"bool", `{"version_no":1,"system_prompt":"ok","immutable_core":true}`},
+		{"jsonnull", `{"version_no":1,"system_prompt":"ok","immutable_core":null}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &server.FakeScopedRunner{}
+			h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+			tok := mustMintToken(t, ti, "org")
+
+			rec := writeDo(t, h, http.MethodPut,
+				"/v1/manifests/"+putManifestID+"/versions", tok,
+				nil, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if runner.FnInvoked {
+				t.Error("runner was invoked; expected rejection before tx")
+			}
+			var env struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if env.Error != "invalid_immutable_core" {
+				t.Errorf("error = %q, want invalid_immutable_core", env.Error)
+			}
+		})
+	}
+}
+
+// TestPutManifestVersion_ImmutableCoreEmptyObject_201 — an empty JSON
+// object `{}` is accepted (matches the server CHECK
+// `jsonb_typeof = 'object'`). Establishes the lower-boundary case for
+// the M3.1 schema; M3.6's self-tuning validator may later reject empty
+// objects from the self-tuning path, but the M3.1 schema layer accepts
+// them.
+func TestPutManifestVersion_ImmutableCoreEmptyObject_201(t *testing.T) {
+	runner := &server.FakeScopedRunner{FakeID: fakeUUID}
+	h, ti := writeRouterForTest(t, mustFixedNow(), runner)
+	tok := mustMintToken(t, ti, "org")
+
+	rec := writeDo(t, h, http.MethodPut,
+		"/v1/manifests/"+putManifestID+"/versions", tok,
+		nil, `{"version_no":1,"system_prompt":"ok","immutable_core":{}}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 }

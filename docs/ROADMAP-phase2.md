@@ -173,7 +173,7 @@ Total: ~46–67 days for one team. Milestones within Phase 2 use the same `M#` n
 
 **Scope**
 
-- [ ] **M3.1** Manifest schema: `immutable_core` sub-object with 5 buckets:
+- [x] **M3.1** Manifest schema: `immutable_core` sub-object with 5 buckets:
   - `role_boundaries` — explicit list of capabilities the Watchkeeper is NOT allowed to have, regardless of what self-tuning proposes.
   - `security_constraints` — data-handling rules, forbidden data destinations, classification floors.
   - `escalation_protocols` — when and to whom to escalate; cannot be disabled.

@@ -10,9 +10,9 @@ import (
 // ManifestVersion mirrors the server's `manifestVersionResponse` shape
 // returned by GET /v1/manifests/{manifest_id}. Field names and `omitempty`
 // placement match the server verbatim. The jsonb columns (Tools,
-// AuthorityMatrix, KnowledgeSources) are kept as [json.RawMessage] so a
-// future schema evolution does not require a client release; callers that
-// need typed access decode them locally.
+// AuthorityMatrix, KnowledgeSources, ImmutableCore) are kept as
+// [json.RawMessage] so a future schema evolution does not require a
+// client release; callers that need typed access decode them locally.
 type ManifestVersion struct {
 	// ID is the manifest_version row UUID.
 	ID string `json:"id"`
@@ -56,6 +56,23 @@ type ManifestVersion struct {
 	// response). When non-zero, must be in (0, 1]; the client mirrors the
 	// range on PUT (migration 016). Zero is treated as "unset".
 	NotebookRelevanceThreshold float64 `json:"notebook_relevance_threshold,omitempty"`
+	// ImmutableCore is the optional manifest immutable_core jsonb column,
+	// kept as raw JSON (matches the Tools / AuthorityMatrix /
+	// KnowledgeSources precedent — a future bucket extension does NOT
+	// require a client release). When present on the wire the server
+	// CHECK constraint (migration 030) guarantees it is a JSON object;
+	// an empty / absent column round-trips as a nil [json.RawMessage] via
+	// `omitempty`.
+	//
+	// The five buckets carried by the object (see Phase 2 §M3.1 in
+	// `docs/ROADMAP-phase2.md`) are `role_boundaries`,
+	// `security_constraints`, `escalation_protocols`, `cost_limits`, and
+	// `audit_requirements`. M3.1 is schema-only — the admin-only
+	// editability enforcement lands in M3.2 (handler-layer) and the
+	// self-tuning validator lands in M3.6. The typed projection into
+	// [runtime.Manifest.ImmutableCore] lives in the M3.1 manifest loader
+	// extension.
+	ImmutableCore json.RawMessage `json:"immutable_core,omitempty"`
 	// CreatedAt is the row's created_at timestamp (RFC3339 on the wire).
 	CreatedAt string `json:"created_at"`
 }
