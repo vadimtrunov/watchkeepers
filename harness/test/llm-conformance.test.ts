@@ -253,9 +253,12 @@ for (const c of CASES) {
             provider.reportCost("rt-conformance", syntheticUsage(c.model)),
           ).resolves.toBeUndefined();
 
-          // FakeProvider exposes a recorded-call accessor; assert the
-          // shape when present without coupling to the recorded-calls
-          // accessor (ClaudeCodeProvider has its own `getReportedCost`).
+          // FakeProvider exposes a recorded-call accessor; the real
+          // providers (ClaudeCodeProvider, ClaudeAgentProvider) both
+          // expose `getReportedCost(runtimeID)` returning a
+          // `Usage | undefined`. Both shapes are asserted in their
+          // respective branches without coupling to the recorded-calls
+          // accessor.
           if (provider instanceof FakeProvider) {
             const calls = provider.recordedReportCosts();
             expect(calls.length).toBeGreaterThan(0);
@@ -263,12 +266,10 @@ for (const c of CASES) {
             expect(last?.runtimeID).toBe("rt-conformance");
             expect(typeof last?.usage.inputTokens).toBe("number");
             expect(typeof last?.usage.outputTokens).toBe("number");
-          } else if (provider instanceof ClaudeCodeProvider) {
-            const recorded = provider.getReportedCost("rt-conformance");
-            expect(recorded).toBeDefined();
-            expect(typeof recorded?.inputTokens).toBe("number");
-            expect(typeof recorded?.outputTokens).toBe("number");
-          } else if (provider instanceof ClaudeAgentProvider) {
+          } else if (
+            provider instanceof ClaudeCodeProvider ||
+            provider instanceof ClaudeAgentProvider
+          ) {
             const recorded = provider.getReportedCost("rt-conformance");
             expect(recorded).toBeDefined();
             expect(typeof recorded?.inputTokens).toBe("number");
