@@ -213,6 +213,12 @@ func newWriter(t *testing.T, keep *fakeKeepClient) *keeperslog.Writer {
 // row used by the adjust-* happy-path tests. Carries every persisted
 // field set so the copy-and-bump path can assert that none drop on
 // the bump.
+//
+// The `immutable_core` jsonb column (Phase 2 §M3.1) is populated so the
+// M3.2 admin-only-editability gate test path can pin that the
+// copy-and-bump helper carries it forward verbatim — dropping the
+// field on a Watchmaster self-tune would force every legitimate bump
+// through a 403 `immutable_core_modified` on the Keep handler.
 func existingManifest() *keepclient.ManifestVersion {
 	return &keepclient.ManifestVersion{
 		ID:                         "mv-prev",
@@ -228,6 +234,10 @@ func existingManifest() *keepclient.ManifestVersion {
 		Autonomy:                   "supervised",
 		NotebookTopK:               5,
 		NotebookRelevanceThreshold: 0.7,
+		ImmutableCore: json.RawMessage(
+			`{"role_boundaries":["delete_production"],` +
+				`"cost_limits":{"per_task_tokens":50000}}`,
+		),
 	}
 }
 
@@ -553,6 +563,16 @@ func assertCopiedFields(t *testing.T, pr keepclient.PutManifestVersionRequest) {
 	}
 	if pr.NotebookTopK != 5 || pr.NotebookRelevanceThreshold != 0.7 {
 		t.Errorf("Notebook* = (%d, %v), want (5, 0.7)", pr.NotebookTopK, pr.NotebookRelevanceThreshold)
+	}
+	// M3.2: the Watchmaster self-tune copy-and-bump path MUST forward
+	// the parent row's `immutable_core` jsonb verbatim. Dropping the
+	// field here would trip the Keep handler's parity gate on every
+	// legitimate bump (the gate rejects `immutable_core` modifications
+	// from any non-admin path; self-tune is non-admin by construction).
+	wantIC := `{"role_boundaries":["delete_production"],"cost_limits":{"per_task_tokens":50000}}`
+	if string(pr.ImmutableCore) != wantIC {
+		t.Errorf("ImmutableCore = %q, want %q (M3.2: must round-trip parent immutable_core verbatim)",
+			string(pr.ImmutableCore), wantIC)
 	}
 }
 

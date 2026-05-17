@@ -590,6 +590,110 @@ func validateNotebookRecallFields(w http.ResponseWriter, body putManifestVersion
 	return true
 }
 
+// errImmutableCoreModified is the in-band sentinel
+// [handlePutManifestVersion]'s scoped-tx closure returns after the M3.2
+// parity gate writes a 403 envelope. The post-WithScope error block
+// recognises it via `errors.Is` so the generic 500 branch does not
+// stomp the already-written 403 (net/http allows only one
+// WriteHeader call per response). The sentinel is package-private —
+// callers of [handlePutManifestVersion] never see it on the wire; the
+// caller-visible signal is the 403 `immutable_core_modified` body.
+//
+// in-band gate signalling; matches the [pgx.ErrNoRows] precedent above.
+//
+//nolint:gochecknoglobals // intentional package-scoped sentinel for
+var errImmutableCoreModified = errors.New("immutable_core modified by non-admin write path")
+
+// checkImmutableCoreParity is the M3.2 admin-only-editability gate.
+// It runs INSIDE the scoped tx opened by [handlePutManifestVersion] for
+// any non-root manifest_version PUT (VersionNo > 1) and rejects writes
+// whose `immutable_core` payload differs from the parent row's
+// `immutable_core`.
+//
+// "Parent row" = the existing manifest_version with the greatest
+// VersionNo for the supplied `manifest_id`, scoped to the caller's
+// organization via the `manifest.organization_id = $claim_org`
+// EXISTS filter. The filter mirrors the
+// [handleInsertWatchkeeper] / [handlePutManifestVersion] cross-tenant
+// rejection precedent (M3.5.a.3.2) and gives the cross-tenant case a
+// deterministic "no parent → blocked" surface even when RLS would have
+// caught the same row.
+//
+// Comparison semantics: `IS NOT DISTINCT FROM` on the `jsonb` type
+// compares structural value, not raw bytes — key order inside the JSON
+// object does not falsely trigger the gate, and SQL NULL == SQL NULL
+// (the "parent has no immutable_core declared yet AND caller is also
+// omitting it" case round-trips legally). NULL vs non-NULL (in either
+// direction) is a modification and trips the gate.
+//
+// Return value:
+//   - (false, nil) — parity matches, caller MAY proceed with INSERT.
+//   - (true, nil) — parity mismatch; caller MUST return
+//     [errImmutableCoreModified]. The 403 envelope has been written.
+//   - (false, err) — Postgres error during the parity SELECT. Caller
+//     surfaces it through the same error path as the INSERT (the
+//     pgconn.PgError + pgx.ErrNoRows branches in
+//     [writePutManifestVersionPgError] still apply — e.g. a
+//     cross-tenant `manifest_id` lands as pgx.ErrNoRows → 404
+//     not_found, identical to the INSERT-side surface).
+//
+// The "no parent row exists" case (well-formed `manifest_id` with no
+// prior versions) returns `(false, pgx.ErrNoRows)`; the caller's
+// error block converts this to 404 not_found, consistent with the
+// existing PUT contract — you cannot anchor VersionNo > 1 against a
+// manifest with zero prior versions.
+//
+// The SELECT does NOT take FOR UPDATE: the existing UNIQUE constraint
+// on `(manifest_id, version_no)` serialises concurrent INSERTs at the
+// (version_no = N+1) point. A racing caller whose VersionNo == N+1
+// landed first will surface a 23505 unique_violation on the loser's
+// INSERT, mapped to 409 version_conflict. A FOR UPDATE here would
+// deadlock against the same tx's INSERT on shared rows.
+//
+// distinct AC (NULL/NULL, NULL/non-NULL, non-NULL/NULL, non-NULL/non-NULL)
+// and splitting obscures the gate's contract.
+//
+//nolint:gocyclo // sequential parity-check branches; each branch is a
+func checkImmutableCoreParity(
+	ctx context.Context,
+	tx pgx.Tx,
+	manifestID, claimOrgID string,
+	candidate json.RawMessage,
+) (blocked bool, err error) {
+	// Encode the candidate as a jsonb-cast scalar for the comparison —
+	// nil RawMessage → SQL NULL, non-nil → text payload that pgx binds
+	// through the `::jsonb` cast in the query. jsonbOrNil is the same
+	// helper [handlePutManifestVersion] uses for the actual INSERT bind,
+	// so the gate compares like-for-like.
+	candidateArg := jsonbOrNil(candidate)
+
+	// SELECT the parent row's `immutable_core` and the structural
+	// equality flag in one round-trip. The CTE-style subquery picks the
+	// greatest `version_no` for the manifest (the canonical "latest
+	// parent" the M3.4 history / rollback tools also use); the
+	// `manifest.organization_id` join is the cross-tenant gate. A
+	// cross-tenant `manifest_id` produces zero rows → pgx.ErrNoRows;
+	// the caller surfaces 404 not_found.
+	//
+	// `IS NOT DISTINCT FROM` returns true when both sides are NULL OR
+	// both sides are equal under jsonb structural comparison. We
+	// negate it for the "blocked" boolean.
+	const parityQuery = `
+SELECT
+    (mv.immutable_core IS DISTINCT FROM $2::jsonb) AS blocked
+FROM watchkeeper.manifest_version mv
+JOIN watchkeeper.manifest m ON m.id = mv.manifest_id
+WHERE mv.manifest_id = $1
+  AND m.organization_id = $3
+ORDER BY mv.version_no DESC
+LIMIT 1
+`
+	if err := tx.QueryRow(ctx, parityQuery, manifestID, candidateArg, claimOrgID).Scan(&blocked); err != nil {
+		return false, err
+	}
+	return blocked, nil
+}
+
 // handlePutManifestVersion serves PUT /v1/manifests/{manifest_id}/versions.
 // It inserts a new manifest_version row under the scoped tx; a unique
 // violation on `(manifest_id, version_no)` is translated to
@@ -673,6 +777,42 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 
 		var id string
 		err := r.WithScope(req.Context(), claim, func(ctx context.Context, tx pgx.Tx) error {
+			// M3.2 admin-only-editability gate for the immutable_core
+			// jsonb column. The spec ("Phase 2 §M3.2"):
+			//
+			//   "Set at spawn by a platform admin (config file or
+			//    Watchmaster flow); changeable only via direct Manifest
+			//    edit + core restart. Never modifiable by the agent, the
+			//    lead, or any self-tuning path."
+			//
+			// Mechanical enforcement: any write of a manifest_version
+			// row that is NOT the root (VersionNo > 1) MUST carry an
+			// immutable_core that is byte-identical to the parent row's
+			// immutable_core (canonicalised through pgsql `jsonb` —
+			// `IS NOT DISTINCT FROM` on the jsonb type compares
+			// structural value, not raw bytes, so key reordering inside
+			// the json document does not falsely trigger the gate).
+			//
+			// Root rows (VersionNo == 1) are exempt — that path is the
+			// admin spawn flow which has no parent to inherit from.
+			// Direct DB UPDATE (operator + core restart per the spec)
+			// bypasses this handler entirely.
+			//
+			// Tenant isolation: the SELECT runs under WithScope so RLS
+			// + the `manifest.organization_id = $claim_org` filter on
+			// the parent `watchkeeper.manifest` row prevents a caller
+			// in org A from seeing org B's parent row. The cross-tenant
+			// case lands as `pgx.ErrNoRows → 404 not_found`, mirroring
+			// the cross-tenant manifest-INSERT precedent already in
+			// place on this handler.
+			if body.VersionNo > 1 {
+				if blocked, gateErr := checkImmutableCoreParity(ctx, tx, manifestID, claim.OrganizationID, body.ImmutableCore); gateErr != nil {
+					return gateErr
+				} else if blocked {
+					writeError(w, http.StatusForbidden, "immutable_core_modified")
+					return errImmutableCoreModified
+				}
+			}
 			// INSERT … SELECT … WHERE EXISTS shape mirrors
 			// handleInsertWatchkeeper: Postgres rejects the row in a
 			// single statement when the manifest's org does not match
@@ -742,6 +882,16 @@ func handlePutManifestVersion(r scopedRunner) http.Handler {
 			).Scan(&id)
 		})
 		if err != nil {
+			// M3.2 gate: the parity check already wrote the 403 envelope
+			// before returning [errImmutableCoreModified]. Detect the
+			// sentinel here so the generic 500 branch below does not
+			// stomp the carefully-shaped 403 immutable_core_modified
+			// response (`writeError` would also panic on a second
+			// header write — net/http allows only one WriteHeader call
+			// per response).
+			if errors.Is(err, errImmutableCoreModified) {
+				return
+			}
 			if writePutManifestVersionPgError(w, err) {
 				return
 			}

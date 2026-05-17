@@ -460,6 +460,18 @@ func runManifestBump(
 // (the write shape), copying every persisted field. The caller
 // overrides the targeted field (Personality or Language) and bumps
 // VersionNo before passing the result to PutManifestVersion.
+//
+// M3.2 admin-only-editability gate (Phase 2 §M3.2): the parent row's
+// `immutable_core` MUST ride forward verbatim onto the new version's
+// PUT request. The Keep handler's parity gate rejects any bumped
+// version whose `immutable_core` differs from the parent — dropping
+// the field here would force every self-tune through a 403
+// `immutable_core_modified`. The keepclient surface treats
+// [keepclient.ManifestVersion.ImmutableCore] as raw bytes
+// (`json.RawMessage`) and the server compares with `jsonb` structural
+// equality (`IS NOT DISTINCT FROM`), so a byte-equal forward — even
+// with the same key order Postgres handed back — is the correct
+// fail-secure default for any self-tune copy path.
 func copyManifestForBump(latest *keepclient.ManifestVersion) keepclient.PutManifestVersionRequest {
 	return keepclient.PutManifestVersionRequest{
 		// VersionNo is set by the caller (latest.VersionNo + 1).
@@ -473,6 +485,7 @@ func copyManifestForBump(latest *keepclient.ManifestVersion) keepclient.PutManif
 		Autonomy:                   latest.Autonomy,
 		NotebookTopK:               latest.NotebookTopK,
 		NotebookRelevanceThreshold: latest.NotebookRelevanceThreshold,
+		ImmutableCore:              latest.ImmutableCore,
 	}
 }
 
