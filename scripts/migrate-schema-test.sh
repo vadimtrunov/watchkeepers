@@ -50,6 +50,7 @@ cleanup_sql=$(cat <<'SQL'
 -- trigger on `keepers_log` fires on DELETE but not TRUNCATE, so the
 -- TRUNCATE chain continues to clear it cleanly.
 TRUNCATE TABLE
+  watchkeeper.k2k_conversations,
   watchkeeper.outbox,
   watchkeeper.knowledge_chunk,
   watchkeeper.keepers_log,
@@ -636,5 +637,156 @@ if [[ "${mf_empty}" != "0" ]]; then
   fail "RLS empty-GUC manifest visibility expected 0 (fail-closed); got '${mf_empty}'"
 fi
 echo "OK: unset watchkeeper.org GUC sees zero manifest rows (fail-closed)"
+
+# ---------------------------------------------------------------------------
+# M1.1.a — k2k_conversations RLS assertions (migration 029).
+#
+# Seeds two K2K conversations under the existing rls-org-a / rls-org-b
+# organizations (re-used from block (l-prep)) and asserts:
+#   (q) cross-tenant SELECT invisibility under SET LOCAL watchkeeper.org;
+#   (r) cross-tenant INSERT rejected by WITH CHECK;
+#   (s) FK violation on non-existent organization_id raises 23503;
+#   (t) unset GUC visibility fails closed (zero rows visible);
+#   (u) CHECK constraints reject empty participants and empty subject;
+#   (v) CHECK constraint rejects invalid status enum value.
+# ---------------------------------------------------------------------------
+echo ">> migrate-schema-test: (q-prep) seed one k2k conversation per org"
+# Hermetic reseed: remove any prior rls-k2k-* rows so re-runs stay
+# deterministic. Order is independent — k2k_conversations has no
+# inbound FKs at this layer.
+"${PSQL[@]}" >/dev/null <<SQL
+BEGIN;
+DELETE FROM watchkeeper.k2k_conversations WHERE subject LIKE 'rls-k2k-%';
+INSERT INTO watchkeeper.k2k_conversations (
+  id, organization_id, participants, subject, status,
+  token_budget, tokens_used
+) VALUES
+  (gen_random_uuid(), '${org_a_id}', ARRAY['bot-a','bot-b'],
+   'rls-k2k-a', 'open', 1000, 0),
+  (gen_random_uuid(), '${org_b_id}', ARRAY['bot-c','bot-d'],
+   'rls-k2k-b', 'open', 1000, 0);
+COMMIT;
+SQL
+echo "OK: seeded one k2k conversation per org"
+
+echo ">> migrate-schema-test: (q) RLS cross-tenant SELECT invisibility on k2k_conversations"
+k2k_visible=$("${PSQL[@]}" -tA <<SQL
+BEGIN;
+SET ROLE wk_org_role;
+SET LOCAL watchkeeper.org = '${org_a_id}';
+SELECT count(*) FROM watchkeeper.k2k_conversations WHERE subject LIKE 'rls-k2k-%';
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+if [[ "${k2k_visible}" != "1" ]]; then
+  fail "RLS cross-tenant SELECT on k2k_conversations expected 1 (orgA-only); got '${k2k_visible}'"
+fi
+echo "OK: under orgA GUC, only orgA's k2k conversation visible (count=${k2k_visible})"
+
+echo ">> migrate-schema-test: (r) RLS WITH CHECK rejects cross-tenant k2k INSERT"
+k2k_insert_output=$("${PSQL[@]}" <<SQL 2>&1 || true
+BEGIN;
+SET ROLE wk_org_role;
+SET LOCAL watchkeeper.org = '${org_a_id}';
+INSERT INTO watchkeeper.k2k_conversations (
+  id, organization_id, participants, subject
+) VALUES (
+  gen_random_uuid(), '${org_b_id}', ARRAY['bot-x'], 'rls-k2k-cross-tenant'
+);
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${k2k_insert_output}" | grep -Eq 'row-level security|42501'; then
+  fail "expected RLS INSERT on k2k_conversations to be rejected; got: ${k2k_insert_output}"
+fi
+echo "OK: cross-tenant k2k_conversations INSERT rejected by WITH CHECK"
+
+echo ">> migrate-schema-test: (s) FK violation on non-existent k2k.organization_id"
+fk_k2k_output=$("${PSQL[@]}" <<'SQL' 2>&1 || true
+BEGIN;
+SAVEPOINT before_fk;
+INSERT INTO watchkeeper.k2k_conversations (
+  id, organization_id, participants, subject
+) VALUES (
+  gen_random_uuid(), gen_random_uuid(), ARRAY['bot-x'], 'rls-k2k-fk-attempt'
+);
+ROLLBACK TO SAVEPOINT before_fk;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${fk_k2k_output}" | grep -qi 'violates foreign key constraint'; then
+  fail "expected FK violation on k2k_conversations.organization_id; got: ${fk_k2k_output}"
+fi
+echo "OK: k2k_conversations with non-existent organization_id rejected by FK"
+
+echo ">> migrate-schema-test: (t) RLS empty GUC fails closed on k2k_conversations"
+k2k_empty=$("${PSQL[@]}" -tA <<'SQL'
+BEGIN;
+SET ROLE wk_org_role;
+-- No SET LOCAL watchkeeper.org. Policy evaluates against NULL → zero rows.
+SELECT count(*) FROM watchkeeper.k2k_conversations;
+RESET ROLE;
+ROLLBACK;
+SQL
+)
+if [[ "${k2k_empty}" != "0" ]]; then
+  fail "RLS empty-GUC k2k_conversations visibility expected 0 (fail-closed); got '${k2k_empty}'"
+fi
+echo "OK: unset watchkeeper.org GUC sees zero k2k_conversations rows (fail-closed)"
+
+echo ">> migrate-schema-test: (u) CHECK constraints reject empty participants and empty subject"
+chk_participants=$("${PSQL[@]}" <<SQL 2>&1 || true
+BEGIN;
+SAVEPOINT before_chk;
+INSERT INTO watchkeeper.k2k_conversations (
+  id, organization_id, participants, subject
+) VALUES (
+  gen_random_uuid(), '${org_a_id}', ARRAY[]::text[], 'rls-k2k-empty-participants'
+);
+ROLLBACK TO SAVEPOINT before_chk;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${chk_participants}" | grep -qi 'check constraint'; then
+  fail "expected CHECK violation on empty participants; got: ${chk_participants}"
+fi
+echo "OK: empty participants rejected by CHECK"
+
+chk_subject=$("${PSQL[@]}" <<SQL 2>&1 || true
+BEGIN;
+SAVEPOINT before_chk;
+INSERT INTO watchkeeper.k2k_conversations (
+  id, organization_id, participants, subject
+) VALUES (
+  gen_random_uuid(), '${org_a_id}', ARRAY['bot-x'], '   '
+);
+ROLLBACK TO SAVEPOINT before_chk;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${chk_subject}" | grep -qi 'check constraint'; then
+  fail "expected CHECK violation on whitespace-only subject; got: ${chk_subject}"
+fi
+echo "OK: whitespace-only subject rejected by CHECK"
+
+echo ">> migrate-schema-test: (v) CHECK constraint rejects invalid status enum"
+chk_status=$("${PSQL[@]}" <<SQL 2>&1 || true
+BEGIN;
+SAVEPOINT before_chk;
+INSERT INTO watchkeeper.k2k_conversations (
+  id, organization_id, participants, subject, status
+) VALUES (
+  gen_random_uuid(), '${org_a_id}', ARRAY['bot-x'], 'rls-k2k-bogus-status', 'bogus'
+);
+ROLLBACK TO SAVEPOINT before_chk;
+ROLLBACK;
+SQL
+)
+if ! printf '%s' "${chk_status}" | grep -qi 'check constraint'; then
+  fail "expected CHECK violation on invalid status enum; got: ${chk_status}"
+fi
+echo "OK: invalid status enum rejected by CHECK"
 
 echo "ALL schema assertions passed"
