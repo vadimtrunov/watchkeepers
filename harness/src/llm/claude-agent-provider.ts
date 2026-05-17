@@ -1,0 +1,477 @@
+/**
+ * {@link ClaudeAgentProvider} — concrete {@link LLMProvider} adapter
+ * wrapping `@anthropic-ai/claude-agent-sdk` (M5.7.c). Coexists with the
+ * {@link ClaudeCodeProvider} (raw Anthropic Messages API); operators
+ * pick between them via a future `Manifest.provider` field
+ * (M5.7.c.a follow-up below).
+ *
+ * # Credential resolution
+ *
+ * The Agent SDK auto-detects the local `claude` CLI subscription state
+ * (Pro/Max) when no API key is present; when an API key IS configured,
+ * the SDK uses it. This provider stays out of `process.env` directly:
+ * the {@link ClaudeAgentProviderOptions.apiKey} field is consumed by the
+ * caller (the harness boot path threading a secret resolved via
+ * `harness/src/secrets/env.ts`, M5.7.a), and `apiKey === undefined`
+ * lets the SDK fall back to subscription auth — the path the Phase 1
+ * DoD §7 #1 "operator runs Claude Code they already have" target
+ * documents.
+ *
+ * # Phase scope
+ *
+ * - `complete()` fully implemented (M5.7.c slices 1–4).
+ * - `stream()` fully implemented (M5.7.c slice 4); delegates the dispatch
+ *   loop to {@link interceptStream} in tool-bridge-interceptor.ts.
+ * - `reportCost()` shares the in-memory ledger pattern with
+ *   {@link ClaudeCodeProvider}.
+ * - `countTokens()` raises {@link LLMError.providerUnavailable} pending
+ *   M5.7.c.c.
+ */
+
+import { query } from "@anthropic-ai/claude-agent-sdk";
+
+import { anthropicApiKeyEnvOverride } from "../secrets/env.js";
+
+import { LLMError } from "./errors.js";
+import type { LLMProvider } from "./provider.js";
+import { interceptComplete, interceptStream, type AbortBag } from "./tool-bridge-interceptor.js";
+import { buildStubMcpServer } from "./tool-bridge-mcp-stub-server.js";
+import { MCP_SERVER_NAME, buildCodec, type ToolNameCodec } from "./tool-bridge-name-codec.js";
+import type {
+  CompleteRequest,
+  CompleteResponse,
+  CountTokensRequest,
+  Message,
+  Model,
+  StreamHandler,
+  StreamRequest,
+  StreamSubscription,
+  ToolDefinition,
+  Usage,
+} from "./types.js";
+
+/**
+ * Constructor options. All fields are optional — the zero-config path
+ * (`new ClaudeAgentProvider()`) targets a host where `claude` CLI has
+ * already been authenticated via subscription.
+ */
+export interface ClaudeAgentProviderOptions {
+  /**
+   * Optional API key. When undefined, the Agent SDK auto-detects the
+   * local `claude` CLI subscription state. When defined, the SDK uses
+   * the key. The provider does NOT read the key from the environment
+   * directly — the boot path threads a resolved value through here.
+   */
+  readonly apiKey?: string;
+  /**
+   * Reserved for future fallback wiring (mirrors
+   * {@link ClaudeCodeProvider.defaultModel}).
+   */
+  readonly defaultModel?: Model;
+  /**
+   * Optional path override for the `claude` executable. When undefined
+   * the SDK walks `PATH`.
+   */
+  readonly pathToClaudeCodeExecutable?: string;
+  /**
+   * Test seam — replaces the real `query` import. Production callers
+   * MUST NOT supply this; the only legitimate use is the harness vitest
+   * suite. Mirrors the secret-source DI pattern (M5.7.a) — keep the
+   * pluggable seam tiny so it cannot be misused.
+   */
+  readonly queryImpl?: typeof query;
+}
+
+interface MutableUsage {
+  model: Model;
+  inputTokens: number;
+  outputTokens: number;
+  costCents: number;
+  metadata?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Concrete {@link LLMProvider} backed by `@anthropic-ai/claude-agent-sdk`.
+ * See module doc comment.
+ */
+export class ClaudeAgentProvider implements LLMProvider {
+  private readonly apiKey: string | undefined;
+  public readonly defaultModel: Model | undefined;
+  private readonly pathToExecutable: string | undefined;
+  private readonly queryImpl: typeof query;
+  private readonly costs = new Map<string, MutableUsage>();
+
+  public constructor(opts: ClaudeAgentProviderOptions = {}) {
+    this.apiKey = opts.apiKey;
+    this.defaultModel = opts.defaultModel;
+    this.pathToExecutable = opts.pathToClaudeCodeExecutable;
+    this.queryImpl = opts.queryImpl ?? query;
+  }
+
+  public async complete(req: CompleteRequest): Promise<CompleteResponse> {
+    validateModel(req.model);
+    validateMessages(req.messages);
+    validateTools(req.tools);
+
+    const prompt = buildPromptFromMessages(req.messages);
+    const codec: ToolNameCodec = buildCodec(req.tools ?? []);
+    const options =
+      req.tools !== undefined && req.tools.length > 0
+        ? this.buildOptions(req, { codec, tools: req.tools })
+        : this.buildOptions(req);
+
+    let iter: ReturnType<typeof query>;
+    try {
+      iter =
+        options === undefined ? this.queryImpl({ prompt }) : this.queryImpl({ prompt, options });
+    } catch (e) {
+      throw mapAgentError(e);
+    }
+
+    let turn;
+    try {
+      turn = await interceptComplete(iter, codec, req.model);
+    } catch (e) {
+      throw mapAgentError(e);
+    }
+
+    if (turn.errorMessage !== undefined) {
+      return {
+        content: turn.text,
+        toolCalls: turn.toolCalls,
+        finishReason: turn.finishReason,
+        usage: turn.usage,
+        errorMessage: turn.errorMessage,
+      };
+    }
+    return {
+      content: turn.text,
+      toolCalls: turn.toolCalls,
+      finishReason: turn.finishReason,
+      usage: turn.usage,
+    };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await -- Promise return is the interface contract; body validates synchronously and starts the dispatch loop as a fire-and-forget promise.
+  public async stream(req: StreamRequest, handler: StreamHandler): Promise<StreamSubscription> {
+    validateModel(req.model);
+    validateMessages(req.messages);
+    // Handler check precedes tool check to mirror the FakeProvider /
+    // ClaudeCodeProvider ordering: a nil handler is the most fundamental
+    // shape error.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- TS forbids null at the type level, but runtime callers crossing JSON-RPC / FFI boundaries can still pass null.
+    if (handler === null || handler === undefined) {
+      throw LLMError.invalidHandler();
+    }
+    validateTools(req.tools);
+
+    const prompt = buildPromptFromMessages(req.messages);
+    const codec: ToolNameCodec = buildCodec(req.tools ?? []);
+    // includePartialMessages: true asks the Agent SDK to emit raw
+    // streaming-event sub-messages (text_delta, input_json_delta, ...)
+    // as the assistant turn unfolds, which we translate into the
+    // portable StreamEvent kinds. Without this flag the SDK only emits
+    // a single complete SDKAssistantMessage per turn and we lose
+    // incremental text.
+    const options =
+      req.tools !== undefined && req.tools.length > 0
+        ? this.buildOptions(req, { partial: true, codec, tools: req.tools })
+        : this.buildOptions(req, { partial: true });
+
+    let iter: ReturnType<typeof query>;
+    try {
+      iter =
+        options === undefined ? this.queryImpl({ prompt }) : this.queryImpl({ prompt, options });
+    } catch (e) {
+      throw mapAgentError(e);
+    }
+
+    const sub = new ClaudeAgentStreamSubscription(iter);
+    void sub.startDispatch(handler, codec, req.model);
+    return sub;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await, @typescript-eslint/no-unused-vars -- M5.7.c.c slice; stub matches the LLMProvider contract.
+  public async countTokens(_req: CountTokensRequest): Promise<number> {
+    throw LLMError.providerUnavailable(
+      "ClaudeAgentProvider.countTokens is not yet implemented (M5.7.c.c)",
+    );
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await -- Promise return is the interface contract; bookkeeping is synchronous.
+  public async reportCost(runtimeID: string, usage: Usage): Promise<void> {
+    const prev = this.costs.get(runtimeID);
+    if (prev === undefined) {
+      const fresh: MutableUsage = {
+        model: usage.model,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        costCents: usage.costCents,
+      };
+      if (usage.metadata !== undefined) fresh.metadata = usage.metadata;
+      this.costs.set(runtimeID, fresh);
+      return;
+    }
+    prev.inputTokens += usage.inputTokens;
+    prev.outputTokens += usage.outputTokens;
+    prev.costCents += usage.costCents;
+    prev.model = usage.model;
+    if (usage.metadata !== undefined) prev.metadata = usage.metadata;
+  }
+
+  /**
+   * Test-facing accessor for the per-runtimeID cost ledger. Returns a
+   * defensive snapshot (not the live accumulator).
+   */
+  public getReportedCost(runtimeID: string): Usage | undefined {
+    const v = this.costs.get(runtimeID);
+    if (v === undefined) return undefined;
+    return { ...v };
+  }
+
+  private buildOptions(
+    req: CompleteRequest | StreamRequest,
+    extras?: {
+      readonly partial?: boolean;
+      readonly codec?: ToolNameCodec;
+      readonly tools?: readonly ToolDefinition[];
+    },
+  ): Parameters<typeof query>[0]["options"] {
+    // The Agent SDK Options type carries dozens of fields; we set only
+    // the handful that matter for a single-turn complete() / stream()
+    // and let the SDK default the rest.
+    const opts: Record<string, unknown> = { model: req.model };
+    if (req.system !== undefined && req.system !== "") {
+      opts.systemPrompt = req.system;
+    }
+    if (this.pathToExecutable !== undefined) {
+      opts.pathToClaudeCodeExecutable = this.pathToExecutable;
+    }
+    if (extras?.partial === true) {
+      // Asks the Agent SDK to emit SDKPartialAssistantMessage events
+      // (text_delta / input_json_delta / content_block_*) so stream()
+      // can dispatch incremental events to the handler. Off by default
+      // because complete() does not need them.
+      opts.includePartialMessages = true;
+    }
+    if (this.apiKey !== undefined && this.apiKey !== "") {
+      // Forward the resolved credential via the env override helper from
+      // harness/src/secrets/env.ts — the literal credential name lives only
+      // in that module (M5.7.a grep-invariant).
+      opts.env = { ...process.env, ...anthropicApiKeyEnvOverride(this.apiKey) };
+    }
+    if (extras?.codec !== undefined && extras.tools !== undefined && extras.tools.length > 0) {
+      const stub = buildStubMcpServer(extras.tools, extras.codec);
+      opts.mcpServers = { [MCP_SERVER_NAME]: stub.sdkConfig };
+    }
+    return opts;
+  }
+}
+
+/* -----------------------------------------------------------------------
+ * Validation helpers — symmetric with ClaudeCodeProvider's static checks.
+ * --------------------------------------------------------------------- */
+
+function validateModel(m: Model): void {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- TS forbids null/undefined at the type level, but runtime callers crossing JSON-RPC / FFI boundaries can still pass them.
+  if (m === undefined || m === null || m === "") {
+    throw LLMError.modelNotSupported();
+  }
+}
+
+function validateMessages(messages: readonly Message[]): void {
+  if (messages.length === 0) {
+    throw LLMError.invalidPrompt();
+  }
+}
+
+function validateTools(tools: readonly ToolDefinition[] | undefined): void {
+  if (tools === undefined) return;
+  for (const t of tools) {
+    if (t.inputSchema === null) {
+      throw LLMError.invalidPrompt();
+    }
+  }
+}
+
+/* -----------------------------------------------------------------------
+ * Request / response translation.
+ * --------------------------------------------------------------------- */
+
+function buildPromptFromMessages(messages: readonly Message[]): string {
+  // Phase-scope simplification: collapse user + assistant turns into one
+  // prompt string. Inbound role=tool folding is the cross-cutting M5.3.c.c.c
+  // slice (same deferral as claude-code-provider.ts). System messages lift
+  // to options.systemPrompt; tool messages are skipped at this layer.
+  const parts: string[] = [];
+  for (const m of messages) {
+    if (m.role === "user") parts.push(m.content);
+    else if (m.role === "assistant") parts.push(`[assistant prior turn] ${m.content}`);
+    // role === 'system' is handled in buildOptions
+    // role === 'tool' is M5.3.c.c.c
+  }
+  return parts.join("\n\n");
+}
+
+function safeJsonStringify(v: unknown): string {
+  try {
+    const s = JSON.stringify(v);
+    // JSON.stringify CAN return undefined for symbol/function root values;
+    // TS types do not reflect this, hence the explicit runtime guard.
+    return typeof s === "string" ? s : "[unserialisable error value]";
+  } catch {
+    return "[unserialisable error value]";
+  }
+}
+
+function mapAgentError(e: unknown): LLMError {
+  if (e instanceof LLMError) return e;
+  if (e === null || e === undefined) return LLMError.providerUnavailable();
+  // Stringify defensively — Object's default toString returns
+  // `[object Object]` and erases the actual cause. Prefer Error.message;
+  // fall back to JSON for plain objects; final fallback is String(e) for
+  // primitives.
+  const message =
+    e instanceof Error
+      ? e.message
+      : typeof e === "object"
+        ? safeJsonStringify(e)
+        : // eslint-disable-next-line @typescript-eslint/no-base-to-string -- the typeof guards above narrow `e` to a primitive here; String() coercion is the canonical path.
+          String(e);
+  // Agent SDK error class taxonomy is less rich than the raw Anthropic
+  // SDK's typed errors; we pattern-match on the message until a typed
+  // surface lands upstream. The seven LLMErrorCode sentinels cover the
+  // user-visible cases — additional codes upstream are folded into
+  // `provider_unavailable` (network / auth / billing) or
+  // `stream_closed` (caller aborted).
+  if (/abort/i.test(message)) {
+    return LLMError.streamClosed(`agent SDK aborted: ${message}`, e);
+  }
+  if (/auth/i.test(message) || /unauthor/i.test(message) || /credential/i.test(message)) {
+    return LLMError.providerUnavailable(`agent SDK auth failure: ${message}`, e);
+  }
+  if (/rate.?limit/i.test(message)) {
+    return LLMError.providerUnavailable(`agent SDK rate-limited: ${message}`, e);
+  }
+  if (/max.?tokens/i.test(message)) {
+    return LLMError.tokenLimitExceeded(`agent SDK token limit: ${message}`, e);
+  }
+  return LLMError.providerUnavailable(message, e);
+}
+
+/**
+ * Internal {@link StreamSubscription} backing
+ * {@link ClaudeAgentProvider.stream}. Mirrors the
+ * `ClaudeStreamSubscription` semantics in claude-code-provider.ts:
+ * one-shot stop / cause-latching / first stop() interrupts the Agent
+ * SDK Query iterator. All event parsing and dispatch are delegated to
+ * `interceptStream` from tool-bridge-interceptor.ts.
+ */
+class ClaudeAgentStreamSubscription implements StreamSubscription {
+  // iter is stored as the original iterable/iterator so that interceptStream
+  // can call iter[Symbol.asyncIterator]() and also reach iter.interrupt().
+  private readonly iter: AsyncIterable<unknown> & { interrupt?: () => Promise<void> };
+  private readonly maybeQuery: { interrupt: () => Promise<void> } | undefined;
+  private _stopped = false;
+  private _cause: unknown = undefined;
+  private _stopPromise: Promise<void> | undefined;
+
+  public constructor(iter: AsyncIterable<unknown> | AsyncIterator<unknown>) {
+    // Agent SDK's Query is an AsyncGenerator (has both [Symbol.asyncIterator]
+    // and the iterator protocol). We accept either shape and normalise to the
+    // AsyncIterable side so interceptStream can call [Symbol.asyncIterator]()
+    // itself (and reach .interrupt() on the original object).
+    if (typeof (iter as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
+      this.iter = iter as AsyncIterable<unknown> & { interrupt?: () => Promise<void> };
+    } else {
+      // Wrap bare AsyncIterator in a one-shot AsyncIterable.
+      const it = iter as AsyncIterator<unknown>;
+      this.iter = {
+        [Symbol.asyncIterator](): AsyncIterator<unknown> {
+          return it;
+        },
+      };
+    }
+    this.maybeQuery =
+      typeof (iter as { interrupt?: unknown }).interrupt === "function"
+        ? (iter as unknown as { interrupt: () => Promise<void> })
+        : undefined;
+  }
+
+  public get isStopped(): boolean {
+    return this._stopped;
+  }
+
+  public markStopped(cause: unknown): void {
+    if (this._stopped) return;
+    this._stopped = true;
+    this._cause = cause;
+  }
+
+  public async startDispatch(
+    handler: StreamHandler,
+    codec: ToolNameCodec,
+    streamModel: Model,
+  ): Promise<void> {
+    // AbortBag adapter: interceptStream reads isStopped in its while-loop
+    // guard and calls markStopped when the handler throws or the SDK errors.
+    // Built via a standalone factory to avoid a `this`-alias lint violation —
+    // the factory receives the subscription as a plain parameter.
+    const abortBag = makeAbortBagFor(this);
+    await interceptStream(this.iter, handler, codec, streamModel, abortBag);
+    // Mark stopped so callers polling sub.isStopped know the dispatch loop
+    // has fully completed (including the message_stop event delivery).
+    // markStopped is idempotent — calling it here is safe even if the
+    // interceptor already called it via abortBag.markStopped().
+    this.markStopped(undefined);
+  }
+
+  public async stop(): Promise<void> {
+    if (this._stopPromise !== undefined) {
+      return this._stopPromise;
+    }
+    this._stopPromise = this._stopImpl();
+    return this._stopPromise;
+  }
+
+  private async _stopImpl(): Promise<void> {
+    this._stopped = true;
+    if (this.maybeQuery !== undefined) {
+      try {
+        await this.maybeQuery.interrupt();
+      } catch {
+        // Best-effort interrupt: re-interrupting an already-finished
+        // query is a no-op in spec but tolerate exceptions defensively.
+      }
+    }
+    if (this._cause !== undefined) {
+      throw LLMError.streamClosed(undefined, this._cause);
+    }
+  }
+}
+
+/* -----------------------------------------------------------------------
+ * AbortBag factory — avoids a `this`-alias lint violation inside
+ * `startDispatch` by receiving the subscription as a plain parameter.
+ * The getter/setter pair satisfies AbortBag's `isStopped: boolean`
+ * structural shape: TypeScript's checker accepts accessor pairs wherever
+ * a plain boolean property is expected, since both are readable/writable.
+ * --------------------------------------------------------------------- */
+
+function makeAbortBagFor(sub: ClaudeAgentStreamSubscription): AbortBag {
+  return {
+    get isStopped(): boolean {
+      return sub.isStopped;
+    },
+    set isStopped(v: boolean) {
+      // The interceptor (tool-bridge-interceptor.ts) only ever writes true
+      // via the dispatch loop's error / handler-throw paths. Writes of false
+      // are intentionally no-ops here — once a subscription is stopped, the
+      // cause-latch in markStopped should not be cleared.
+      if (v) sub.markStopped(undefined);
+    },
+    markStopped: (cause: unknown) => {
+      sub.markStopped(cause);
+    },
+  };
+}

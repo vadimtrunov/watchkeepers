@@ -91,3 +91,18 @@ export function getAnthropicApiKey(source: SecretSource): string | undefined {
   if (v === undefined || v === "") return undefined;
   return v;
 }
+
+/**
+ * Build a single-entry env-override object that places the resolved
+ * Anthropic API key under the SDK's expected env-var name. Used by
+ * `ClaudeAgentProvider` to forward a resolved credential into the
+ * Agent SDK's child-process env without the credential-name literal
+ * leaking outside this module (M5.7.a grep-invariant).
+ *
+ * Returns `{}` when the value is undefined or empty, so callers can
+ * spread the result unconditionally.
+ */
+export function anthropicApiKeyEnvOverride(value: string | undefined): Record<string, string> {
+  if (value === undefined || value === "") return {};
+  return { ANTHROPIC_API_KEY: value };
+}

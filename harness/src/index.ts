@@ -18,12 +18,40 @@ import { fileURLToPath } from "node:url";
 
 import { handleLine } from "./dispatcher.js";
 import { RpcClient, notification, serialize } from "./jsonrpc.js";
+import {
+  ClaudeAgentProvider,
+  type ClaudeAgentProviderOptions,
+} from "./llm/claude-agent-provider.js";
 import { ClaudeCodeProvider } from "./llm/claude-code-provider.js";
 import { LLM_CAPABILITIES } from "./llm/methods.js";
 import type { NotificationWriter } from "./llm/notification-writer.js";
 import type { LLMProvider } from "./llm/provider.js";
 import { HARNESS_VERSION, createDefaultRegistry, type ShutdownSignal } from "./methods.js";
 import { EnvSecretSource, getAnthropicApiKey, type SecretSource } from "./secrets/env.js";
+
+/**
+ * Env var (read via the {@link SecretSource} adapter) the operator sets
+ * to pick the LLM provider for the harness. Recognised values are
+ * declared in {@link PROVIDER_KINDS}; unset / empty defaults to
+ * `anthropic-api` (backwards-compat with M5.7.a boot path); unrecognised
+ * values fall back to the default and emit a WARN line.
+ *
+ * Phase scope (M5.7.c slice 2): instance-wide toggle only.
+ * Per-Watchkeeper selection via a future `Manifest.provider` field is a
+ * Phase 2 follow-up — it composes on top of this env-level default
+ * without breaking the contract here.
+ */
+export const PROVIDER_ENV_KEY = "WATCHKEEPER_LLM_PROVIDER";
+
+/**
+ * Closed set of accepted {@link PROVIDER_ENV_KEY} values. `anthropic-api`
+ * routes through {@link ClaudeCodeProvider} (raw Messages API,
+ * API-key-only). `claude-agent` routes through {@link ClaudeAgentProvider}
+ * (Claude Agent SDK; subscription auto-detect OR API key).
+ */
+export const PROVIDER_KINDS = ["anthropic-api", "claude-agent"] as const;
+export type ProviderKind = (typeof PROVIDER_KINDS)[number];
+const PROVIDER_DEFAULT: ProviderKind = "anthropic-api";
 
 /**
  * Wire stdin → dispatcher → stdout, then resolve when the input stream
@@ -185,12 +213,42 @@ export function buildProviderFromSecrets(
   secrets: SecretSource,
   stderr: NodeJS.WritableStream = process.stderr,
 ): LLMProvider | undefined {
+  const kind = resolveProviderKind(secrets, stderr);
   const apiKey = getAnthropicApiKey(secrets);
+
+  if (kind === "claude-agent") {
+    // Agent SDK auto-detects the local `claude` CLI subscription when
+    // no API key is present, so missing-key is NOT a degraded path
+    // here — zero-config is the documented subscription mode (Phase 1
+    // DoD §7 #1).
+    const opts: ClaudeAgentProviderOptions = apiKey !== undefined ? { apiKey } : {};
+    return new ClaudeAgentProvider(opts);
+  }
+
+  // kind === "anthropic-api": raw Messages API requires an API key;
+  // its absence is the degraded mode preserved from M5.7.a.
   if (apiKey !== undefined) {
     return new ClaudeCodeProvider({ apiKey });
   }
   stderr.write("WARN: no Anthropic API key — LLM methods unavailable\n");
   return undefined;
+}
+
+/**
+ * Resolve the operator-selected provider kind from
+ * {@link PROVIDER_ENV_KEY}. Unset / empty / unrecognised values fall
+ * back to {@link PROVIDER_DEFAULT}; unrecognised values additionally
+ * emit a WARN line so a typo in the env config surfaces in the boot
+ * log instead of silently picking the default.
+ */
+function resolveProviderKind(secrets: SecretSource, stderr: NodeJS.WritableStream): ProviderKind {
+  const raw = secrets.get(PROVIDER_ENV_KEY);
+  if (raw === undefined || raw === "") return PROVIDER_DEFAULT;
+  if ((PROVIDER_KINDS as readonly string[]).includes(raw)) {
+    return raw as ProviderKind;
+  }
+  stderr.write(`WARN: unknown ${PROVIDER_ENV_KEY}=${raw}; falling back to ${PROVIDER_DEFAULT}\n`);
+  return PROVIDER_DEFAULT;
 }
 
 async function main(): Promise<void> {
