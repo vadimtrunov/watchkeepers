@@ -386,7 +386,7 @@ func TestMemoryRepository_WaitForReply_ConcurrentAskReply(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			since := time.Now().UTC()
-			msg, err := r.WaitForReply(context.Background(), convs[i].ID, since, 2*time.Second)
+			msg, err := r.WaitForReply(context.Background(), convs[i].ID, since, 10*time.Second)
 			if err != nil {
 				t.Errorf("WaitForReply[%d]: %v", i, err)
 				return

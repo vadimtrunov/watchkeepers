@@ -37,12 +37,17 @@
 --                                `k2k_conversations.participants` text[]
 --                                shape) round-trips without a FK
 --                                violation.
---   * body                     — message payload. Stored as text;
---                                M1.3.a's Go adapter accepts a
---                                `[]byte` and serialises via pgx as
---                                text. Encoding is the caller's
---                                responsibility — the peer tool layer
---                                treats this as opaque bytes.
+--   * body                     — message payload. Stored as `bytea`
+--                                because the `peer.Tool` API exposes
+--                                `Body []byte` as opaque bytes — a
+--                                future caller may legitimately pass
+--                                non-UTF-8 / arbitrary binary content
+--                                (e.g. a serialised protobuf for an
+--                                M1.3.c subscription delivery). A text
+--                                column would either reject invalid
+--                                UTF-8 inputs at the SQL layer or
+--                                silently corrupt them on round-trip;
+--                                `bytea` is the binary-safe choice.
 --   * direction                — closed-set enum `request | reply`,
 --                                CHECK-enforced.
 --   * created_at               — wall-clock of insert; defaults to now()
@@ -70,7 +75,7 @@ CREATE TABLE watchkeeper.k2k_messages (
   organization_id uuid NOT NULL
   REFERENCES watchkeeper.organization (id) ON DELETE RESTRICT,
   sender_watchkeeper_id text NOT NULL CHECK (length(btrim(sender_watchkeeper_id)) > 0),
-  body text NOT NULL,
+  body bytea NOT NULL CHECK (length(body) > 0),
   direction text NOT NULL CHECK (direction IN ('request', 'reply')),
   created_at timestamptz NOT NULL DEFAULT now()
 );

@@ -805,7 +805,7 @@ echo ">> migrate-schema-test: (w-prep) seed one k2k_messages row per org"
 "${PSQL[@]}" >/dev/null <<SQL
 BEGIN;
 DELETE FROM watchkeeper.k2k_messages
-WHERE body LIKE 'rls-k2k-msg-%';
+WHERE encode(body, 'escape') LIKE 'rls-k2k-msg-%';
 DELETE FROM watchkeeper.k2k_conversations
 WHERE subject LIKE 'rls-k2k-msg-%';
 WITH ca AS (
@@ -826,10 +826,10 @@ WITH ca AS (
 INSERT INTO watchkeeper.k2k_messages (
   id, conversation_id, organization_id, sender_watchkeeper_id, body, direction
 )
-SELECT gen_random_uuid(), ca.id, '${org_a_id}', 'bot-a', 'rls-k2k-msg-a-body', 'request'
+SELECT gen_random_uuid(), ca.id, '${org_a_id}', 'bot-a', convert_to('rls-k2k-msg-a-body', 'UTF8'), 'request'
 FROM ca
 UNION ALL
-SELECT gen_random_uuid(), cb.id, '${org_b_id}', 'bot-c', 'rls-k2k-msg-b-body', 'request'
+SELECT gen_random_uuid(), cb.id, '${org_b_id}', 'bot-c', convert_to('rls-k2k-msg-b-body', 'UTF8'), 'request'
 FROM cb;
 COMMIT;
 SQL
@@ -840,7 +840,7 @@ k2k_msg_visible=$("${PSQL[@]}" -tA <<SQL
 BEGIN;
 SET ROLE wk_org_role;
 SET LOCAL watchkeeper.org = '${org_a_id}';
-SELECT count(*) FROM watchkeeper.k2k_messages WHERE body LIKE 'rls-k2k-msg-%';
+SELECT count(*) FROM watchkeeper.k2k_messages WHERE encode(body, 'escape') LIKE 'rls-k2k-msg-%';
 RESET ROLE;
 ROLLBACK;
 SQL
@@ -864,7 +864,7 @@ SET LOCAL watchkeeper.org = '${org_a_id}';
 INSERT INTO watchkeeper.k2k_messages (
   id, conversation_id, organization_id, sender_watchkeeper_id, body, direction
 ) VALUES (
-  gen_random_uuid(), '${orgA_conv_id}', '${org_b_id}', 'bot-x', 'rls-k2k-msg-cross', 'request'
+  gen_random_uuid(), '${orgA_conv_id}', '${org_b_id}', 'bot-x', convert_to('rls-k2k-msg-cross', 'UTF8'), 'request'
 );
 RESET ROLE;
 ROLLBACK;
@@ -897,7 +897,7 @@ SAVEPOINT before_chk;
 INSERT INTO watchkeeper.k2k_messages (
   id, conversation_id, organization_id, sender_watchkeeper_id, body, direction
 ) VALUES (
-  gen_random_uuid(), '${orgA_conv_id}', '${org_a_id}', 'bot-x', 'b', 'bogus'
+  gen_random_uuid(), '${orgA_conv_id}', '${org_a_id}', 'bot-x', convert_to('b', 'UTF8'), 'bogus'
 );
 ROLLBACK TO SAVEPOINT before_chk;
 ROLLBACK;
@@ -914,7 +914,7 @@ SAVEPOINT before_chk;
 INSERT INTO watchkeeper.k2k_messages (
   id, conversation_id, organization_id, sender_watchkeeper_id, body, direction
 ) VALUES (
-  gen_random_uuid(), '${orgA_conv_id}', '${org_a_id}', '   ', 'b', 'request'
+  gen_random_uuid(), '${orgA_conv_id}', '${org_a_id}', '   ', convert_to('b', 'UTF8'), 'request'
 );
 ROLLBACK TO SAVEPOINT before_chk;
 ROLLBACK;

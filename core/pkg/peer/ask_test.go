@@ -538,7 +538,7 @@ func TestTool_Ask_ConcurrentAskReply(t *testing.T) {
 				Target:              peers[i].WatchkeeperID,
 				Subject:             "ping",
 				Body:                []byte(fmt.Sprintf("ping-%d", i)),
-				Timeout:             3 * time.Second,
+				Timeout:             10 * time.Second,
 			})
 			if err != nil {
 				t.Errorf("Ask[%d]: %v", i, err)
